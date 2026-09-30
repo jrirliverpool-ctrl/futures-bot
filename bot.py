@@ -4,7 +4,7 @@ from pathlib import Path
 import ccxt, pandas as pd, numpy as np, requests
 
 CFG = {
-    "exchange": "binance", "market": "future",
+    "exchange": "bybit", "market": "swap",
     "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
     "tf": "15m",
     "dc": 20, "ema_f": 20, "ema_s": 50, "atr_p": 14,
