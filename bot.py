@@ -1,6 +1,6 @@
 """
 ApexQuant v1 — Donchian breakout bot (paper trading).
-Diagnostic version: always writes state with per-symbol status.
+Phase: signal-collection — logs potential signals rejected by ATR filter.
 """
 import os, json, csv, traceback
 from datetime import datetime, timezone
@@ -22,6 +22,7 @@ CFG = {
 PAPER  = os.getenv("PAPER", "1") == "1"
 STATE  = Path("state.json")
 TRADES = Path("trades.csv")
+SIGNALS = Path("signals_log.csv")   # ← جدید
 TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
 TG_CHAT  = os.getenv("TG_CHAT", "").strip()
 
@@ -60,6 +61,15 @@ def log_trade(t):
         w.writerow(t)
 
 
+def log_signal(row_data):
+    """Log EVERY Donchian+EMA signal, whether or not ATR filter passed."""
+    is_new = not SIGNALS.exists()
+    with SIGNALS.open("a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(row_data.keys()))
+        if is_new: w.writeheader()
+        w.writerow(row_data)
+
+
 def make_exchange():
     klass = getattr(ccxt, CFG["exchange"])
     return klass({"enableRateLimit": True})
@@ -89,12 +99,15 @@ def fetch_closed(e, sym):
     return indicators(df)
 
 
-def signal(row):
-    if row.atr_pct < CFG["atr_min_pct"] or row.atr_pct > CFG["atr_max_pct"]:
-        return 0
+def raw_signal(row):
+    """Return +1/-1/0 for Donchian+EMA WITHOUT ATR filter."""
     if row.close > row.dc_h and row.ema_f > row.ema_s: return 1
     if row.close < row.dc_l and row.ema_f < row.ema_s: return -1
     return 0
+
+
+def atr_ok(row):
+    return CFG["atr_min_pct"] <= row.atr_pct <= CFG["atr_max_pct"]
 
 
 def size_position(eq, entry, sl):
@@ -122,7 +135,7 @@ def main():
             tg(f"❌ exchange init failed: {ex}")
             save_state(st); return
 
-        # 2. fetch all symbols
+        # 2. fetch
         data = {}
         for sym in CFG["symbols"]:
             try:
@@ -148,7 +161,39 @@ def main():
             tg(f"   bar already processed: {latest_ts}")
             save_state(st); return
 
-        # 4. EXIT PASS
+        # 4. SCAN all symbols for signals (log even rejected ones)
+        rejected = 0
+        passed = 0
+        for sym, df in data.items():
+            if latest_ts not in df.index: continue
+            row = df.loc[latest_ts]
+            if np.isnan(row.atr) or row.atr <= 0: continue
+            sig = raw_signal(row)
+            if sig == 0: continue
+
+            ok = atr_ok(row)
+            log_signal({
+                "time":       str(latest_ts),
+                "symbol":     sym,
+                "signal":     "long" if sig == 1 else "short",
+                "close":      round(row.close, 4),
+                "atr_pct":    round(row.atr_pct, 3),
+                "atr_min":    CFG["atr_min_pct"],
+                "atr_max":    CFG["atr_max_pct"],
+                "passed":     int(ok),
+            })
+            if ok:
+                passed += 1
+            else:
+                rejected += 1
+                print(f"   ⚠️ {sym} {('long' if sig==1 else 'short')} "
+                      f"REJECTED — atr%={row.atr_pct:.3f} not in "
+                      f"[{CFG['atr_min_pct']},{CFG['atr_max_pct']}]")
+
+        st["symbols_status"]["__signals_passed"]   = passed
+        st["symbols_status"]["__signals_rejected"] = rejected
+
+        # 5. EXIT PASS
         keep = []
         for p in st["positions"]:
             if p["symbol"] not in data: keep.append(p); continue
@@ -195,7 +240,7 @@ def main():
             keep.append(p)
         st["positions"] = keep
 
-        # 5. ENTRY PASS
+        # 6. ENTRY PASS (only signals that passed ATR filter)
         held = {p["symbol"] for p in st["positions"]}
         opened = 0
         for sym, df in data.items():
@@ -204,8 +249,8 @@ def main():
             if latest_ts not in df.index: continue
             row = df.loc[latest_ts]
             if np.isnan(row.atr) or row.atr <= 0: continue
-            sig = signal(row)
-            if sig == 0: continue
+            sig = raw_signal(row)
+            if sig == 0 or not atr_ok(row): continue
             side  = "long" if sig == 1 else "short"
             price = row.close * (1 + CFG["slip"] * (1 if sig == 1 else -1))
             if side == "long":
