@@ -1,6 +1,6 @@
 """
-ApexQuant v1 — Donchian breakout bot (paper trading).
-Phase: signal-collection — logs potential signals rejected by ATR filter.
+ApexQuant v1 — Donchian breakout bot (paper, diagnostic).
+Adds __scan to state.json: current condition values + historic frequency.
 """
 import os, json, csv, traceback
 from datetime import datetime, timezone
@@ -8,10 +8,9 @@ from pathlib import Path
 import ccxt, pandas as pd, numpy as np, requests
 
 CFG = {
-    "exchange": "kraken",
-    "market":   "spot",
-    "symbols":  ["BTC/USD", "ETH/USD", "SOL/USD"],
-    "tf":       "15m",
+    "exchange": "kraken", "market": "spot",
+    "symbols": ["BTC/USD", "ETH/USD", "SOL/USD"],
+    "tf": "15m",
     "dc": 20, "ema_f": 20, "ema_s": 50, "atr_p": 14,
     "atr_min_pct": 0.30, "atr_max_pct": 5.00,
     "risk": 0.01, "sl_atr": 1.5, "tp_r": 2.0,
@@ -22,7 +21,7 @@ CFG = {
 PAPER  = os.getenv("PAPER", "1") == "1"
 STATE  = Path("state.json")
 TRADES = Path("trades.csv")
-SIGNALS = Path("signals_log.csv")   # ← جدید
+SIGNALS = Path("signals_log.csv")
 TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
 TG_CHAT  = os.getenv("TG_CHAT", "").strip()
 
@@ -61,18 +60,16 @@ def log_trade(t):
         w.writerow(t)
 
 
-def log_signal(row_data):
-    """Log EVERY Donchian+EMA signal, whether or not ATR filter passed."""
+def log_signal(d):
     is_new = not SIGNALS.exists()
     with SIGNALS.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(row_data.keys()))
+        w = csv.DictWriter(f, fieldnames=list(d.keys()))
         if is_new: w.writeheader()
-        w.writerow(row_data)
+        w.writerow(d)
 
 
 def make_exchange():
-    klass = getattr(ccxt, CFG["exchange"])
-    return klass({"enableRateLimit": True})
+    return getattr(ccxt, CFG["exchange"])({"enableRateLimit": True})
 
 
 def indicators(df):
@@ -100,7 +97,6 @@ def fetch_closed(e, sym):
 
 
 def raw_signal(row):
-    """Return +1/-1/0 for Donchian+EMA WITHOUT ATR filter."""
     if row.close > row.dc_h and row.ema_f > row.ema_s: return 1
     if row.close < row.dc_l and row.ema_f < row.ema_s: return -1
     return 0
@@ -115,6 +111,38 @@ def size_position(eq, entry, sl):
     return (eq * CFG["risk"]) / r if r > 0 else 0.0
 
 
+def scan_symbol(df):
+    """Return current-state + historic frequency of each condition."""
+    last = df.iloc[-1]
+
+    # Clean history for stats
+    h = df.dropna(subset=["dc_h","dc_l","ema_f","ema_s","atr_pct"])
+    long_raw  = (h.close > h.dc_h) & (h.ema_f > h.ema_s)
+    short_raw = (h.close < h.dc_l) & (h.ema_f < h.ema_s)
+    in_atr    = (h.atr_pct >= CFG["atr_min_pct"]) & (h.atr_pct <= CFG["atr_max_pct"])
+
+    return {
+        "close":        round(float(last.close), 4),
+        "dc_h":         round(float(last.dc_h), 4) if not np.isnan(last.dc_h) else None,
+        "dc_l":         round(float(last.dc_l), 4) if not np.isnan(last.dc_l) else None,
+        "ema_f":        round(float(last.ema_f), 4),
+        "ema_s":        round(float(last.ema_s), 4),
+        "atr_pct":      round(float(last.atr_pct), 3),
+        "long_breakout":  bool(last.close > last.dc_h),
+        "long_trend":     bool(last.ema_f > last.ema_s),
+        "short_breakout": bool(last.close < last.dc_l),
+        "short_trend":    bool(last.ema_f < last.ema_s),
+        "long_gap_pct":   round((last.close - last.dc_h)/last.close*100, 3) if not np.isnan(last.dc_h) else None,
+        "short_gap_pct":  round((last.dc_l - last.close)/last.close*100, 3) if not np.isnan(last.dc_l) else None,
+        "ema_gap":        round(float(last.ema_f - last.ema_s), 4),
+        "hist_bars":      int(len(h)),
+        "hist_long_raw":  int(long_raw.sum()),
+        "hist_short_raw": int(short_raw.sum()),
+        "hist_long_pass": int((long_raw & in_atr).sum()),
+        "hist_short_pass":int((short_raw & in_atr).sum()),
+    }
+
+
 def main():
     st  = load_state()
     now = datetime.now(timezone.utc)
@@ -125,7 +153,6 @@ def main():
     tg(f"🤖 ApexQuant · {now:%Y-%m-%d %H:%M UTC} · PAPER={PAPER}")
 
     try:
-        # 1. init exchange
         try:
             e = make_exchange()
             st["symbols_status"]["__exchange_init"] = "ok"
@@ -135,18 +162,21 @@ def main():
             tg(f"❌ exchange init failed: {ex}")
             save_state(st); return
 
-        # 2. fetch
         data = {}
+        scan = {}
         for sym in CFG["symbols"]:
             try:
                 df = fetch_closed(e, sym)
                 data[sym] = df
+                scan[sym] = scan_symbol(df)
                 last = df.iloc[-1]
                 st["symbols_status"][sym] = (
                     f"ok · {len(df)} bars · close={last.close:.2f} · "
                     f"atr%={last.atr_pct:.2f}")
             except Exception as ex:
                 st["symbols_status"][sym] = f"{type(ex).__name__}: {str(ex)[:150]}"
+
+        st["symbols_status"]["__scan"] = scan
 
         if not data:
             st["last_error"] = "no data from any symbol"
@@ -156,44 +186,33 @@ def main():
         latest_ts = max(df.index[-1] for df in data.values())
         st["symbols_status"]["__latest_bar"] = str(latest_ts)
 
-        # 3. idempotency
         if st.get("last_bar_ts") == str(latest_ts):
             tg(f"   bar already processed: {latest_ts}")
             save_state(st); return
 
-        # 4. SCAN all symbols for signals (log even rejected ones)
-        rejected = 0
-        passed = 0
+        # ── SCAN for signals (log every raw signal) ───────────
+        rejected = passed = 0
         for sym, df in data.items():
             if latest_ts not in df.index: continue
             row = df.loc[latest_ts]
             if np.isnan(row.atr) or row.atr <= 0: continue
             sig = raw_signal(row)
             if sig == 0: continue
-
             ok = atr_ok(row)
             log_signal({
-                "time":       str(latest_ts),
-                "symbol":     sym,
-                "signal":     "long" if sig == 1 else "short",
-                "close":      round(row.close, 4),
-                "atr_pct":    round(row.atr_pct, 3),
-                "atr_min":    CFG["atr_min_pct"],
-                "atr_max":    CFG["atr_max_pct"],
-                "passed":     int(ok),
+                "time": str(latest_ts), "symbol": sym,
+                "signal": "long" if sig == 1 else "short",
+                "close": round(row.close, 4),
+                "atr_pct": round(row.atr_pct, 3),
+                "atr_min": CFG["atr_min_pct"], "atr_max": CFG["atr_max_pct"],
+                "passed": int(ok),
             })
-            if ok:
-                passed += 1
-            else:
-                rejected += 1
-                print(f"   ⚠️ {sym} {('long' if sig==1 else 'short')} "
-                      f"REJECTED — atr%={row.atr_pct:.3f} not in "
-                      f"[{CFG['atr_min_pct']},{CFG['atr_max_pct']}]")
-
+            if ok: passed += 1
+            else:  rejected += 1
         st["symbols_status"]["__signals_passed"]   = passed
         st["symbols_status"]["__signals_rejected"] = rejected
 
-        # 5. EXIT PASS
+        # ── EXIT PASS ─────────────────────────────────────────
         keep = []
         for p in st["positions"]:
             if p["symbol"] not in data: keep.append(p); continue
@@ -240,7 +259,7 @@ def main():
             keep.append(p)
         st["positions"] = keep
 
-        # 6. ENTRY PASS (only signals that passed ATR filter)
+        # ── ENTRY PASS ────────────────────────────────────────
         held = {p["symbol"] for p in st["positions"]}
         opened = 0
         for sym, df in data.items():
@@ -281,7 +300,6 @@ def main():
     finally:
         save_state(st)
         print(f"\ndone · open={len(st['positions'])} · eq=${st['equity']:.2f}")
-        print(f"status = {json.dumps(st['symbols_status'], indent=2)}")
 
 
 if __name__ == "__main__":
