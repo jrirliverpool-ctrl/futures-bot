@@ -1,7 +1,6 @@
 """
 ApexQuant v1 — Donchian breakout bot (paper trading).
-Diagnostic version: always writes state with per-symbol status,
-even on failure, so we can see what happened from GitHub alone.
+Diagnostic version: always writes state with per-symbol status.
 """
 import os, json, csv, traceback
 from datetime import datetime, timezone
@@ -13,13 +12,10 @@ CFG = {
     "market":   "spot",
     "symbols":  ["BTC/USD", "ETH/USD", "SOL/USD"],
     "tf":       "15m",
-
     "dc": 20, "ema_f": 20, "ema_s": 50, "atr_p": 14,
     "atr_min_pct": 0.30, "atr_max_pct": 5.00,
-
     "risk": 0.01, "sl_atr": 1.5, "tp_r": 2.0,
     "trail_act_r": 1.0, "trail_atr": 2.0,
-
     "fee": 0.0026, "slip": 0.0005, "max_pos": 3,
 }
 
@@ -109,14 +105,14 @@ def size_position(eq, entry, sl):
 def main():
     st  = load_state()
     now = datetime.now(timezone.utc)
-    st["last_run"]  = now.isoformat()
+    st["last_run"] = now.isoformat()
     st["last_error"] = None
     st["symbols_status"] = {}
 
     tg(f"🤖 ApexQuant · {now:%Y-%m-%d %H:%M UTC} · PAPER={PAPER}")
 
     try:
-        # ── 1. init exchange ─────────────────────────────
+        # 1. init exchange
         try:
             e = make_exchange()
             st["symbols_status"]["__exchange_init"] = "ok"
@@ -126,7 +122,7 @@ def main():
             tg(f"❌ exchange init failed: {ex}")
             save_state(st); return
 
-        # ── 2. fetch all symbols ─────────────────────────
+        # 2. fetch all symbols
         data = {}
         for sym in CFG["symbols"]:
             try:
@@ -135,8 +131,7 @@ def main():
                 last = df.iloc[-1]
                 st["symbols_status"][sym] = (
                     f"ok · {len(df)} bars · close={last.close:.2f} · "
-                    f"atr%={last.atr_pct:.2f}"
-                )
+                    f"atr%={last.atr_pct:.2f}")
             except Exception as ex:
                 st["symbols_status"][sym] = f"{type(ex).__name__}: {str(ex)[:150]}"
 
@@ -148,19 +143,18 @@ def main():
         latest_ts = max(df.index[-1] for df in data.values())
         st["symbols_status"]["__latest_bar"] = str(latest_ts)
 
-        # ── 3. idempotency ───────────────────────────────
+        # 3. idempotency
         if st.get("last_bar_ts") == str(latest_ts):
             tg(f"   bar already processed: {latest_ts}")
             save_state(st); return
 
-        # ── 4. EXIT PASS ─────────────────────────────────
+        # 4. EXIT PASS
         keep = []
         for p in st["positions"]:
             if p["symbol"] not in data: keep.append(p); continue
             df = data[p["symbol"]]
             if latest_ts not in df.index: keep.append(p); continue
             row = df.loc[latest_ts]
-
             hi, lo, entry = row.high, row.low, p["entry"]
             risk = abs(entry - p["initial_sl"])
             exit_p, why = None, None
@@ -170,7 +164,6 @@ def main():
             else:
                 if hi >= p["sl"]: exit_p, why = p["sl"], "SL"
                 elif lo <= p["tp"]: exit_p, why = p["tp"], "TP"
-
             if exit_p is not None:
                 sign = 1 if p["side"] == "long" else -1
                 gross = sign * (exit_p - entry) * p["qty"]
@@ -185,8 +178,6 @@ def main():
                     "mae": round(p.get("mae",0),3), "mfe": round(p.get("mfe",0),3)})
                 tg(f"✅ *{why}* {p['symbol']} R={r_mul:+.2f} PnL=${pnl:+.2f}")
                 continue
-
-            # update MFE/MAE and trailing for next bar
             if p["side"] == "long":
                 p["mfe"] = max(p.get("mfe",0), (hi-entry)/risk)
                 p["mae"] = min(p.get("mae",0), (lo-entry)/risk)
@@ -204,7 +195,7 @@ def main():
             keep.append(p)
         st["positions"] = keep
 
-        # ── 5. ENTRY PASS ────────────────────────────────
+        # 5. ENTRY PASS
         held = {p["symbol"] for p in st["positions"]}
         opened = 0
         for sym, df in data.items():
@@ -215,7 +206,6 @@ def main():
             if np.isnan(row.atr) or row.atr <= 0: continue
             sig = signal(row)
             if sig == 0: continue
-
             side  = "long" if sig == 1 else "short"
             price = row.close * (1 + CFG["slip"] * (1 if sig == 1 else -1))
             if side == "long":
@@ -226,7 +216,6 @@ def main():
                 tp = price - CFG["tp_r"]*CFG["sl_atr"]*row.atr
             qty = size_position(st["equity"], price, sl)
             if qty <= 0: continue
-
             st["positions"].append({
                 "symbol": sym, "side": side, "entry": price,
                 "initial_sl": sl, "sl": sl, "tp": tp, "qty": qty,
