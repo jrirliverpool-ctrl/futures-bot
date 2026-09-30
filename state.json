@@ -1,14 +1,4 @@
 {
   "positions": [],
-  "equity": 1000.0,
-  "last_run": "2026-09-30T23:09:28.652652+00:00",
-  "last_error": null,
-  "symbols_status": {
-    "__exchange_init": "ok",
-    "BTC/USD": "ok \u00b7 299 bars \u00b7 close=83633.10 \u00b7 atr%=0.21",
-    "ETH/USD": "ok \u00b7 299 bars \u00b7 close=2685.38 \u00b7 atr%=0.23",
-    "SOL/USD": "ok \u00b7 299 bars \u00b7 close=118.08 \u00b7 atr%=0.41",
-    "__latest_bar": "2026-09-30 22:45:00+00:00"
-  },
-  "last_bar_ts": "2026-09-30 22:45:00+00:00"
+  "equity": 1000.0
 }
