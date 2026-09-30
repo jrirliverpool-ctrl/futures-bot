@@ -1,7 +1,7 @@
 {
   "positions": [],
   "equity": 1000.0,
-  "last_run": "2026-09-30T23:20:20.993087+00:00",
+  "last_run": "2026-09-30T23:22:15.953459+00:00",
   "last_error": null,
   "symbols_status": {
     "__exchange_init": "ok",
@@ -70,10 +70,7 @@
         "hist_short_pass": 11
       }
     },
-    "__latest_bar": "2026-09-30 23:00:00+00:00",
-    "__signals_passed": 0,
-    "__signals_rejected": 0,
-    "__opened": 0
+    "__latest_bar": "2026-09-30 23:00:00+00:00"
   },
   "last_bar_ts": "2026-09-30 23:00:00+00:00"
 }
