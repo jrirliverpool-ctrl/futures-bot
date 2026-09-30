@@ -4,7 +4,8 @@ from pathlib import Path
 import ccxt, pandas as pd, numpy as np, requests
 
 CFG = {
-    "exchange": "bybit", "market": "swap",
+    "exchange": "okx", "market": "swap",
+"hostname": "us.okx.com",
     "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
     "tf": "15m",
     "dc": 20, "ema_f": 20, "ema_s": 50, "atr_p": 14,
@@ -37,10 +38,14 @@ def log(t):
         if new: w.writeheader()
         w.writerow(t)
 
-def exchange():
-    k = getattr(ccxt, CFG["exchange"]); e = k({"enableRateLimit": True})
-    if CFG["market"] == "future": e.options["defaultType"] = "future"
-    return e
+def make_exchange(cfg: Config):
+    klass = getattr(ccxt, cfg.exchange)
+    ex = klass({"enableRateLimit": True})
+    if "hostname" in cfg:
+        ex.hostname = cfg["hostname"]
+    if cfg.market_type == "future":
+        ex.options["defaultType"] = "future"
+    return ex
 
 def indicators(df):
     df = df.copy()
