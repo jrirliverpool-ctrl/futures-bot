@@ -1,0 +1,26 @@
+name: backtest
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install ccxt pandas numpy
+      - name: Run backtest
+        run: python backtest.py
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-report
+          path: |
+            backtest_report.json
+            backtest_trades.csv
