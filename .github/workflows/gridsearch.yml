@@ -1,0 +1,23 @@
+name: gridsearch
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install ccxt pandas numpy
+      - name: Run grid search
+        run: python grid_search.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-results
+          path: |
+            grid_results.csv
+            grid_report.json
