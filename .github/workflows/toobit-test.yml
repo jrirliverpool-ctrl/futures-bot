@@ -1,0 +1,54 @@
+name: Toobit API Connectivity Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-toobit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Test Toobit public API
+        run: |
+          python - <<'PY'
+          import requests
+          import time
+
+          print("=== TOOBIT CONNECTIVITY TEST ===")
+
+          url = "https://api.toobit.com/api/v1/ticker/24hr"
+
+          try:
+              r = requests.get(
+                  url,
+                  params={"symbol": "BTCUSDT"},
+                  timeout=15
+              )
+
+              print("HTTP STATUS:", r.status_code)
+              print("RESPONSE:", r.text[:1000])
+
+              if r.ok:
+                  print("PUBLIC API: OK")
+              else:
+                  print("PUBLIC API: FAILED")
+
+          except Exception as e:
+              print("CONNECTION ERROR:", repr(e))
+              raise
+
+          print("=== TEST FINISHED ===")
+          PY
