@@ -1,0 +1,88 @@
+import os
+import time
+import hmac
+import hashlib
+import requests
+
+# خواندن از GitHub Secrets
+API_KEY = os.environ.get("TOOBIT_API_KEY")
+API_SECRET = os.environ.get("TOOBIT_API_SECRET")
+
+if not API_KEY or not API_SECRET:
+    raise SystemExit("❌ API Keys not found in environment variables.")
+
+BASE_URL = "https://api.toobit.com"
+
+def sign(query_string: str) -> str:
+    return hmac.new(
+        API_SECRET.encode('utf-8'),
+        query_string.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+def private_get(endpoint: str, params: dict = None):
+    if params is None:
+        params = {}
+    
+    # اضافه کردن تایم‌استمپ
+    params["timestamp"] = int(time.time() * 1000)
+    
+    # ساخت query string
+    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    
+    # امضا
+    signature = sign(query_string)
+    
+    headers = {
+        "X-BH-APIKEY": API_KEY,  # هدر مخصوص Toobit
+    }
+    
+    url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
+
+# --- تست‌ها ---
+tests = []
+
+print("🔍 تست اتصال Private API (فقط خواندنی)...")
+
+# 1. تست موجودی فیوچرز
+try:
+    bal = private_get("/api/v1/futures/balance")
+    if "error" in bal:
+        print(f"❌ Futures Balance Failed: {bal['error']}")
+        tests.append(("Futures Balance", False))
+    else:
+        print(f"✅ Futures Balance: {bal}")
+        tests.append(("Futures Balance", True))
+except Exception as e:
+    print(f"❌ Futures Balance Error: {e}")
+    tests.append(("Futures Balance", False))
+
+# 2. تست پوزیشن‌ها
+try:
+    pos = private_get("/api/v1/futures/position")
+    if "error" in pos:
+        print(f"❌ Positions Failed: {pos['error']}")
+        tests.append(("Positions", False))
+    else:
+        print(f"✅ Positions: {pos}")
+        tests.append(("Positions", True))
+except Exception as e:
+    print(f"❌ Positions Error: {e}")
+    tests.append(("Positions", False))
+
+# --- نتیجه نهایی ---
+passed = sum(1 for _, ok in tests if ok)
+print(f"\n🏁 FINAL RESULT: {passed}/{len(tests)} PASSED")
+
+for name, ok in tests:
+    print(f"  {'✅' if ok else '❌'} {name}")
+
+if passed != len(tests):
+    raise SystemExit(1)
