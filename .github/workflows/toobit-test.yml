@@ -21,46 +21,72 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Test Toobit public APIs
+      - name: Test Toobit official public API
         run: |
           python - <<'PY'
           import requests
 
+          BASE = "https://api.toobit.com"
+
           tests = [
               (
                   "SERVER TIME",
-                  "https://api.toobit.com/en-US/api/v1/time",
+                  f"{BASE}/api/v1/time",
+                  {}
+              ),
+              (
+                  "EXCHANGE INFO",
+                  f"{BASE}/api/v1/exchangeInfo",
                   {}
               ),
               (
                   "FUTURES TICKER",
-                  "https://api.toobit.com/en-US/api/v1/quote/v1/contract/ticker/24hr",
+                  f"{BASE}/quote/v1/contract/ticker/24hr",
                   {"symbol": "BTC-SWAP-USDT"}
               ),
               (
                   "FUTURES PRICE",
-                  "https://api.toobit.com/en-US/api/v1/quote/v1/contract/ticker/price",
+                  f"{BASE}/quote/v1/contract/ticker/price",
                   {"symbol": "BTC-SWAP-USDT"}
+              ),
+              (
+                  "FUTURES MARK PRICE",
+                  f"{BASE}/quote/v1/markPrice",
+                  {"symbol": "BTC-SWAP-USDT"}
+              ),
+              (
+                  "FUTURES KLINES",
+                  f"{BASE}/quote/v1/klines",
+                  {
+                      "symbol": "BTC-SWAP-USDT",
+                      "interval": "1h",
+                      "limit": 5
+                  }
               ),
           ]
 
-          print("=== TOOBIT PUBLIC API TEST ===")
+          print("======================================")
+          print("      TOOBIT OFFICIAL API TEST")
+          print("======================================")
 
           passed = 0
 
           for name, url, params in tests:
-              print(f"\n--- {name} ---")
+
+              print("\n--------------------------------------")
+              print(name)
               print("URL:", url)
+              print("PARAMS:", params)
 
               try:
                   r = requests.get(
                       url,
                       params=params,
-                      timeout=15
+                      timeout=20
                   )
 
                   print("HTTP STATUS:", r.status_code)
-                  print("RESPONSE:", r.text[:1000])
+                  print("RESPONSE:", r.text[:1500])
 
                   if r.ok:
                       passed += 1
@@ -70,10 +96,13 @@ jobs:
 
               except Exception as e:
                   print("CONNECTION ERROR:", repr(e))
+                  print("RESULT: FAILED")
 
-          print(f"\n=== RESULT: {passed}/{len(tests)} TESTS PASSED ===")
+          print("\n======================================")
+          print(f"FINAL RESULT: {passed}/{len(tests)} PASSED")
+          print("======================================")
 
           if passed == 0:
-              raise SystemExit("All Toobit public API tests failed")
+              raise SystemExit("No Toobit public API endpoint responded successfully")
 
           PY
