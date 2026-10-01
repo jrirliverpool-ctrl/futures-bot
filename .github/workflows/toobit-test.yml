@@ -21,34 +21,59 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Test Toobit public API
+      - name: Test Toobit public APIs
         run: |
           python - <<'PY'
           import requests
-          import time
 
-          print("=== TOOBIT CONNECTIVITY TEST ===")
+          tests = [
+              (
+                  "SERVER TIME",
+                  "https://api.toobit.com/en-US/api/v1/time",
+                  {}
+              ),
+              (
+                  "FUTURES TICKER",
+                  "https://api.toobit.com/en-US/api/v1/quote/v1/contract/ticker/24hr",
+                  {"symbol": "BTC-SWAP-USDT"}
+              ),
+              (
+                  "FUTURES PRICE",
+                  "https://api.toobit.com/en-US/api/v1/quote/v1/contract/ticker/price",
+                  {"symbol": "BTC-SWAP-USDT"}
+              ),
+          ]
 
-          url = "https://api.toobit.com/api/v1/ticker/24hr"
+          print("=== TOOBIT PUBLIC API TEST ===")
 
-          try:
-              r = requests.get(
-                  url,
-                  params={"symbol": "BTCUSDT"},
-                  timeout=15
-              )
+          passed = 0
 
-              print("HTTP STATUS:", r.status_code)
-              print("RESPONSE:", r.text[:1000])
+          for name, url, params in tests:
+              print(f"\n--- {name} ---")
+              print("URL:", url)
 
-              if r.ok:
-                  print("PUBLIC API: OK")
-              else:
-                  print("PUBLIC API: FAILED")
+              try:
+                  r = requests.get(
+                      url,
+                      params=params,
+                      timeout=15
+                  )
 
-          except Exception as e:
-              print("CONNECTION ERROR:", repr(e))
-              raise
+                  print("HTTP STATUS:", r.status_code)
+                  print("RESPONSE:", r.text[:1000])
 
-          print("=== TEST FINISHED ===")
+                  if r.ok:
+                      passed += 1
+                      print("RESULT: OK")
+                  else:
+                      print("RESULT: FAILED")
+
+              except Exception as e:
+                  print("CONNECTION ERROR:", repr(e))
+
+          print(f"\n=== RESULT: {passed}/{len(tests)} TESTS PASSED ===")
+
+          if passed == 0:
+              raise SystemExit("All Toobit public API tests failed")
+
           PY
