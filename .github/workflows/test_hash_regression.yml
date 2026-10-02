@@ -1,0 +1,29 @@
+name: Hash Regression Test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/strategy_config.py'
+      - 'scripts/compute_hash.py'
+      - 'tests/test_hash_regression.py'
+      - '.github/workflows/test_hash_regression.yml'
+  pull_request:
+    paths:
+      - 'scripts/strategy_config.py'
+      - 'scripts/compute_hash.py'
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run hash regression tests
+        run: python tests/test_hash_regression.py
