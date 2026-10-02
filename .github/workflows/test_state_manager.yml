@@ -1,0 +1,24 @@
+name: State Manager Unit Tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/state_manager.py'
+      - 'tests/test_state_manager.py'
+      - '.github/workflows/test_state_manager.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run State Manager tests
+        run: python tests/test_state_manager.py
