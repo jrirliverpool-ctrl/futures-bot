@@ -24,19 +24,25 @@ def private_get(endpoint: str, params: dict = None):
     if params is None:
         params = {}
     
-    # اضافه کردن تایم‌استمپ
+    # اضافه کردن پارامترهای اجباری
     params["timestamp"] = int(time.time() * 1000)
+    params["recvWindow"] = 5000
     
-    # ساخت query string
-    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    # نکته کلیدی: مرتب‌سازی پارامترها بر اساس حروف الفبا (a-z)
+    sorted_params = sorted(params.items())
+    
+    # ساخت query string بر اساس ترتیب مرتب‌شده
+    query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
     
     # امضا
     signature = sign(query_string)
     
+    # هدر صحیح بر اساس مستندات
     headers = {
-        "X-BH-APIKEY": API_KEY,  # هدر مخصوص Toobit
+        "X-BB-APIKEY": API_KEY,
     }
     
+    # آدرس نهایی با امضا در انتهای query string
     url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
     
     try:
@@ -64,9 +70,9 @@ except Exception as e:
     print(f"❌ Futures Balance Error: {e}")
     tests.append(("Futures Balance", False))
 
-# 2. تست پوزیشن‌ها
+# 2. تست پوزیشن‌ها (مسیر صحیح)
 try:
-    pos = private_get("/api/v1/futures/position")
+    pos = private_get("/api/v1/futures/positions")
     if "error" in pos:
         print(f"❌ Positions Failed: {pos['error']}")
         tests.append(("Positions", False))
