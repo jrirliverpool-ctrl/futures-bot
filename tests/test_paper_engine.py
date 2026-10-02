@@ -294,8 +294,8 @@ def test_weekly_loss_resets_on_new_week():
 
 def test_daily_breaker():
     state = _state()
-    state["daily_loss"] = 30.0  # 3% از 1000
-    state["loss_day_key"] = 0  # already current
+    state["daily_loss"] = 30.0
+    state["loss_day_key"] = 0
     klines = [_candle(1000, 100, 101, 99, 100)]
     indicators = {"atr": [1.0]}
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, _cfg())
@@ -307,7 +307,7 @@ def test_daily_breaker():
 
 def test_weekly_breaker():
     state = _state()
-    state["weekly_loss"] = 70.0  # 7% از 1000
+    state["weekly_loss"] = 70.0
     state["loss_week_key"] = 0
     state["loss_day_key"] = 0
     klines = [_candle(1000, 100, 101, 99, 100)]
@@ -322,13 +322,13 @@ def test_weekly_breaker():
 def test_total_dd_from_peak():
     state = _state()
     state["peak_equity"] = 2000.0
-    state["equity"] = 1600.0  # 20% DD از peak
+    state["equity"] = 1600.0
     state["loss_day_key"] = 0
     state["loss_week_key"] = 0
     klines = [_candle(1000, 100, 101, 99, 100)]
     indicators = {"atr": [1.0]}
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, _cfg())
-    assert new_state["circuit_breaker_reason" if "circuit_breaker_reason" in new_state else "circuit_breaker_active"] is True
+    assert new_state["circuit_breaker_active"] is True
     assert any(e["type"] == "CIRCUIT_BREAKER" and e["reason"] == "TOTAL_DD"
                for e in events)
     print("✅ test_total_dd_from_peak passed")
@@ -350,20 +350,33 @@ def test_total_dd_uses_peak_equity():
 
 def test_cooldown_blocks_signal():
     state = _state()
-    state["cooldown_until_index"] = 10
-    klines = [_candle(1000, 100, 101, 99, 100)]
-    indicators = {"atr": [1.0]}
+    # i=5 باید واقعاً در klines وجود داشته باشد.
+    klines = [
+        _candle(1000, 100, 101, 99, 100),
+        _candle(2000, 100, 101, 99, 100),
+        _candle(3000, 100, 101, 99, 100),
+        _candle(4000, 100, 101, 99, 100),
+        _candle(5000, 100, 101, 99, 100),
+        _candle(6000, 100, 101, 99, 100),
+    ]
+    indicators = {"atr": [1.0] * len(klines)}
     signal = {
         "signal": "LONG",
-        "signal_candle_ts": 1000,
+        "signal_candle_ts": 6000,
         "atr_at_signal": 1.0,
         "close": 100.0,
         "reason": "test",
     }
+    # Cooldown تا index=10 فعال است.
+    state["cooldown_until_index"] = 10
+
     new_state, events = process_candle(
         state, klines, indicators, 5, SPECS, _cfg(), signal=signal,
     )
+
+    # سیگنال نباید وارد pending_entry شود.
     assert new_state["pending_entry"] is None
+    # باید COOLDOWN_SKIP ثبت شده باشد.
     assert any(e["type"] == "COOLDOWN_SKIP" for e in events)
     print("✅ test_cooldown_blocks_signal passed")
 
