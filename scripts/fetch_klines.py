@@ -4,15 +4,14 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://api.toobit.com"
 
-# --- اعتبارسنجی‌های مورد انتظار ---
-EXPECTED_FIELDS = 6            # [openTime, open, high, low, close, volume] یا مشابه
-MIN_KLINES = 250               # حداقل لازم برای EMA200 + بافر
-MAX_GAP_MULTIPLIER = 2         # حداکثر فاصله مجاز بین دو کندل (بر حسب interval)
-INTERVAL_MS = 60 * 60 * 1000   # 1h = 3600000 میلی‌ثانیه
-
+EXPECTED_FIELDS = 6
+MIN_KLINES = 250
+MAX_GAP_MULTIPLIER = 2
+INTERVAL_MS = 60 * 60 * 1000
 
 def fetch_klines(symbol: str, interval: str, limit: int = 300):
-    endpoint = "/api/v1/futures/klines"
+    # اصلاح مسیر بر اساس مستندات رسمی Toobit و CCXT
+    endpoint = "/quote/v1/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
         response = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=15)
@@ -21,24 +20,19 @@ def fetch_klines(symbol: str, interval: str, limit: int = 300):
     except requests.exceptions.RequestException as e:
         return {"error": str(e)}
 
-
 def validate_klines(klines, symbol: str, interval: str):
-    """اعتبارسنجی کامل داده‌های کندل. لیستی از خطاها را برمی‌گرداند."""
     errors = []
     warnings = []
 
-    # 1. نوع داده کلی
     if not isinstance(klines, list):
         errors.append(f"❌ نوع داده خروجی لیست نیست. دریافت شد: {type(klines).__name__}")
         return errors, warnings
 
-    # 2. تعداد کندل
     if len(klines) < MIN_KLINES:
         errors.append(f"❌ تعداد کندل ناکافی: {len(klines)} < {MIN_KLINES}")
     else:
         print(f"✅ تعداد کندل کافی است: {len(klines)}")
 
-    # 3. بررسی ساختار هر کندل
     for i, k in enumerate(klines):
         if not isinstance(k, list):
             errors.append(f"❌ کندل شماره {i} یک لیست نیست: {type(k).__name__}")
@@ -47,7 +41,6 @@ def validate_klines(klines, symbol: str, interval: str):
             errors.append(f"❌ کندل شماره {i} کمتر از {EXPECTED_FIELDS} فیلد دارد: {len(k)}")
             break
 
-    # 4. بررسی عددی بودن OHLCV (اندیس 1 تا 4 و 5)
     non_numeric = []
     for i, k in enumerate(klines):
         for idx in range(1, EXPECTED_FIELDS):
@@ -60,7 +53,6 @@ def validate_klines(klines, symbol: str, interval: str):
     else:
         print("✅ تمام مقادیر OHLCV عددی هستند.")
 
-    # 5. ترتیب زمانی صعودی
     timestamps = [int(k[0]) for k in klines if isinstance(k, list) and len(k) >= 1]
     out_of_order = []
     for i in range(1, len(timestamps)):
@@ -71,7 +63,6 @@ def validate_klines(klines, symbol: str, interval: str):
     else:
         print("✅ ترتیب زمانی صعودی است.")
 
-    # 6. فاصله‌های زمانی (کندل‌های ناقص)
     gaps = []
     for i in range(1, len(timestamps)):
         delta = timestamps[i] - timestamps[i - 1]
@@ -88,7 +79,6 @@ def validate_klines(klines, symbol: str, interval: str):
     else:
         print("✅ هیچ گپ زمانی غیرعادی وجود ندارد.")
 
-    # 7. اعتبارسنجی منطقی OHLC
     invalid_ohlc = []
     for i, k in enumerate(klines):
         try:
@@ -102,7 +92,6 @@ def validate_klines(klines, symbol: str, interval: str):
     else:
         print("✅ ساختار OHLC تمام کندل‌ها معتبر است.")
 
-    # 8. حجم غیرمنفی
     negative_volume = []
     for i, k in enumerate(klines):
         try:
@@ -117,8 +106,6 @@ def validate_klines(klines, symbol: str, interval: str):
 
     return errors, warnings
 
-
-# --- اجرای تست ---
 print("🔍 دریافت داده‌های بازار فیوچرز Toobit...")
 symbol = "BTC-SWAP-USDT"
 interval = "1h"
@@ -131,7 +118,6 @@ if isinstance(klines, dict) and "error" in klines:
 print(f"\n🧪 شروع اعتبارسنجی داده ({symbol} / {interval})...\n")
 errors, warnings = validate_klines(klines, symbol, interval)
 
-# --- نمایش خلاصه ---
 print("\n📊 آخرین ۳ کندل:")
 for k in klines[-3:]:
     ts = int(k[0]) / 1000
