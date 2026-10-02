@@ -1,0 +1,29 @@
+name: Strategy Config & Hash Tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/strategy_config.py'
+      - 'scripts/compute_hash.py'
+      - 'tests/test_strategy_config.py'
+      - 'tests/test_compute_hash.py'
+      - '.github/workflows/test_strategy_config.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Strategy Config tests
+        run: python tests/test_strategy_config.py
+
+      - name: Run Compute Hash tests
+        run: python tests/test_compute_hash.py
