@@ -12,7 +12,7 @@
       "trail": true,
       "mfe": 1.9795067009931042,
       "mae": -0.07157883163904884,
-      "bars_held": 6
+      "bars_held": 7
     },
     {
       "symbol": "ETH/USD",
@@ -26,32 +26,32 @@
       "trail": true,
       "mfe": 1.5338890383743466,
       "mae": -0.5665818456978511,
-      "bars_held": 6
+      "bars_held": 7
     }
   ],
   "equity": 891.6968951175855,
-  "last_run": "2026-10-02T19:25:22.317258+00:00",
+  "last_run": "2026-10-02T19:38:02.196927+00:00",
   "last_error": null,
   "symbols_status": {
     "__exchange_init": "ok",
-    "BTC/USD": "ok \u00b7 299 bars \u00b7 close=84110.90 \u00b7 atr%=0.41",
-    "ETH/USD": "ok \u00b7 299 bars \u00b7 close=2663.82 \u00b7 atr%=0.45",
-    "SOL/USD": "ok \u00b7 299 bars \u00b7 close=117.84 \u00b7 atr%=0.63",
+    "BTC/USD": "ok \u00b7 299 bars \u00b7 close=84112.00 \u00b7 atr%=0.39",
+    "ETH/USD": "ok \u00b7 299 bars \u00b7 close=2664.96 \u00b7 atr%=0.45",
+    "SOL/USD": "ok \u00b7 299 bars \u00b7 close=117.90 \u00b7 atr%=0.61",
     "__scan": {
       "BTC/USD": {
-        "close": 84110.9,
-        "dc_h": 86828.8,
+        "close": 84112.0,
+        "dc_h": 86637.8,
         "dc_l": 83860.7,
-        "ema_f": 84976.8021,
-        "ema_s": 85428.769,
-        "atr_pct": 0.406,
+        "ema_f": 84894.44,
+        "ema_s": 85377.1311,
+        "atr_pct": 0.395,
         "long_breakout": false,
         "long_trend": false,
         "short_breakout": false,
         "short_trend": true,
-        "long_gap_pct": -3.231,
-        "short_gap_pct": -0.297,
-        "ema_gap": -451.9669,
+        "long_gap_pct": -3.003,
+        "short_gap_pct": -0.299,
+        "ema_gap": -482.6911,
         "hist_bars": 279,
         "hist_long_raw": 15,
         "hist_short_raw": 6,
@@ -59,19 +59,19 @@
         "hist_short_pass": 3
       },
       "ETH/USD": {
-        "close": 2663.82,
-        "dc_h": 2750.56,
+        "close": 2664.96,
+        "dc_h": 2743.32,
         "dc_l": 2650.41,
-        "ema_f": 2690.1541,
-        "ema_s": 2708.7802,
-        "atr_pct": 0.449,
+        "ema_f": 2687.7547,
+        "ema_s": 2707.0617,
+        "atr_pct": 0.448,
         "long_breakout": false,
         "long_trend": false,
         "short_breakout": false,
         "short_trend": true,
-        "long_gap_pct": -3.256,
-        "short_gap_pct": -0.503,
-        "ema_gap": -18.6261,
+        "long_gap_pct": -2.94,
+        "short_gap_pct": -0.546,
+        "ema_gap": -19.3071,
         "hist_bars": 279,
         "hist_long_raw": 15,
         "hist_short_raw": 5,
@@ -79,19 +79,19 @@
         "hist_short_pass": 3
       },
       "SOL/USD": {
-        "close": 117.84,
-        "dc_h": 122.43,
+        "close": 117.9,
+        "dc_h": 122.31,
         "dc_l": 117.12,
-        "ema_f": 119.595,
-        "ema_s": 120.3496,
-        "atr_pct": 0.625,
+        "ema_f": 119.4336,
+        "ema_s": 120.2535,
+        "atr_pct": 0.613,
         "long_breakout": false,
         "long_trend": false,
         "short_breakout": false,
         "short_trend": true,
-        "long_gap_pct": -3.895,
-        "short_gap_pct": -0.611,
-        "ema_gap": -0.7546,
+        "long_gap_pct": -3.74,
+        "short_gap_pct": -0.662,
+        "ema_gap": -0.8199,
         "hist_bars": 279,
         "hist_long_raw": 10,
         "hist_short_raw": 8,
@@ -99,10 +99,10 @@
         "hist_short_pass": 8
       }
     },
-    "__latest_bar": "2026-10-02 19:00:00+00:00",
+    "__latest_bar": "2026-10-02 19:15:00+00:00",
     "__signals_passed": 0,
     "__signals_rejected": 0,
     "__opened": 0
   },
-  "last_bar_ts": "2026-10-02 19:00:00+00:00"
+  "last_bar_ts": "2026-10-02 19:15:00+00:00"
 }
