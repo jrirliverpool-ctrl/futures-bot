@@ -1,0 +1,24 @@
+name: Backtest Unit Tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/backtest.py'
+      - 'tests/test_backtest.py'
+      - '.github/workflows/test_backtest.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Backtest tests
+        run: python tests/test_backtest.py
