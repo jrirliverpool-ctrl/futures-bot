@@ -9,7 +9,7 @@ test_backtest.py — Unit tests for backtest.py.
   - Determinism (شامل event replay)
   - Equity accounting (realized + MTM)
   - Trade counting (TP1_HIT ≠ trade)
-  - Metrics (PФ, MaxDD, sharpe_like, calmar_like)
+  - Metrics (PF, MaxDD, sharpe_like, calmar_like)
   - Reporting (format + JSON)
 """
 
@@ -174,7 +174,6 @@ def test_backtest_deterministic_metrics():
 
 
 def test_backtest_deterministic_events():
-    """event replay: لیست event ها باید بیت‌به‌بیت یکسان باشد."""
     klines = _synthetic_uptrend(300)
     r1 = run_backtest(klines, SPECS, initial_equity=1000.0)
     r2 = run_backtest(klines, SPECS, initial_equity=1000.0)
@@ -202,7 +201,6 @@ def test_backtest_hash_in_metadata():
 # ============================================================
 
 def test_realized_equity_consistency():
-    """final realized equity = initial + Σ(pnl_usd of EXIT events)."""
     klines = _synthetic_uptrend(400)
     result = run_backtest(klines, SPECS, initial_equity=1000.0)
     pnl_sum = sum(
@@ -222,7 +220,6 @@ def test_equity_curve_length():
 
 
 def test_mtm_equals_realized_when_no_position():
-    """بدون پوزیشن باز: MTM == realized."""
     klines = _synthetic_uptrend(100)
     result = run_backtest(klines, SPECS, initial_equity=1000.0)
     assert result["final_state"]["position"] is None
@@ -232,7 +229,6 @@ def test_mtm_equals_realized_when_no_position():
 
 
 def test_mtm_includes_unrealized_long():
-    """پوزیشن LONG باز با سود unrealized → MTM > realized."""
     state = {
         "equity": 1000.0,
         "position": {
@@ -243,7 +239,6 @@ def test_mtm_includes_unrealized_long():
         },
     }
     mtm = compute_mtm_equity(state, close_price=105.0, specs=SPECS)
-    # unrealized = 1.0 * (105 - 100) * 0.001 * 1 = 0.005
     assert abs(mtm - (1000.0 + 0.005)) < 1e-12
 
 
@@ -258,24 +253,20 @@ def test_mtm_includes_unrealized_short():
         },
     }
     mtm = compute_mtm_equity(state, close_price=95.0, specs=SPECS)
-    # unrealized = 1.0 * (100 - 95) * 0.001 * 1 = 0.005
     assert abs(mtm - (1000.0 + 0.005)) < 1e-12
 
 
 def test_mtm_includes_tp1_realized():
-    """MTM باید TP1 realized PnL را هم لحاظ کند."""
     state = {
         "equity": 1000.0,
         "position": {
             "side": "LONG",
             "entry_price": 100.0,
             "remaining_size": 0.5,
-            "realized_pnl": 0.004,  # مثلاً TP1
+            "realized_pnl": 0.004,
         },
     }
     mtm = compute_mtm_equity(state, close_price=110.0, specs=SPECS)
-    # unrealized = 0.5 * 10 * 0.001 = 0.005
-    # mtm = 1000 + 0.004 + 0.005 = 1000.009
     assert abs(mtm - 1000.009) < 1e-12
 
 
@@ -286,11 +277,17 @@ def test_mtm_no_position():
 
 
 # ============================================================
-# Trade Accounting
+# Trade Accounting (اصلاح‌شده)
 # ============================================================
 
 def test_one_trade_per_exit_event():
-    """هر EXIT = یک trade. TP1_HIT نباید به عنوان trade شمرده شود."""
+    """
+    قواعد حسابداری معاملات:
+      1. total_trades == number of EXIT events
+      2. tp1_count ≤ entry_count (هر position حداکثر یک TP1)
+      3. entry_count - exit_count ∈ {0, 1}  (پوزیشن باز در پایان backtest)
+      4. tp1_count ≤ exit_count  (هر TP1 به یک EXIT منجر می‌شود، مگر پوزیشن باز)
+    """
     klines = _synthetic_uptrend(400)
     result = run_backtest(klines, SPECS, initial_equity=1000.0)
 
@@ -298,15 +295,36 @@ def test_one_trade_per_exit_event():
     tp1_count = sum(1 for e in result["events"] if e["type"] == "TP1_HIT")
     entry_count = sum(1 for e in result["events"] if e["type"] == "ENTRY")
 
-    # total_trades == exit_count
-    assert result["metrics"]["total_trades"] == exit_count
+    print(
+        f"  [diag] entries={entry_count}, "
+        f"exits={exit_count}, "
+        f"tp1={tp1_count}"
+    )
 
-    # اگر TP1 رخ داده، تعدادش از تعداد ENTRY کمتر یا مساوی است
-    if tp1_count > 0:
-        assert tp1_count <= entry_count
+    # 1. total_trades == exit_count
+    assert result["metrics"]["total_trades"] == exit_count, (
+        f"total_trades ({result['metrics']['total_trades']}) "
+        f"!= exit_count ({exit_count})"
+    )
 
-    # ENTRY count == EXIT count در حالت کامل (هر ورود یک خروج)
-    assert entry_count == exit_count
+    # 2. هر position حداکثر یک TP1_HIT → tp1_count ≤ entry_count
+    assert tp1_count <= entry_count, (
+        f"tp1_count ({tp1_count}) > entry_count ({entry_count}). "
+        f"این یعنی TP1_HIT بدون ENTRY یا چند بار برای یک position رخ داده."
+    )
+
+    # 3. در پایان backtest، حداکثر یک position باز باقی می‌ماند
+    #    (اگر پوزیشن باز باشد: entry = exit + 1)
+    assert entry_count - exit_count in (0, 1), (
+        f"entry_count ({entry_count}) - exit_count ({exit_count}) "
+        f"باید 0 یا 1 باشد."
+    )
+
+    # 4. TP1 نمی‌تواند از EXIT بیشتر باشد (هر TP1 با یک EXIT بسته می‌شود)
+    assert tp1_count <= exit_count, (
+        f"tp1_count ({tp1_count}) > exit_count ({exit_count}). "
+        f"TP1_HIT بدون EXIT رخ داده."
+    )
 
 
 def test_exit_reason_count_matches_trades():
@@ -317,8 +335,29 @@ def test_exit_reason_count_matches_trades():
     assert dist_sum == result["metrics"]["total_trades"]
 
 
+def test_entry_before_exit_per_position():
+    """هر EXIT باید یک ENTRY قبلی داشته باشد (entry count ≥ exit count)."""
+    klines = _synthetic_uptrend(400)
+    result = run_backtest(klines, SPECS, initial_equity=1000.0)
+
+    entry_count = sum(1 for e in result["events"] if e["type"] == "ENTRY")
+    exit_count = sum(1 for e in result["events"] if e["type"] == "EXIT")
+    assert entry_count >= exit_count
+
+
+def test_tp1_only_if_entry_exists():
+    """اگر TP1_HIT وجود دارد، حتماً ENTRY وجود دارد."""
+    klines = _synthetic_uptrend(400)
+    result = run_backtest(klines, SPECS, initial_equity=1000.0)
+
+    tp1_count = sum(1 for e in result["events"] if e["type"] == "TP1_HIT")
+    entry_count = sum(1 for e in result["events"] if e["type"] == "ENTRY")
+    if tp1_count > 0:
+        assert entry_count > 0
+
+
 # ============================================================
-# Metrics — Unit
+# Metrics
 # ============================================================
 
 def test_metrics_empty():
@@ -333,7 +372,6 @@ def test_metrics_empty():
 def test_metrics_max_drawdown():
     equity = [1000.0, 1100.0, 900.0, 950.0, 1050.0]
     metrics = compute_metrics(equity, [], 1000.0)
-    # Peak: 1100, Trough: 900 → DD = 200/1100 = 18.18%
     expected = (1100.0 - 900.0) / 1100.0 * 100.0
     assert abs(metrics["max_drawdown_pct"] - expected) < 1e-6
 
@@ -413,11 +451,9 @@ def test_metrics_infinite_profit_factor_all_wins():
 
 
 def test_metrics_naming():
-    """تضمین نام‌های دقیق sharpe/calmar."""
     metrics = compute_metrics([1000.0], [], 1000.0)
     assert "sharpe_like_per_trade" in metrics
     assert "calmar_like_simple" in metrics
-    # نام‌های قدیمی نباید باشند
     assert "sharpe_per_trade" not in metrics
     assert "calmar" not in metrics
 
@@ -450,22 +486,18 @@ def test_result_to_json_serializable():
 
 if __name__ == "__main__":
     tests = [
-        # Signal generation
         test_generate_signals_count,
         test_generate_signals_early_warmup,
         test_generate_signals_empty_raises,
-        # Behavior
         test_backtest_uptrend_long_trades,
         test_backtest_downtrend_short_trades,
         test_backtest_flat_no_trades,
         test_backtest_empty_raises,
         test_backtest_short_data,
-        # Determinism
         test_backtest_deterministic_metrics,
         test_backtest_deterministic_events,
         test_backtest_deterministic_curves,
         test_backtest_hash_in_metadata,
-        # Equity accounting
         test_realized_equity_consistency,
         test_equity_curve_length,
         test_mtm_equals_realized_when_no_position,
@@ -473,10 +505,10 @@ if __name__ == "__main__":
         test_mtm_includes_unrealized_short,
         test_mtm_includes_tp1_realized,
         test_mtm_no_position,
-        # Trade accounting
         test_one_trade_per_exit_event,
         test_exit_reason_count_matches_trades,
-        # Metrics
+        test_entry_before_exit_per_position,
+        test_tp1_only_if_entry_exists,
         test_metrics_empty,
         test_metrics_max_drawdown,
         test_metrics_net_return,
@@ -487,7 +519,6 @@ if __name__ == "__main__":
         test_metrics_zero_initial_raises,
         test_metrics_infinite_profit_factor_all_wins,
         test_metrics_naming,
-        # Reporting
         test_format_metrics_returns_string,
         test_result_to_json_serializable,
     ]
