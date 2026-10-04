@@ -13,6 +13,19 @@ run_real_backtest.py — End-to-End Smoke Backtest روی داده‌ی واقع
 
 معیار موفقیت = exit code 0 + اعداد معتبر، نه Sharpe بالا.
 
+Audit Metadata
+══════════════
+قبل از ذخیره‌ی state، سه فیلد audit اضافه می‌شوند تا
+audit_backtest_artifacts.py بتواند unrealized PnL را دقیقاً
+محاسبه کند:
+
+  symbol              : نماد بک‌تست شده
+  contract_multiplier : multiplier نماد
+  last_close_price    : close آخرین کندل (مبنای MTM نهایی)
+
+این فیلدها در state_manager.validate_state اجباری نیستند
+(فقط لازم برای audit دقیق).
+
 متغیرهای محیطی
 ══════════════
   SYMBOL          : مثلاً BTC-SWAP-USDT
@@ -126,16 +139,27 @@ def main():
     print(perf["report_text"])
     print()
 
-    # ---- 6. Save state ----
+    # ---- 6. Save state (with audit metadata) ----
     state_path = "backtest_state.json"
+
+    final_state = result["final_state"]
+    # Audit metadata — helps audit_backtest_artifacts.py compute
+    # unrealized PnL exactly when a position is open at end.
+    final_state["symbol"] = symbol
+    final_state["contract_multiplier"] = specs["contract_multiplier"]
+    final_state["last_close_price"] = float(klines[-1][4])
+
     try:
-        save_state(state_path, result["final_state"])
+        save_state(state_path, final_state)
     except Exception as e:
         print(f"❌ save_state failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
     print(f"💾 Final state saved: {state_path}")
+    print(f"  symbol              : {symbol}")
+    print(f"  contract_multiplier : {specs['contract_multiplier']}")
+    print(f"  last_close_price    : {float(klines[-1][4])}")
     print()
 
     # ---- 7. Summary ----
