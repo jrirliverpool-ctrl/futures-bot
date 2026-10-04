@@ -13,23 +13,28 @@ Audit ≠ ارزیابی عملکرد
 چک می‌کند. اگر استراتژی در پنجره‌ی بک‌تست ضرر کرده باشد،
 Audit Fail نمی‌شود.
 
-فرض مهم در audit_cross_consistency
-══════════════════════════════════
-Invariant زیر فرض می‌کند که:
+فرض‌های حسابداری
+════════════════
+state["equity"] فقط realized PnL را شامل می‌شود
+(در paper_engine.py فقط در close_position تغییر می‌کند).
 
-  state["equity"] فقط realized PnL را شامل می‌شود
-  (در paper_engine.py فقط در close_position تغییر می‌کند)
+equity_curve.csv شامل MTM است (realized + unrealized).
 
-و trades.csv هم فقط معاملات بسته‌شده را دارد.
+Cross-file invariants
+═════════════════════
+  1. Σ(trades.pnl_usd) == state.equity - state.initial_equity
+     (همیشه برقرار است، بدون توجه به position)
 
-پس اگر حالت‌های زیر رخ دهد، این invariant معتبر است:
+  2. last equity_mtm == state.equity
+     (فقط وقتی position بسته است)
 
-  - بدون پوزیشن باز (حالت Smoke فعلی)
-  - با پوزیشن باز (پوزیشن در state باقی می‌ماند ولی
-    equity او را شامل نمی‌شود)
-
-اگر در آینده paper_engine تغییر کند و state["equity"] شامل
-MTM شود، این invariant باید بازبینی شود.
+     اگر position باز است:
+       equity_mtm - state.equity
+         = pos.realized_pnl (از TP1)
+         + remaining_size * (last_close - entry) * mult * dir_sign
+     این مقدار دقیقاً از state محاسبه و مقایسه می‌شود.
+     فیلدهای لازم: symbol, contract_multiplier, last_close_price
+     (که run_real_backtest.py اضافه می‌کند)
 
 نحوه استفاده:
   python scripts/audit_backtest_artifacts.py
@@ -95,7 +100,6 @@ def audit_equity_csv(path: str) -> list:
         errors.append(f"equity CSV read error: {e}")
         return errors
 
-    # 1. Header
     if tuple(header) != EQUITY_CSV_COLUMNS:
         errors.append(
             f"equity header mismatch\n"
@@ -105,13 +109,11 @@ def audit_equity_csv(path: str) -> list:
         return errors
     print(f"  ✅ header matches EQUITY_CSV_COLUMNS")
 
-    # 2. Row count
     if len(rows) == 0:
         errors.append("equity CSV has no rows")
         return errors
     print(f"  ✅ row count: {len(rows)}")
 
-    # 3. Sequence of candle_index
     try:
         indexes = [int(r["candle_index"]) for r in rows]
         if indexes != list(range(len(rows))):
@@ -123,7 +125,6 @@ def audit_equity_csv(path: str) -> list:
     except (ValueError, KeyError) as e:
         errors.append(f"candle_index parse error: {e}")
 
-    # 4. Monotonic candle_ts_ms
     try:
         ts = [int(r["candle_ts_ms"]) for r in rows]
         if ts != sorted(ts):
@@ -133,7 +134,6 @@ def audit_equity_csv(path: str) -> list:
     except (ValueError, KeyError) as e:
         errors.append(f"candle_ts_ms parse error: {e}")
 
-    # 5. Numeric fields
     equity_vals = []
     realized_vals = []
     dd_vals = []
@@ -150,13 +150,11 @@ def audit_equity_csv(path: str) -> list:
     if not errors:
         print(f"  ✅ all numeric fields parse")
 
-    # 6. drawdown_pct >= 0
     if dd_vals and any(d < -FLOAT_TOL for d in dd_vals):
         errors.append("drawdown_pct has negative values")
     else:
         print(f"  ✅ drawdown_pct >= 0")
 
-    # 7. peak_equity >= equity_mtm at each row
     if equity_vals and peak_vals:
         violations = [
             (i, e, p) for i, (e, p) in enumerate(zip(equity_vals, peak_vals))
@@ -171,7 +169,6 @@ def audit_equity_csv(path: str) -> list:
         else:
             print(f"  ✅ peak_equity >= equity_mtm at all rows")
 
-    # 8. peak_equity monotonic non-decreasing
     if peak_vals:
         monotonic = all(
             peak_vals[i] >= peak_vals[i-1] - FLOAT_TOL
@@ -182,7 +179,6 @@ def audit_equity_csv(path: str) -> list:
         else:
             print(f"  ✅ peak_equity monotonic non-decreasing")
 
-    # 9. First & last snapshot
     if rows:
         print(f"\n  📌 first row: {rows[0]}")
         print(f"  📌 last row : {rows[-1]}")
@@ -211,7 +207,6 @@ def audit_trades_csv(path: str) -> list:
         errors.append(f"trades CSV read error: {e}")
         return errors
 
-    # 1. Header
     if tuple(header) != TRADES_CSV_COLUMNS:
         errors.append(
             f"trades header mismatch\n"
@@ -221,14 +216,12 @@ def audit_trades_csv(path: str) -> list:
         return errors
     print(f"  ✅ header matches TRADES_CSV_COLUMNS")
 
-    # 2. Row count
     print(f"  ✅ row count: {len(rows)}")
 
     if len(rows) == 0:
         print("  ℹ️  no trades in this window (valid outcome)")
         return errors
 
-    # 3. Row-by-row validation
     valid_reasons = {
         "SL", "TP1", "TRAILING_SL", "TIME_EXIT",
         "EXIT_SIGNAL", "TP2",
@@ -396,15 +389,22 @@ def audit_cross_consistency(equity_path, trades_path, state_path) -> list:
     """
     Cross-file invariants.
 
-    فرض مهم:
-      state["equity"] = initial + Σ(pnl_usd از معاملات بسته‌شده)
-      و trades.csv = همه‌ی معاملات بسته‌شده
+    Law 1: Σ(trades.pnl_usd) == state.equity - state.initial_equity
+        همیشه برقرار است (state.equity فقط realized).
 
-      این فرض در paper_engine.py فعلی برقرار است، چون
-      state["equity"] فقط در close_position تغییر می‌کند.
+    Law 2: last equity_mtm == state.equity
+        اگر position بسته است.
 
-    اگر در آینده paper_engine تغییر کند و state["equity"] شامل
-    MTM پوزیشن باز شود، این invariant باید بازبینی شود.
+        اگر position باز است:
+          last equity_mtm - state.equity
+            = pos.realized_pnl + unrealized_remaining
+        که unrealized_remaining =
+          remaining_size × (last_close − entry) × mult × dir_sign
+
+        محاسبه‌ی دقیق نیاز دارد:
+          - state.contract_multiplier
+          - state.last_close_price
+          (که run_real_backtest.py در state اضافه می‌کند)
     """
     errors = []
     print()
@@ -418,7 +418,7 @@ def audit_cross_consistency(equity_path, trades_path, state_path) -> list:
 
     state = load_state(state_path, strict=False)
 
-    # 1. sum(trades.pnl_usd) == state.equity - state.initial_equity
+    # ── Law 1: PnL accounting ──
     sum_pnl = sum(float(r["pnl_usd"]) for r in trade_rows)
     delta = state["equity"] - state["initial_equity"]
     if abs(sum_pnl - delta) > 1e-3:
@@ -434,23 +434,86 @@ def audit_cross_consistency(equity_path, trades_path, state_path) -> list:
             f"({sum_pnl:.6f})"
         )
 
-    # 2. last equity CSV equity_mtm == state.equity
+    # ── Law 2: MTM vs realized ──
     with open(equity_path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         eq_rows = list(reader)
 
-    if eq_rows:
-        last_mtm = float(eq_rows[-1]["equity_mtm"])
-        if abs(last_mtm - state["equity"]) > 1e-3:
+    if not eq_rows:
+        return errors
+
+    last_mtm = float(eq_rows[-1]["equity_mtm"])
+    state_equity = state["equity"]
+    position_open = state["position"] is not None
+
+    if not position_open:
+        # strict equality
+        if abs(last_mtm - state_equity) > 1e-3:
             errors.append(
                 f"last equity_mtm ({last_mtm:.6f}) != "
-                f"state equity ({state['equity']:.6f})"
+                f"state equity ({state_equity:.6f}) "
+                f"(no open position)"
             )
         else:
             print(
                 f"  ✅ last equity_mtm == state equity "
                 f"({last_mtm:.6f})"
             )
+        return errors
+
+    # ── position is open: exact computation ──
+    pos = state["position"]
+
+    required_audit_fields = (
+        "contract_multiplier",
+        "last_close_price",
+    )
+    missing = [f for f in required_audit_fields if f not in state]
+    if missing:
+        errors.append(
+            f"state missing audit metadata fields: {missing}\n"
+            f"    run_real_backtest.py باید این فیلدها را ذخیره کند."
+        )
+        return errors
+
+    mult = float(state["contract_multiplier"])
+    last_close = float(state["last_close_price"])
+    entry = float(pos["entry_price"])
+    remaining = float(pos["remaining_size"])
+    side = pos["side"]
+    tp1_realized = float(pos.get("realized_pnl", 0.0))
+    dir_sign = 1 if side == "LONG" else -1
+
+    expected_unrealized = (
+        remaining * (last_close - entry) * mult * dir_sign
+    )
+    expected_mtm_delta = tp1_realized + expected_unrealized
+    actual_mtm_delta = last_mtm - state_equity
+
+    print(
+        f"  ℹ️  open {side} position detected\n"
+        f"      entry           : {entry}\n"
+        f"      last_close      : {last_close}\n"
+        f"      remaining_size  : {remaining}\n"
+        f"      mult            : {mult}\n"
+        f"      tp1_realized    : {tp1_realized:+.6f}\n"
+        f"      unrealized_exp  : {expected_unrealized:+.6f}\n"
+        f"      expected Δ      : {expected_mtm_delta:+.6f}\n"
+        f"      actual Δ        : {actual_mtm_delta:+.6f}"
+    )
+
+    if abs(expected_mtm_delta - actual_mtm_delta) > 1e-6:
+        errors.append(
+            f"unrealized PnL mismatch\n"
+            f"    expected Δ = {expected_mtm_delta:.9f}\n"
+            f"    actual   Δ = {actual_mtm_delta:.9f}\n"
+            f"    diff       = {expected_mtm_delta - actual_mtm_delta:.9f}"
+        )
+    else:
+        print(
+            f"  ✅ unrealized PnL matches exactly "
+            f"({actual_mtm_delta:+.6f})"
+        )
 
     return errors
 
