@@ -1,0 +1,54 @@
+name: Paper Probe Persistence Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: paper-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          path: main
+
+      - name: Checkout paper-state
+        uses: actions/checkout@v4
+        with:
+          ref: paper-state
+          path: paper_state_dir
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run paper probe
+        working-directory: main
+        env:
+          STATE_DIR: ${{ github.workspace }}/paper_state_dir
+          PYTHONPATH: ${{ github.workspace }}/main/scripts
+        run: python scripts/paper_probe.py
+
+      - name: Commit paper-state changes
+        working-directory: paper_state_dir
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json events.jsonl
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore(paper-state): update after probe run"
+            git push
+          fi
