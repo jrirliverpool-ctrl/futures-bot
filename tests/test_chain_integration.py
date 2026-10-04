@@ -10,10 +10,10 @@ test_chain_integration.py — Chain Integration Test برای ApexQuant V1.
   استراتژی ApexQuant V1 به ۲۲۰ کندل warmup نیاز دارد.
   فازهای directional عمداً بعد از warmup قرار گرفته‌اند.
 
-نکته‌ی تشخیصی:
-  تست‌های directional شامل diagnostic print هستند تا
-  در صورت شکست، مشخص شود مشکل از fixture است یا
-  از رفتار واقعی استراتژی.
+نکته‌ی factory:
+  _realistic_klines(n) یک factory عمومی است. اگر n از هر
+  phase کوچک‌تر باشد، فقط تا همان n تولید می‌شود و هیچ خطایی
+  داده نمی‌شود. تست‌های short data از این رفتار استفاده می‌کنند.
 
 تمام تست‌ها deterministic و بدون شبکه.
 """
@@ -63,19 +63,19 @@ WARMUP = 220
 
 def _realistic_klines(n: int = 400):
     """
-    داده مصنوعی realistic و deterministic.
+    داده مصنوعی realistic و deterministic (factory عمومی).
 
-    ساختار فازها (با در نظر گرفتن warmup = 220):
-      phase 0 : 0..219   → warmup (خنثی)
-      phase 1 : 220..299 → uptrend  → انتظار LONG
-      phase 2 : 300..359 → downtrend → انتظار SHORT
-      phase 3 : 360..n   → chop
+    ساختار فازها:
+      phase 0 : 0..219     → warmup (خنثی)
+      phase 1 : 220..299   → uptrend
+      phase 2 : 300..359   → downtrend
+      phase 3 : 360+       → chop
+
+    اگر n از هر phase کوچک‌تر باشد، فقط تا n تولید می‌شود.
+    مثال: n=50 → 50 کندل warmup؛ n=400 → همه‌ی فازها.
 
     LCG-based noise → کاملاً deterministic.
     """
-    if n < 300:
-        raise ValueError("n must be >= 300 for meaningful phases")
-
     klines = []
     price = 100.0
     for i in range(n):
@@ -429,6 +429,12 @@ def test_chain_empty_data_raises():
 
 
 def test_chain_short_data_no_trades():
+    """
+    داده کوتاه (50 کندل، کاملاً داخل warmup) → صفر trade.
+
+    چون warmup = 220 و ما 50 کندل داریم، هیچ سیگنالی
+    تولید نمی‌شود و equity بدون تغییر می‌ماند.
+    """
     klines = _realistic_klines(50)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     assert result["metrics"]["total_trades"] == 0
@@ -454,13 +460,8 @@ def test_chain_uptrend_phase_produces_long():
     """
     فاز uptrend (220..299) حداقل یک LONG تولید می‌کند.
 
-    در صورت شکست، diagnostic چاپ می‌شود تا مشخص شود:
-      - چند ENTRY بعد از warmup تولید شد
-      - چند SIGNAL بعد از warmup تولید شد
-      - side و candle_index آن‌ها
-
-    این تست نباید هرگز تضعیف شود. اگر شکست خورد، باید
-    fixture یا خود استراتژی بررسی شود، نه assertion.
+    در صورت شکست، diagnostic چاپ می‌شود تا مشخص شود
+    مشکل از fixture است یا رفتار واقعی استراتژی.
     """
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
