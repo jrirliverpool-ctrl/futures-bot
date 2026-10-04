@@ -1,0 +1,55 @@
+name: Real Toobit Smoke Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Symbol (e.g. BTC-SWAP-USDT)'
+        required: false
+        default: 'BTC-SWAP-USDT'
+      interval:
+        description: 'Interval (1h, 4h, 1d)'
+        required: false
+        default: '1h'
+      limit:
+        description: 'Candle count (100..1000)'
+        required: false
+        default: '500'
+      initial_equity:
+        description: 'Initial equity (USDT)'
+        required: false
+        default: '1000'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run real smoke backtest
+        env:
+          SYMBOL: ${{ github.event.inputs.symbol }}
+          INTERVAL: ${{ github.event.inputs.interval }}
+          LIMIT: ${{ github.event.inputs.limit }}
+          INITIAL_EQUITY: ${{ github.event.inputs.initial_equity }}
+        run: python scripts/run_real_backtest.py
+
+      - name: Upload backtest artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-output
+          path: |
+            reports/
+            backtest_state.json
+          if-no-files-found: warn
+          retention-days: 30
