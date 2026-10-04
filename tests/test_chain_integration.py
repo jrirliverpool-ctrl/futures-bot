@@ -6,9 +6,14 @@ test_chain_integration.py — Chain Integration Test برای ApexQuant V1.
   data → indicators → strategy → paper_engine → backtest
        → performance → state_manager → CSV → report
 
-برخلاف Unit Test ها که هر لایه را جدا می‌سنجند، این فایل
-کل زنجیره را به‌عنوان یک واحد تثبیت می‌کند و invariants
-حسابداری cross-layer را چک می‌کند.
+نکته‌ی warmup:
+  استراتژی ApexQuant V1 به ۲۲۰ کندل warmup نیاز دارد.
+  فازهای directional عمداً بعد از warmup قرار گرفته‌اند.
+
+نکته‌ی تشخیصی:
+  تست‌های directional شامل diagnostic print هستند تا
+  در صورت شکست، مشخص شود مشکل از fixture است یا
+  از رفتار واقعی استراتژی.
 
 تمام تست‌ها deterministic و بدون شبکه.
 """
@@ -52,35 +57,41 @@ SPECS = {
 MULT = 0.001
 INITIAL_EQUITY = 1000.0
 
+# warmup استراتژی ApexQuant V1 = 220 کندل
+WARMUP = 220
+
 
 def _realistic_klines(n: int = 400):
     """
-    داده مصنوعی realistic و deterministic:
-      phase 1 (0..99)   : uptrend
-      phase 2 (100..199): chop with high vol
-      phase 3 (200..299): downtrend
-      phase 4 (300..)   : chop
+    داده مصنوعی realistic و deterministic.
 
-    از LCG برای pseudo-noise استفاده می‌کند تا کاملاً
-    deterministic باشد و به random وابسته نباشد.
+    ساختار فازها (با در نظر گرفتن warmup = 220):
+      phase 0 : 0..219   → warmup (خنثی)
+      phase 1 : 220..299 → uptrend  → انتظار LONG
+      phase 2 : 300..359 → downtrend → انتظار SHORT
+      phase 3 : 360..n   → chop
+
+    LCG-based noise → کاملاً deterministic.
     """
+    if n < 300:
+        raise ValueError("n must be >= 300 for meaningful phases")
+
     klines = []
     price = 100.0
     for i in range(n):
-        if i < 100:
+        if i < WARMUP:
+            drift = 0.0
+            vol = 0.02
+        elif i < 300:
             drift = 0.15
             vol = 0.05
-        elif i < 200:
-            drift = 0.0
-            vol = 0.15
-        elif i < 300:
+        elif i < 360:
             drift = -0.15
             vol = 0.05
         else:
             drift = 0.0
             vol = 0.15
 
-        # LCG based noise
         noise = ((i * 9301 + 49297) % 233280) / 233280.0 - 0.5
         noise *= vol
 
@@ -118,12 +129,37 @@ def _tmp_dir():
     return tempfile.mkdtemp()
 
 
+def _dump_directional_diagnostics(result: dict, label: str):
+    """چاپ وضعیت ENTRY های بعد از warmup برای debugging."""
+    events = result["events"]
+    entries = [e for e in events if e["type"] == "ENTRY"]
+    entries_after = [
+        e for e in entries
+        if e.get("candle_index", 0) >= WARMUP
+    ]
+    signals = [e for e in events if e["type"] == "SIGNAL"]
+    signals_after = [
+        e for e in signals
+        if e.get("candle_index", 0) >= WARMUP
+    ]
+
+    print(f"  [diag-{label}] total events      : {len(events)}")
+    print(f"  [diag-{label}] total entries     : {len(entries)}")
+    print(f"  [diag-{label}] entries >= WARMUP : {len(entries_after)}")
+    print(f"  [diag-{label}] signals >= WARMUP : {len(signals_after)}")
+
+    for e in entries_after[:10]:
+        print(
+            f"  [diag-{label}]   entry idx={e['candle_index']} "
+            f"side={e['side']} ts={e['timestamp']}"
+        )
+
+
 # ============================================================
 # 1. End-to-End Pipeline
 # ============================================================
 
 def test_chain_runs_end_to_end():
-    """کل زنجیره بدون خطا اجرا می‌شود."""
     klines = _realistic_klines(400)
     result = run_backtest(
         klines, SPECS, initial_equity=INITIAL_EQUITY, symbol="TEST",
@@ -143,7 +179,6 @@ def test_chain_runs_end_to_end():
 
 
 def test_chain_state_final_valid():
-    """State نهایی معتبر است (metadata و invariants ساختاری)."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     state = result["final_state"]
@@ -161,7 +196,6 @@ def test_chain_state_final_valid():
 # ============================================================
 
 def test_chain_events_balance():
-    """total_events == sum(event_counts.values())."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     metrics = result["metrics"]
@@ -172,7 +206,6 @@ def test_chain_events_balance():
 
 
 def test_chain_events_ordered_by_timestamp():
-    """event ها به ترتیب زمانی صعودی هستند."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     events = result["events"]
@@ -182,7 +215,6 @@ def test_chain_events_ordered_by_timestamp():
 
 
 def test_chain_events_seq_monotonic():
-    """seq یکنواخت صعودی و بدون تکرار است."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     seqs = [e["seq"] for e in result["events"]]
@@ -196,7 +228,6 @@ def test_chain_events_seq_monotonic():
 # ============================================================
 
 def test_chain_equity_curve_length():
-    """equity_curve طولش برابر klines است."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     assert len(result["equity_curve"]) == len(klines)
@@ -205,7 +236,6 @@ def test_chain_equity_curve_length():
 
 
 def test_chain_equity_consistency():
-    """final_equity == initial + Σ(pnl_usd از EXIT)."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     pnl_sum = sum(
@@ -219,14 +249,6 @@ def test_chain_equity_consistency():
 
 
 def test_chain_trades_sum_matches_realized():
-    """
-    Σ(trade.pnl_usd) == final realized equity - initial.
-
-    این invariant بین performance.py و paper_engine.py برقرار است
-    چون:
-      - paper_engine equity را فقط در close_position تغییر می‌دهد
-      - performance trades را از EXIT event ها می‌سازد
-    """
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     trades = extract_trades(result["events"], MULT)
@@ -245,7 +267,6 @@ def test_chain_trades_sum_matches_realized():
 # ============================================================
 
 def test_chain_csv_equity_roundtrip():
-    """CSV equity نوشته و بازخوانی می‌شود."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     tmp = _tmp_dir()
@@ -262,7 +283,6 @@ def test_chain_csv_equity_roundtrip():
 
 
 def test_chain_csv_trades_roundtrip():
-    """CSV trades نوشته و بازخوانی می‌شود."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     tmp = _tmp_dir()
@@ -283,7 +303,6 @@ def test_chain_csv_trades_roundtrip():
 # ============================================================
 
 def test_chain_report_sections():
-    """گزارش همه‌ی بخش‌های الزامی را دارد."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     perf = build_performance_report(result, klines, MULT)
@@ -303,7 +322,6 @@ def test_chain_report_sections():
 
 
 def test_chain_metrics_all_keys():
-    """metrics شامل همه‌ی کلیدهای مورد انتظار است."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     m = result["metrics"]
@@ -337,7 +355,6 @@ def test_chain_metrics_all_keys():
 
 
 def test_chain_side_stats_present():
-    """side_stats شامل LONG/SHORT/ALL است."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     perf = build_performance_report(result, klines, MULT)
@@ -355,7 +372,6 @@ def test_chain_side_stats_present():
 # ============================================================
 
 def test_chain_state_save_load_roundtrip():
-    """state نهایی قابل ذخیره و بازخوانی است."""
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     path = _tmp_path(".json")
@@ -375,7 +391,6 @@ def test_chain_state_save_load_roundtrip():
 # ============================================================
 
 def test_chain_full_determinism():
-    """اجرای دوباره → نتایج بیت‌به‌بیت یکسان."""
     klines = _realistic_klines(400)
     r1 = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     r2 = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
@@ -389,7 +404,6 @@ def test_chain_full_determinism():
 
 
 def test_chain_report_deterministic():
-    """گزارش متنی بین دو اجرا یکسان است."""
     klines = _realistic_klines(400)
     r1 = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     r2 = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
@@ -406,7 +420,6 @@ def test_chain_report_deterministic():
 # ============================================================
 
 def test_chain_empty_data_raises():
-    """داده خالی → ValueError."""
     try:
         run_backtest([], SPECS)
         assert False, "expected ValueError"
@@ -416,7 +429,6 @@ def test_chain_empty_data_raises():
 
 
 def test_chain_short_data_no_trades():
-    """داده کوتاه (زیر warmup) → صفر trade."""
     klines = _realistic_klines(50)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     assert result["metrics"]["total_trades"] == 0
@@ -425,7 +437,6 @@ def test_chain_short_data_no_trades():
 
 
 def test_chain_flat_data_no_trades():
-    """داده flat → صفر trade، equity بدون تغییر."""
     klines = _flat(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     assert result["metrics"]["total_trades"] == 0
@@ -436,31 +447,65 @@ def test_chain_flat_data_no_trades():
 
 
 # ============================================================
-# 9. Directional Sanity
+# 9. Directional Sanity (با diagnostic)
 # ============================================================
 
 def test_chain_uptrend_phase_produces_long():
-    """فاز اول (روند صعودی) حداقل یک LONG تولید می‌کند."""
+    """
+    فاز uptrend (220..299) حداقل یک LONG تولید می‌کند.
+
+    در صورت شکست، diagnostic چاپ می‌شود تا مشخص شود:
+      - چند ENTRY بعد از warmup تولید شد
+      - چند SIGNAL بعد از warmup تولید شد
+      - side و candle_index آن‌ها
+
+    این تست نباید هرگز تضعیف شود. اگر شکست خورد، باید
+    fixture یا خود استراتژی بررسی شود، نه assertion.
+    """
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
+
     long_entries = [
         e for e in result["events"]
         if e["type"] == "ENTRY" and e["side"] == "LONG"
     ]
-    assert len(long_entries) >= 1
-    print("✅ test_chain_uptrend_phase_produces_long")
+
+    if len(long_entries) < 1:
+        _dump_directional_diagnostics(result, "UP")
+
+    assert len(long_entries) >= 1, (
+        f"expected >=1 LONG entry in uptrend phase "
+        f"(220..299), got {len(long_entries)}"
+    )
+    print(
+        f"✅ test_chain_uptrend_phase_produces_long "
+        f"({len(long_entries)} entries)"
+    )
 
 
 def test_chain_downtrend_phase_produces_short():
-    """فاز سوم (روند نزولی) حداقل یک SHORT تولید می‌کند."""
+    """
+    فاز downtrend (300..359) حداقل یک SHORT تولید می‌کند.
+    """
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
+
     short_entries = [
         e for e in result["events"]
         if e["type"] == "ENTRY" and e["side"] == "SHORT"
     ]
-    assert len(short_entries) >= 1
-    print("✅ test_chain_downtrend_phase_produces_short")
+
+    if len(short_entries) < 1:
+        _dump_directional_diagnostics(result, "DOWN")
+
+    assert len(short_entries) >= 1, (
+        f"expected >=1 SHORT entry in downtrend phase "
+        f"(300..359), got {len(short_entries)}"
+    )
+    print(
+        f"✅ test_chain_downtrend_phase_produces_short "
+        f"({len(short_entries)} entries)"
+    )
 
 
 # ============================================================
@@ -468,14 +513,6 @@ def test_chain_downtrend_phase_produces_short():
 # ============================================================
 
 def test_chain_trade_risk_is_positive():
-    """
-    Sanity: هر trade دارای SL، risk_usd مثبت دارد.
-
-    توجه: این تست propagation دقیق contract_multiplier را
-    اثبات نمی‌کند، چون trade dict فعلی فیلد sl را ندارد.
-    برای تست دقیق propagation، نیاز است در نسخه بعدی
-    extract_trades() sl را نیز در خروجی قرار دهد.
-    """
     klines = _realistic_klines(400)
     result = run_backtest(klines, SPECS, initial_equity=INITIAL_EQUITY)
     trades = extract_trades(result["events"], MULT)
@@ -520,7 +557,7 @@ if __name__ == "__main__":
         test_chain_empty_data_raises,
         test_chain_short_data_no_trades,
         test_chain_flat_data_no_trades,
-        # 9. Directional
+        # 9. Directional (با diagnostic)
         test_chain_uptrend_phase_produces_long,
         test_chain_downtrend_phase_produces_short,
         # 10. Sanity
