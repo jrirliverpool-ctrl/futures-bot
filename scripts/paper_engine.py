@@ -391,6 +391,9 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
             state["position"] = None
             position_closed = True
             state["cooldown_until_index"] = i + config["cooldown_candles"] + 1
+        else:
+            # ⬅️ FIX: persist updated position back into state
+            state["position"] = pos_after
 
     # Circuit breakers
     if not state.get("circuit_breaker_active", False):
