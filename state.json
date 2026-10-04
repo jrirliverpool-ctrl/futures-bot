@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "strategy_version": "1.0.0",
+  "strategy_hash": "sha256:1bb41acdba03cbdb666a71298f059114d37a8903317fab86465e317371277300",
+  "initial_equity": 1000.0,
+  "equity": 1000.0,
+  "peak_equity": 1000.0,
+  "last_processed_candle_ts": null,
+  "position": null,
+  "pending_entry": null,
+  "cooldown_until_index": null,
+  "daily_loss": 0.0,
+  "weekly_loss": 0.0,
+  "loss_day_key": null,
+  "loss_week_key": null,
+  "circuit_breaker_active": false,
+  "symbol": "BTC-SWAP-USDT"
+}
