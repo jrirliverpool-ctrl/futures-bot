@@ -1,0 +1,32 @@
+name: Chain Integration Tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/data_feed.py'
+      - 'scripts/indicators.py'
+      - 'scripts/strategy.py'
+      - 'scripts/paper_engine.py'
+      - 'scripts/backtest.py'
+      - 'scripts/performance.py'
+      - 'scripts/state_manager.py'
+      - 'scripts/strategy_config.py'
+      - 'scripts/compute_hash.py'
+      - 'tests/test_chain_integration.py'
+      - '.github/workflows/test_chain_integration.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Chain Integration Tests
+        run: python tests/test_chain_integration.py
