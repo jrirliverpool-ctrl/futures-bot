@@ -43,6 +43,10 @@ jobs:
           INITIAL_EQUITY: ${{ github.event.inputs.initial_equity }}
         run: python scripts/run_real_backtest.py
 
+      - name: Audit backtest artifacts
+        if: always()
+        run: python scripts/audit_backtest_artifacts.py
+
       - name: Upload backtest artifacts
         if: always()
         uses: actions/upload-artifact@v4
