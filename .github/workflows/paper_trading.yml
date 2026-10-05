@@ -1,0 +1,59 @@
+name: Paper Trading Run
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '5 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: paper-trading
+  cancel-in-progress: false
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          path: main
+
+      - name: Checkout paper-state
+        uses: actions/checkout@v4
+        with:
+          ref: paper-state
+          path: paper_state_dir
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run paper trading
+        working-directory: main
+        env:
+          STATE_DIR: ${{ github.workspace }}/paper_state_dir
+          PYTHONPATH: ${{ github.workspace }}/main/scripts
+          SYMBOL: BTC-SWAP-USDT
+          INTERVAL: 1h
+        run: python scripts/run_paper.py
+
+      - name: Commit paper-state changes
+        working-directory: paper_state_dir
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json events.jsonl
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore(paper-state): update after paper run"
+            git push origin HEAD:paper-state
+          fi
