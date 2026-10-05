@@ -79,14 +79,11 @@ def _detect_new_candle(klines: list, last_processed_ts) -> tuple:
     if not klines:
         return False, None
 
-    # آخرین کندل دریافت‌شده
     last_ts = int(klines[-1][0])
 
-    # اگر آخرین کندل قبلاً پردازش شده → کاری نیست
     if last_processed_ts is not None and last_ts <= last_processed_ts:
         return False, None
 
-    # index آخرین کندل
     return True, len(klines) - 1
 
 
@@ -219,8 +216,12 @@ def main():
         print(f"📝 No events to append")
     print()
 
-    # ---- 9. Update state ----
-    state["last_processed_candle_ts"] = new_candle_ts
+    # ---- 9. Ensure last_processed_candle_ts is set ----
+    # process_candle خودش last_processed_candle_ts را ست می‌کند.
+    # این خط برای صراحت و به‌عنوان fallback است.
+    if state.get("last_processed_candle_ts") != new_candle_ts:
+        state["last_processed_candle_ts"] = new_candle_ts
+
     state["symbol"] = symbol
     state["contract_multiplier"] = specs["contract_multiplier"]
     state["last_close_price"] = float(klines[idx][4])
