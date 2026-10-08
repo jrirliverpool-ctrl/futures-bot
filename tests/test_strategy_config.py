@@ -27,7 +27,7 @@ from strategy_config import (
 # ============================================================
 
 def test_config_has_version():
-    assert STRATEGY_CONFIG["version"] == "1.0.0"
+    assert STRATEGY_CONFIG["version"] == "1.0.1"
 
 
 def test_config_timeframe_valid():
@@ -42,7 +42,7 @@ def test_config_parameters_complete():
         "ema_fast_period", "ema_slow_period", "donchian_period", "atr_period",
         "sl_atr_mult", "tp1_atr_mult", "be_trigger_at_r",
         "be_sl_offset_atr", "trailing_atr_mult", "time_exit_candles",
-        "risk_per_trade", "max_leverage",
+        "risk_per_trade", "max_leverage", "leverage_per_trade",
         "daily_loss_limit", "weekly_loss_limit", "total_dd_limit",
         "cooldown_candles", "slippage_pct",
     ]
@@ -76,7 +76,7 @@ def test_get_config_default():
 def test_get_config_override_valid():
     cfg = get_strategy_config({"ema_fast_period": 21})
     assert cfg["ema_fast_period"] == 21
-    assert cfg["ema_slow_period"] == 200  # unchanged
+    assert cfg["ema_slow_period"] == 200
 
 
 def test_get_config_override_unknown_key():
@@ -106,7 +106,9 @@ def test_get_indicator_params():
 def test_get_engine_config_keys():
     ec = get_engine_config()
     expected = {
-        "risk_per_trade", "sl_atr_mult", "tp1_atr_mult",
+        "risk_per_trade",
+        "leverage", "leverage_cap",
+        "sl_atr_mult", "tp1_atr_mult",
         "trailing_atr_mult", "be_sl_offset_atr", "time_exit_candles",
         "cooldown_candles", "daily_loss_limit", "weekly_loss_limit",
         "total_dd_limit", "slippage_pct", "interval_ms",
@@ -117,6 +119,8 @@ def test_get_engine_config_keys():
 def test_get_engine_config_values():
     ec = get_engine_config()
     assert ec["risk_per_trade"] == 0.01
+    assert ec["leverage"] == 3
+    assert ec["leverage_cap"] == 3
     assert ec["sl_atr_mult"] == 1.5
     assert ec["tp1_atr_mult"] == 2.0
     assert ec["interval_ms"] == 3_600_000
