@@ -65,8 +65,17 @@ def _cfg():
     return c
 
 
-def _state():
+def _mk_state():
     return copy.deepcopy(DEFAULT_STATE)
+
+
+def _pending_entry(side="LONG"):
+    return {
+        "side": side,
+        "signal_candle_ts": 1000,
+        "atr_at_signal": 500.0,
+        "close_at_signal": 85000.0,
+    }
 
 
 # ============================================================
@@ -196,7 +205,6 @@ def test_trailing_sl_never_moves_backward():
     pos["highest_high_since_entry"] = 86000.0
     candle = _candle(1000, 86000, 86100, 85800, 86050)
     pos_after, _, _ = manage_position_on_candle(pos, candle, 500.0, _cfg())
-    # trailing would push to 86100 - 750 = 85350, but SL already at 85500 → keep 85500
     assert pos_after["current_sl"] >= 85500.0
     print("✅ test_trailing_sl_never_moves_backward passed")
 
@@ -226,13 +234,8 @@ def test_short_sl_hit():
 # ============================================================
 
 def test_pending_entry_executed():
-    state = _state()
-    state["pending_entry"] = {
-        "side": "LONG",
-        "signal_candle_ts": 0,
-        "atr_at_signal": 500.0,
-        "close_at_signal": 85000.0,
-    }
+    state = _mk_state()
+    state["pending_entry"] = _pending_entry("LONG")
     candle = _candle(3600000, 85100, 85300, 85000, 85200)
     new_state, events = execute_pending_entry(state, candle, SPECS, _cfg())
     assert new_state["position"] is not None
@@ -245,13 +248,8 @@ def test_pending_entry_executed():
 
 
 def test_event_contains_entry_information():
-    state = _state()
-    state["pending_entry"] = {
-        "side": "LONG",
-        "signal_candle_ts": 1000,
-        "atr_at_signal": 500.0,
-        "close_at_signal": 85000.0,
-    }
+    state = _mk_state()
+    state["pending_entry"] = _pending_entry("LONG")
     candle = _candle(3600000, 85100, 85300, 85000, 85200)
     _, events = execute_pending_entry(state, candle, SPECS, _cfg())
     entry = next(e for e in events if e["type"] == "ENTRY")
@@ -267,7 +265,7 @@ def test_event_contains_entry_information():
 # ============================================================
 
 def test_daily_loss_resets_on_new_day():
-    state = _state()
+    state = _mk_state()
     day1 = 1_000_000_000
     day2 = day1 + 86_400_000
     state["daily_loss"] = 20.0
@@ -278,7 +276,7 @@ def test_daily_loss_resets_on_new_day():
 
 
 def test_weekly_loss_resets_on_new_week():
-    state = _state()
+    state = _mk_state()
     week1 = 10 * 7 * 86_400_000
     week2 = week1 + 7 * 86_400_000
     state["weekly_loss"] = 50.0
@@ -293,7 +291,7 @@ def test_weekly_loss_resets_on_new_week():
 # ============================================================
 
 def test_daily_breaker():
-    state = _state()
+    state = _mk_state()
     state["daily_loss"] = 30.0
     state["loss_day_key"] = 0
     klines = [_candle(1000, 100, 101, 99, 100)]
@@ -306,7 +304,7 @@ def test_daily_breaker():
 
 
 def test_weekly_breaker():
-    state = _state()
+    state = _mk_state()
     state["weekly_loss"] = 70.0
     state["loss_week_key"] = 0
     state["loss_day_key"] = 0
@@ -320,7 +318,7 @@ def test_weekly_breaker():
 
 
 def test_total_dd_from_peak():
-    state = _state()
+    state = _mk_state()
     state["peak_equity"] = 2000.0
     state["equity"] = 1600.0
     state["loss_day_key"] = 0
@@ -335,7 +333,7 @@ def test_total_dd_from_peak():
 
 
 def test_total_dd_uses_peak_equity():
-    state = _state()
+    state = _mk_state()
     state["equity"] = 1200.0
     state["peak_equity"] = 1200.0
     state["equity"] = 1020.0
@@ -349,8 +347,7 @@ def test_total_dd_uses_peak_equity():
 # ============================================================
 
 def test_cooldown_blocks_signal():
-    state = _state()
-    # i=5 باید واقعاً در klines وجود داشته باشد.
+    state = _mk_state()
     klines = [
         _candle(1000, 100, 101, 99, 100),
         _candle(2000, 100, 101, 99, 100),
@@ -367,16 +364,11 @@ def test_cooldown_blocks_signal():
         "close": 100.0,
         "reason": "test",
     }
-    # Cooldown تا index=10 فعال است.
     state["cooldown_until_index"] = 10
-
     new_state, events = process_candle(
         state, klines, indicators, 5, SPECS, _cfg(), signal=signal,
     )
-
-    # سیگنال نباید وارد pending_entry شود.
     assert new_state["pending_entry"] is None
-    # باید COOLDOWN_SKIP ثبت شده باشد.
     assert any(e["type"] == "COOLDOWN_SKIP" for e in events)
     print("✅ test_cooldown_blocks_signal passed")
 
@@ -386,7 +378,7 @@ def test_cooldown_blocks_signal():
 # ============================================================
 
 def test_engine_does_not_generate_signal():
-    state = _state()
+    state = _mk_state()
     klines = [_candle(1000, 100, 101, 99, 100)]
     indicators = {"atr": [1.0]}
     new_state, events = process_candle(
@@ -398,7 +390,7 @@ def test_engine_does_not_generate_signal():
 
 
 def test_signal_becomes_pending_not_immediate_entry():
-    state = _state()
+    state = _mk_state()
     klines = [
         _candle(1000, 100, 101, 99, 100),
         _candle(2000, 101, 103, 100, 102),
@@ -425,7 +417,7 @@ def test_signal_becomes_pending_not_immediate_entry():
 
 
 def test_no_signal_when_position_open():
-    state = _state()
+    state = _mk_state()
     state["position"] = _make_position()
     klines = [_candle(1000, 100, 101, 99, 100)]
     indicators = {"atr": [1.0]}
@@ -455,11 +447,127 @@ def test_deterministic_replay():
     indicators = {"atr": [500.0, 500.0, 500.0]}
     signals = [None, None, None]
 
-    s1, e1 = run_engine(klines, indicators, signals, _state(), SPECS, DEFAULT_CONFIG)
-    s2, e2 = run_engine(klines, indicators, signals, _state(), SPECS, DEFAULT_CONFIG)
+    s1, e1 = run_engine(klines, indicators, signals, _mk_state(), SPECS, DEFAULT_CONFIG)
+    s2, e2 = run_engine(klines, indicators, signals, _mk_state(), SPECS, DEFAULT_CONFIG)
     assert s1 == s2
     assert e1 == e2
     print("✅ test_deterministic_replay passed")
+
+
+# ============================================================
+# Stage B — Leverage Validation (جدید)
+# ============================================================
+
+def test_leverage_none_skips_validation():
+    qty = calculate_position_size(
+        1000.0, 85000.0, 84250.0, SPECS, 0.01,
+    )
+    assert qty is not None and qty > 0
+    print("✅ test_leverage_none_skips_validation passed")
+
+
+def test_leverage_valid_accepts():
+    qty = calculate_position_size(
+        1000.0, 85000.0, 84250.0, SPECS, 0.01,
+        leverage=3, leverage_cap=3,
+    )
+    assert qty is not None and qty > 0
+    print("✅ test_leverage_valid_accepts passed")
+
+
+def test_leverage_bool_rejects():
+    qty = calculate_position_size(
+        1000.0, 85000.0, 84250.0, SPECS, 0.01,
+        leverage=True, leverage_cap=3,
+    )
+    assert qty is None
+    print("✅ test_leverage_bool_rejects passed")
+
+
+def test_leverage_zero_rejects():
+    qty = calculate_position_size(
+        1000.0, 85000.0, 84250.0, SPECS, 0.01,
+        leverage=0, leverage_cap=3,
+    )
+    assert qty is None
+    print("✅ test_leverage_zero_rejects passed")
+
+
+def test_leverage_above_exchange_max_rejects():
+    qty = calculate_position_size(
+        1000.0, 85000.0, 84250.0, SPECS, 0.01,
+        leverage=500, leverage_cap=500,
+    )
+    assert qty is None
+    print("✅ test_leverage_above_exchange_max_rejects passed")
+
+
+def test_leverage_above_cap_rejects():
+    qty = calculate_position_size(
+        1000.0, 85000.0, 84250.0, SPECS, 0.01,
+        leverage=5, leverage_cap=3,
+    )
+    assert qty is None
+    print("✅ test_leverage_above_cap_rejects passed")
+
+
+# ============================================================
+# pending_entry clearing + ENTRY_REJECTED (جدید)
+# ============================================================
+
+def test_pending_entry_cleared_on_leverage_rejection():
+    state = _mk_state()
+    state["pending_entry"] = _pending_entry("LONG")
+
+    cfg = _cfg()
+    cfg["leverage"] = 5
+    cfg["leverage_cap"] = 3
+
+    candle = _candle(3600000, 85100, 85300, 85000, 85200)
+    new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
+
+    assert new_state["pending_entry"] is None
+    assert new_state["position"] is None
+
+    rejected = [e for e in events if e["type"] == "ENTRY_REJECTED"]
+    assert len(rejected) == 1
+    assert rejected[0]["reason"] == "leverage_exceeds_cap"
+    print("✅ test_pending_entry_cleared_on_leverage_rejection passed")
+
+
+def test_pending_entry_cleared_on_bool_leverage():
+    state = _mk_state()
+    state["pending_entry"] = _pending_entry("LONG")
+
+    cfg = _cfg()
+    cfg["leverage"] = True
+    cfg["leverage_cap"] = 3
+
+    candle = _candle(3600000, 85100, 85300, 85000, 85200)
+    new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
+
+    assert new_state["pending_entry"] is None
+    assert new_state["position"] is None
+    rejected = [e for e in events if e["type"] == "ENTRY_REJECTED"]
+    assert len(rejected) == 1
+    assert rejected[0]["reason"] == "invalid_leverage_type"
+    print("✅ test_pending_entry_cleared_on_bool_leverage passed")
+
+
+def test_pending_entry_no_leverage_still_opens():
+    state = _mk_state()
+    state["pending_entry"] = _pending_entry("LONG")
+
+    cfg = _cfg()  # بدون leverage / leverage_cap
+    candle = _candle(3600000, 85100, 85300, 85000, 85200)
+
+    new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
+
+    assert new_state["position"] is not None
+    assert new_state["pending_entry"] is None
+    entry = [e for e in events if e["type"] == "ENTRY"]
+    assert len(entry) == 1
+    print("✅ test_pending_entry_no_leverage_still_opens passed")
 
 
 # ============================================================
@@ -467,17 +575,16 @@ def test_deterministic_replay():
 # ============================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🧪 Running paper_engine unit tests")
-    print("=" * 60)
-
     tests = [
+        # Helpers
         test_floor_to_step,
         test_apply_slippage,
         test_compute_initial_levels,
+        # Sizing
         test_position_size_valid,
         test_position_size_below_min,
         test_position_size_min_notional,
+        # SL/BE/TP1
         test_sl_hit_long,
         test_sl_first_ambiguity,
         test_be_moved,
@@ -487,35 +594,51 @@ if __name__ == "__main__":
         test_trailing_sl_never_moves_backward,
         test_time_exit,
         test_short_sl_hit,
+        # Entry
         test_pending_entry_executed,
         test_event_contains_entry_information,
+        # Day/Week
         test_daily_loss_resets_on_new_day,
         test_weekly_loss_resets_on_new_week,
+        # Circuit breakers
         test_daily_breaker,
         test_weekly_breaker,
         test_total_dd_from_peak,
         test_total_dd_uses_peak_equity,
+        # Cooldown
         test_cooldown_blocks_signal,
+        # Engine
         test_engine_does_not_generate_signal,
         test_signal_becomes_pending_not_immediate_entry,
         test_no_signal_when_position_open,
+        # Determinism
         test_deterministic_replay,
+        # Stage B — leverage (new)
+        test_leverage_none_skips_validation,
+        test_leverage_valid_accepts,
+        test_leverage_bool_rejects,
+        test_leverage_zero_rejects,
+        test_leverage_above_exchange_max_rejects,
+        test_leverage_above_cap_rejects,
+        test_pending_entry_cleared_on_leverage_rejection,
+        test_pending_entry_cleared_on_bool_leverage,
+        test_pending_entry_no_leverage_still_opens,
     ]
 
     passed, failed = 0, 0
+    print("=" * 60)
+    print("🧪 Paper Engine Unit Tests")
+    print("=" * 60)
     for t in tests:
         try:
             t(); passed += 1
-        except AssertionError as e:
-            print(f"❌ {t.__name__} FAILED: {e}"); failed += 1
-        except Exception as e:
+        except Exception as exc:
             import traceback
-            print(f"❌ {t.__name__} ERROR: {e}"); traceback.print_exc(); failed += 1
-
-    print()
+            print(f"❌ {t.__name__}: {exc}")
+            traceback.print_exc()
+            failed += 1
     print("=" * 60)
     print(f"🏁 FINAL RESULT: {passed}/{len(tests)} PASSED")
     print("=" * 60)
-
-    if failed > 0:
+    if failed:
         sys.exit(1)
