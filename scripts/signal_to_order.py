@@ -14,9 +14,11 @@ signal_to_order.py — ترجمه سیگنال Strategy به OrderRequest.
     - SHORT     →  OrderRequest(side="SHORT", intent="ENTRY")
 
 EXIT:
-    - منبع qty = position.remaining_size (نه sizing)
-    - منبع symbol = state.symbol (اجباری)
-    - منبع leverage = position.leverage یا default
+    - منبع qty = position.remaining_size (اجباری)
+    - منبع symbol = state.symbol یا position.symbol (اجباری)
+    - منبع leverage = position.leverage یا default_leverage
+
+هیچ fallback بی‌صدا. هر فقدان داده → ValueError صریح.
 
 DEFAULT_SIZING فقط برای Dry-Run است.
 در Live، sizing واقعی باید از risk layer بیاید.
@@ -33,7 +35,6 @@ from order_executor import OrderRequest
 
 VALID_SIGNALS = ("LONG", "SHORT", "NO_TRADE")
 
-# فقط برای Dry-Run. در Live از risk layer استفاده شود.
 DEFAULT_SIZING = {
     "qty": 0.001,
     "leverage": 3,
@@ -45,7 +46,6 @@ DEFAULT_SIZING = {
 # ============================================================
 
 def _validate_sizing(sizing) -> dict:
-    """sizing را اعتبارسنجی و نرمال‌سازی می‌کند."""
     if sizing is None:
         return dict(DEFAULT_SIZING)
     if not isinstance(sizing, dict):
@@ -65,6 +65,7 @@ def _resolve_symbol(signal: dict, explicit_symbol) -> str:
       1. explicit_symbol
       2. signal["symbol"]
       3. ValueError
+
     هرگز fallback بی‌صدا به default.
     """
     candidates = [explicit_symbol, signal.get("symbol")]
@@ -72,7 +73,9 @@ def _resolve_symbol(signal: dict, explicit_symbol) -> str:
         if c is None:
             continue
         if not isinstance(c, str):
-            raise ValueError(f"symbol must be str, got {type(c).__name__}")
+            raise ValueError(
+                f"symbol must be str, got {type(c).__name__}"
+            )
         if not c.strip():
             raise ValueError("symbol must be non-empty")
         return c
@@ -82,7 +85,7 @@ def _resolve_symbol(signal: dict, explicit_symbol) -> str:
 
 
 # ============================================================
-# Translator
+# Translator — ENTRY
 # ============================================================
 
 def signal_to_order(
@@ -128,6 +131,10 @@ def signal_to_order(
     )
 
 
+# ============================================================
+# Translator — EXIT
+# ============================================================
+
 def signal_to_exit_order(
     state: dict,
     order_type: str = "MARKET",
@@ -139,14 +146,14 @@ def signal_to_exit_order(
 
     قواعد:
       - qty ← pos.remaining_size (اجباری)
-      - symbol ← state.symbol یا pos.symbol (اجباری، بدون fallback)
+      - symbol ← state.symbol یا pos.symbol (اجباری)
       - leverage ← pos.leverage یا default_leverage
 
     Returns:
         OrderRequest با intent="EXIT"، یا None اگر پوزیشن باز نیست.
 
     Raises:
-        ValueError: پوزیشن ناسازگار یا symbol پیدا نشد
+        ValueError: state/position/symbol/qty نامعتبر
     """
     if not isinstance(state, dict):
         raise ValueError(
@@ -166,12 +173,14 @@ def signal_to_exit_order(
     if side not in ("LONG", "SHORT"):
         raise ValueError(f"invalid position side: {side!r}")
 
-    # qty از remaining_size، نه sizing
+    # qty از remaining_size
     qty = pos.get("remaining_size")
     if qty is None:
         raise ValueError("position.remaining_size missing")
-    if not isinstance(qty, (int, float)) or qty <= 0:
-        raise ValueError(f"invalid position.remaining_size: {qty}")
+    if not isinstance(qty, (int, float)) or isinstance(qty, bool):
+        raise ValueError(f"invalid position.remaining_size: {qty!r}")
+    if qty <= 0:
+        raise ValueError(f"position.remaining_size must be > 0: {qty}")
 
     # symbol صریح
     symbol = state.get("symbol") or pos.get("symbol")
@@ -184,7 +193,7 @@ def signal_to_exit_order(
 
     # leverage
     leverage = pos.get("leverage", default_leverage)
-    if not isinstance(leverage, int) or isinstance(leverage, bool):
+    if isinstance(leverage, bool) or not isinstance(leverage, int):
         raise ValueError(f"invalid leverage: {leverage!r}")
     if leverage <= 0:
         raise ValueError(f"leverage must be > 0: {leverage}")
