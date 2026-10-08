@@ -3,8 +3,8 @@ run_paper.py — Paper Trading orchestrator برای ApexQuant.
 
 هر اجرا:
   1. state را از STATE_DIR می‌خواند (یا init می‌کند)
-  2. آخرین کندل بسته‌شده BTC/1h را از Toobit می‌گیرد
-  3. اگر کندل جدید است (candle_ts > last_processed_candle_ts):
+  2. آخرین کندل بسته‌شده را از Toobit می‌گیرد
+  3. اگر کندل جدید است:
        a. indicators بساز
        b. strategy signal
        c. paper_engine.process_candle
@@ -12,10 +12,13 @@ run_paper.py — Paper Trading orchestrator برای ApexQuant.
        e. state را save کن
   4. اگر کندل جدید نیست → skip
 
-هیچ سفارش واقعی به Toobit ارسال نمی‌شود.
-هیچ API خصوصی صدا زده نمی‌شود.
+Stage B leverage validation:
+  - engine_config که از get_engine_config() می‌آید، شامل
+    leverage و leverage_cap است.
+  - paper_engine.calculate_position_size این دو را اعتبارسنجی می‌کند
+    (fail-closed).
 
-هیچ سفارشی به Exchange ارسال نمی‌شود. فقط شبیه‌سازی روی داده زنده.
+هیچ سفارش واقعی به صرافی ارسال نمی‌شود.
 
 متغیرهای محیطی:
   STATE_DIR : مسیر دایرکتوری paper-state (پیش‌فرض: ./paper_state_dir)
@@ -42,7 +45,10 @@ from symbol_specs import get_symbol_specs
 from indicators import compute_all
 from strategy import evaluate_signal
 from paper_engine import process_candle
-from strategy_config import get_indicator_params, get_engine_config
+from strategy_config import (
+    get_indicator_params,
+    get_engine_config,
+)
 from compute_hash import compute_strategy_hash
 
 
@@ -63,27 +69,26 @@ def _build_indicators(klines: list) -> dict:
 
 
 def _enrich_specs_for_engine(specs: dict) -> dict:
-    """specs را به فرمت engine config تبدیل می‌کند."""
+    """
+    engine config از strategy_config + injection.
+
+    get_engine_config() اکنون شامل:
+      leverage, leverage_cap, risk_per_trade, ...
+
+    اینجا فقط contract_multiplier_for_pnl اضافه می‌شود
+    (چون به specs وابسته است، نه به strategy_config).
+    """
     cfg = get_engine_config()
     cfg["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
     return cfg
 
 
 def _detect_new_candle(klines: list, last_processed_ts) -> tuple:
-    """
-    آیا کندل جدیدی هست که پردازش نشده؟
-
-    Returns:
-        (should_process: bool, index_to_process: int or None)
-    """
     if not klines:
         return False, None
-
     last_ts = int(klines[-1][0])
-
     if last_processed_ts is not None and last_ts <= last_processed_ts:
         return False, None
-
     return True, len(klines) - 1
 
 
@@ -106,7 +111,7 @@ def main():
     print("=" * 70)
     print()
 
-    # ---- 1. State: load or init ----
+    # ---- 1. State ----
     was_existing = state_exists(state_dir)
     if was_existing:
         state = load_state(state_dir)
@@ -122,7 +127,7 @@ def main():
     print(f"  has_position             : {state['position'] is not None}")
     print()
 
-    # ---- 2. Fetch symbol specs ----
+    # ---- 2. Specs ----
     print(f"📋 Fetching symbol specs...")
     try:
         specs = get_symbol_specs(symbol)
@@ -132,7 +137,7 @@ def main():
     print(f"  contract_multiplier : {specs['contract_multiplier']}")
     print()
 
-    # ---- 3. Fetch closed klines ----
+    # ---- 3. Klines ----
     print(f"📥 Fetching closed {interval} candles...")
     try:
         klines = fetch_closed_klines(symbol, interval, limit=300)
@@ -150,7 +155,7 @@ def main():
         print(f"⚠️  کندل کافی نیست ({len(klines)} < 250) — exit")
         sys.exit(0)
 
-    # ---- 4. Detect new candle ----
+    # ---- 4. New candle? ----
     should_process, idx = _detect_new_candle(klines, last_processed)
 
     if not should_process:
@@ -166,7 +171,7 @@ def main():
     print(f"🆕 New candle detected: {new_candle_ts}")
     print()
 
-    # ---- 5. Compute indicators ----
+    # ---- 5. Indicators ----
     print("🧠 Computing indicators...")
     try:
         indicators = _build_indicators(klines)
@@ -174,6 +179,7 @@ def main():
         print(f"❌ indicators failed: {e}")
         sys.exit(1)
     print(f"  ✅ computed")
+    print()
 
     # ---- 6. Strategy signal ----
     sig = evaluate_signal(indicators, idx)
@@ -181,10 +187,12 @@ def main():
     print(f"  reason : {sig.get('reason', '')}")
     print()
 
-    # ---- 7. Process candle through paper_engine ----
+    # ---- 7. paper_engine ----
     engine_config = _enrich_specs_for_engine(specs)
 
     print("⚙️  Processing through paper_engine...")
+    print(f"  leverage     : {engine_config.get('leverage')}")
+    print(f"  leverage_cap : {engine_config.get('leverage_cap')}")
     try:
         state, events = process_candle(
             state,
@@ -216,9 +224,7 @@ def main():
         print(f"📝 No events to append")
     print()
 
-    # ---- 9. Ensure last_processed_candle_ts is set ----
-    # process_candle خودش last_processed_candle_ts را ست می‌کند.
-    # این خط برای صراحت و به‌عنوان fallback است.
+    # ---- 9. Ensure last_processed_candle_ts ----
     if state.get("last_processed_candle_ts") != new_candle_ts:
         state["last_processed_candle_ts"] = new_candle_ts
 
