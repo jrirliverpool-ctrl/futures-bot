@@ -5,7 +5,10 @@ on:
   push:
     paths:
       - 'scripts/paper_engine.py'
+      - 'scripts/run_paper.py'
+      - 'scripts/strategy_config.py'
       - 'tests/test_paper_engine.py'
+      - 'tests/test_run_paper_wiring.py'
       - '.github/workflows/test_paper_engine.yml'
 
 jobs:
@@ -22,3 +25,6 @@ jobs:
 
       - name: Run Paper Engine tests
         run: python tests/test_paper_engine.py
+
+      - name: Run Run-Paper Wiring tests
+        run: python tests/test_run_paper_wiring.py
