@@ -9,6 +9,7 @@ Responsibilities:
   - Candle-based cooldown
   - Conservative SL-first ambiguity
   - Deterministic event logging
+  - Stage B leverage validation (fail-closed)
 
 Non-responsibilities:
   - Signal generation (comes from outside)
@@ -57,9 +58,37 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
     raise ValueError(f"Invalid side: {side}")
 
 
-def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade):
+def calculate_position_size(equity, entry_price, stop_loss, specs,
+                            risk_per_trade,
+                            leverage=None, leverage_cap=None):
+    """
+    محاسبه qty بر اساس ریسک.
+
+    Stage B — leverage validation (fail-closed):
+      - اگر leverage ارسال شده ولی نامعتبر:
+          bool / non-int / ≤ 0 / > exchange max / > cap → return None
+      - اگر leverage=None → اعتبارسنجی اهرم رد می‌شود
+        (فقط برای backward compatibility تست‌های قدیمی)
+
+    توجه:
+      این تابع فقط qty را محدود می‌کند.
+      بررسی margin و notional cap مسئولیت جداگانه‌ای است.
+    """
     if equity <= 0 or risk_per_trade <= 0:
         return None
+
+    # Stage B — leverage validation
+    if leverage is not None:
+        if isinstance(leverage, bool) or not isinstance(leverage, int):
+            return None
+        if leverage <= 0:
+            return None
+        max_lev = specs.get("max_leverage", float("inf"))
+        if leverage > max_lev:
+            return None
+        if leverage_cap is not None and leverage > leverage_cap:
+            return None
+
     stop_distance = abs(entry_price - stop_loss)
     if stop_distance <= 0:
         return None
@@ -141,12 +170,28 @@ def execute_pending_entry(state, candle, specs, config):
 
     qty = calculate_position_size(
         state["equity"], entry_price, sl, specs, config["risk_per_trade"],
+        leverage=config.get("leverage"),
+        leverage_cap=config.get("leverage_cap"),
     )
 
     if qty is None:
+        # تشخیص دقیق علت رد برای لاگ شفاف
+        lev = config.get("leverage")
+        reason = "invalid_or_below_min_position_size"
+        if lev is not None:
+            if isinstance(lev, bool) or not isinstance(lev, int):
+                reason = "invalid_leverage_type"
+            elif lev <= 0:
+                reason = "invalid_leverage_nonpositive"
+            elif lev > specs.get("max_leverage", float("inf")):
+                reason = "leverage_exceeds_exchange_max"
+            elif (config.get("leverage_cap") is not None
+                  and lev > config["leverage_cap"]):
+                reason = "leverage_exceeds_cap"
+
         events.append({
             "type": "ENTRY_REJECTED",
-            "reason": "invalid_or_below_min_position_size",
+            "reason": reason,
             "timestamp": ts,
         })
         state["pending_entry"] = None
@@ -392,7 +437,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
             position_closed = True
             state["cooldown_until_index"] = i + config["cooldown_candles"] + 1
         else:
-            # ⬅️ FIX: persist updated position back into state
             state["position"] = pos_after
 
     # Circuit breakers
