@@ -25,8 +25,7 @@ test_hash_regression.py — Regression test for strategy_hash.
           4. تغییرات را Commit کن
           5. CI باید دوباره سبز شود
 
-توجه: در این نسخه، GOLDEN_HASH با PLACEHOLDER مقداردهی شده
-تا پس از اجرای اول، hash واقعی از لاگ CI استخراج و جایگزین شود.
+GOLDEN_HASH فعلی مربوط به strategy version 1.0.1 است.
 """
 
 import os
@@ -42,9 +41,9 @@ from strategy_config import STRATEGY_CONFIG, get_strategy_config
 
 
 # ═══════════════════════════════════════════════════════════
-# GOLDEN VALUES — به‌روزرسانی در Batch 2
+# GOLDEN VALUES — strategy v1.0.1
 # ═══════════════════════════════════════════════════════════
-GOLDEN_HASH = "sha256:PLACEHOLDER_WILL_BE_FILLED"
+GOLDEN_HASH = "sha256:7d608627418f8c9a9f7d157d03d0fdc5e25add19cc35f0cc3ee1cc024c347d90"
 GOLDEN_VERSION = "1.0.1"
 # ═══════════════════════════════════════════════════════════
 
