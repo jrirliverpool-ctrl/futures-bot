@@ -1,0 +1,25 @@
+name: Execution Chain Integration Tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/order_executor.py'
+      - 'scripts/signal_to_order.py'
+      - 'tests/test_execution_chain.py'
+      - '.github/workflows/test_execution_chain.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Execution Chain tests
+        run: python tests/test_execution_chain.py
