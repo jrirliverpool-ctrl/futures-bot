@@ -7,13 +7,32 @@
 
 ---
 
-## [1.0.0] — 2026-10-02
+## [1.0.1] — 2026-10-08
 
-**Status:** 🟢 FROZEN — Initial Strategy Specification
+**Status:** 🟢 CONFIG FROZEN — V1 clarification
 
-**Hash:** `sha256:1bb41acdba03cbdb666a71298f059114d37a8903317fab86465e317371277300`
+**Hash:** `sha256:7d608627418f8c9a9f7d157d03d0fdc5e25add19cc35f0cc3ee1cc024c347d90`
 
-### Strategy Parameters
+### Changes from 1.0.0
+| Parameter | Value | Note |
+|---|---|---|
+| `version` | `1.0.0` → `1.0.1` | version bump |
+| `leverage_per_trade` | **added** = 3 | per-trade leverage, جدا از cap |
+
+### Rationale
+`max_leverage` (سقف سخت) و `leverage_per_trade` (اهرم واقعی هر معامله)
+از هم تفکیک شدند. در V1 هر دو ۳ هستند، ولی تفکیک امکان کاهش اهرم
+را بدون تغییر cap فراهم می‌کند.
+
+### Configuration Impact
+- `get_engine_config()` اکنون `leverage` و `leverage_cap` را برمی‌گرداند
+- `calculate_position_size()` در `paper_engine.py` این دو پارامتر
+  را به‌عنوان ورودی اختیاری می‌پذیرد و در صورت ارسال، آن‌ها را
+  اعتبارسنجی می‌کند (fail-closed).
+- مسیر end-to-end در `run_paper.py` نیازمند اتصال صریح است
+  (Step بعدی).
+
+### Strategy Parameters (unchanged)
 | Parameter | Value |
 |---|---|
 | Timeframe | 1h |
@@ -33,7 +52,8 @@
 | Parameter | Value |
 |---|---|
 | Risk per trade | 1% |
-| Max leverage | 3x |
+| Max leverage (cap) | 3 |
+| Leverage per trade | 3 |
 | Daily loss limit | 3% |
 | Weekly loss limit | 7% |
 | Total DD limit | 15% |
@@ -42,11 +62,11 @@
 | Parameter | Value |
 |---|---|
 | Slippage | 0.05% |
-| Default symbol | BTC-SWAP-USDT (خارج از hash) |
+| Default symbol | BTC-SWAP-USDT |
 
 ### Notes
-- نسخه اولیه استراتژی، مبتنی بر `docs/strategy_v1.md`.
-- Regression hash ثبت شد در `tests/test_hash_regression.py`.
-- تغییر `strategy_config.py` بدون اجرای فرآیند ۵ مرحله‌ای (Spec + Changelog + Golden Hash) ممنوع.
+- Regression hash v1.0.1 در `tests/test_hash_regression.py` ثبت شد.
+- هیچ تغییری در منطق استراتژی (SL/TP/Trailing/Time Exit) رخ نداد.
+- اتصال `run_paper.py` به `get_engine_config()` در گام بعدی انجام می‌شود.
 
 ### Chain of Trust
