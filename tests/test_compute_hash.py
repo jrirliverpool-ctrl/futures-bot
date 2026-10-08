@@ -81,8 +81,8 @@ def test_hash_deterministic_same_config():
 
 
 def test_hash_deterministic_dict_order():
-    a = {"version": "1.0.0", "x": 1, "y": 2}
-    b = {"y": 2, "version": "1.0.0", "x": 1}
+    a = {"version": "1.0.1", "x": 1, "y": 2}
+    b = {"y": 2, "version": "1.0.1", "x": 1}
     assert compute_strategy_hash(a) == compute_strategy_hash(b)
 
 
@@ -100,7 +100,7 @@ def test_hash_changes_on_each_field():
     base_hash = compute_strategy_hash()
 
     variations = [
-        {"version": "1.0.1"},
+        {"version": "1.0.2"},
         {"timeframe": "4h"},
         {"ema_fast_period": 21},
         {"ema_slow_period": 100},
@@ -114,6 +114,7 @@ def test_hash_changes_on_each_field():
         {"time_exit_candles": 24},
         {"risk_per_trade": 0.02},
         {"max_leverage": 5},
+        {"leverage_per_trade": 5},
         {"daily_loss_limit": 0.05},
         {"weekly_loss_limit": 0.10},
         {"total_dd_limit": 0.20},
@@ -134,7 +135,7 @@ def test_hash_changes_on_each_field():
 def test_get_strategy_metadata():
     meta = get_strategy_metadata()
     assert "version" in meta and "hash" in meta
-    assert meta["version"] == "1.0.0"
+    assert meta["version"] == "1.0.1"
     assert meta["hash"].startswith("sha256:")
 
 
@@ -172,9 +173,6 @@ def test_verify_hash_invalid_type():
 def test_hash_isolated_from_symbol():
     """symbol نباید hash را تغییر دهد چون در config نیست."""
     h1 = compute_strategy_hash()
-    # اضافه کردن symbol به یک dict محلی، نباید hash را عوض کند
-    # (چون compute_strategy_hash فقط به config می‌نگرد)
-    # این تست خودش ماهیتاً تأیید می‌کند که symbol در config نیست.
     from strategy_config import STRATEGY_CONFIG
     assert "symbol" not in STRATEGY_CONFIG
     h2 = compute_strategy_hash()
@@ -188,7 +186,6 @@ def test_hash_isolated_from_symbol():
 def test_print_current_hash():
     h = compute_strategy_hash()
     print(f"\n📌 CURRENT STRATEGY HASH: {h}\n")
-    # This test always passes. Value is extracted from CI log.
 
 
 # ============================================================
