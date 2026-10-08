@@ -455,7 +455,7 @@ def test_deterministic_replay():
 
 
 # ============================================================
-# Stage B — Leverage Validation (جدید)
+# Stage B — Leverage Validation
 # ============================================================
 
 def test_leverage_none_skips_validation():
@@ -512,10 +512,16 @@ def test_leverage_above_cap_rejects():
 
 
 # ============================================================
-# pending_entry clearing + ENTRY_REJECTED (جدید)
+# pending_entry clearing + ENTRY_REJECTED
 # ============================================================
 
 def test_pending_entry_cleared_on_leverage_rejection():
+    """
+    leverage بالای cap → رد ورود + وضعیت مالی دست‌نخورده.
+
+    نکته: execute_pending_entry همان state را درجا تغییر می‌دهد
+    و همان را برمی‌گرداند؛ پس باید snapshot قبل از فراخوانی بگیریم.
+    """
     state = _mk_state()
     state["pending_entry"] = _pending_entry("LONG")
 
@@ -524,14 +530,28 @@ def test_pending_entry_cleared_on_leverage_rejection():
     cfg["leverage_cap"] = 3
 
     candle = _candle(3600000, 85100, 85300, 85000, 85200)
+
+    # snapshot قبل از فراخوانی (چون تابع in-place است)
+    equity_before = state["equity"]
+    daily_loss_before = state["daily_loss"]
+    weekly_loss_before = state["weekly_loss"]
+    cb_before = state["circuit_breaker_active"]
+
     new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
 
+    # 1. pending_entry پاک شده
     assert new_state["pending_entry"] is None
+    # 2. پوزیشنی باز نشده
     assert new_state["position"] is None
-
+    # 3. ENTRY_REJECTED با دلیل مشخص
     rejected = [e for e in events if e["type"] == "ENTRY_REJECTED"]
     assert len(rejected) == 1
     assert rejected[0]["reason"] == "leverage_exceeds_cap"
+    # 4. وضعیت مالی دست‌نخورده
+    assert new_state["equity"] == equity_before
+    assert new_state["daily_loss"] == daily_loss_before
+    assert new_state["weekly_loss"] == weekly_loss_before
+    assert new_state["circuit_breaker_active"] == cb_before
     print("✅ test_pending_entry_cleared_on_leverage_rejection passed")
 
 
@@ -558,7 +578,7 @@ def test_pending_entry_no_leverage_still_opens():
     state = _mk_state()
     state["pending_entry"] = _pending_entry("LONG")
 
-    cfg = _cfg()  # بدون leverage / leverage_cap
+    cfg = _cfg()
     candle = _candle(3600000, 85100, 85300, 85000, 85200)
 
     new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
@@ -613,7 +633,7 @@ if __name__ == "__main__":
         test_no_signal_when_position_open,
         # Determinism
         test_deterministic_replay,
-        # Stage B — leverage (new)
+        # Stage B — leverage
         test_leverage_none_skips_validation,
         test_leverage_valid_accepts,
         test_leverage_bool_rejects,
