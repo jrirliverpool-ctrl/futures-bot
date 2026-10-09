@@ -7,16 +7,25 @@ run_paper.py — Paper Trading orchestrator برای ApexQuant.
   3. اگر کندل جدید است:
        a. indicators بساز
        b. strategy signal
-       c. paper_engine.process_candle
-       d. events را append کن
-       e. state را save کن
+       c. Kill Switch check (fail-closed)
+       d. paper_engine.process_candle
+       e. events را append کن
+       f. state را save کن
   4. اگر کندل جدید نیست → skip
 
 Stage B leverage validation:
   - engine_config که از get_engine_config() می‌آید، شامل
     leverage و leverage_cap است.
-  - paper_engine.calculate_position_size این دو را اعتبارسنجی می‌کند
-    (fail-closed).
+
+Kill Switch:
+  - پیش از پردازش کندل، is_kill_switch_active() صدا زده می‌شود.
+  - نتیجه در engine_config تزریق می‌شود:
+      kill_switch_active, kill_switch_reason
+  - fail-closed:
+      * خطای بررسی → active=True
+      * خروجی نامعتبر (None/غیر tuple/طول≠2) → active=True
+      * active non-bool → active=True
+  - خود موتور (paper_engine) فقط این دو فیلد را می‌خواند.
 
 هیچ سفارش واقعی به صرافی ارسال نمی‌شود.
 
@@ -50,6 +59,7 @@ from strategy_config import (
     get_engine_config,
 )
 from compute_hash import compute_strategy_hash
+from kill_switch import is_kill_switch_active
 
 
 # ============================================================
@@ -72,14 +82,87 @@ def _enrich_specs_for_engine(specs: dict) -> dict:
     """
     engine config از strategy_config + injection.
 
-    get_engine_config() اکنون شامل:
+    get_engine_config() شامل:
       leverage, leverage_cap, risk_per_trade, ...
 
-    اینجا فقط contract_multiplier_for_pnl اضافه می‌شود
-    (چون به specs وابسته است، نه به strategy_config).
+    اینجا فقط contract_multiplier_for_pnl اضافه می‌شود.
     """
     cfg = get_engine_config()
     cfg["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
+    return cfg
+
+
+def _build_engine_config_with_kill_switch(specs, state, state_dir,
+                                           repo_root=None):
+    """
+    ساخت engine config + تزریق وضعیت Kill Switch.
+
+    Fail-closed:
+      - خطای is_kill_switch_active → active=True
+      - خروجی غیر tuple یا با طول ≠ 2 → active=True
+      - active non-bool → active=True
+      - active=True و reason=None → reason پیش‌فرض
+      - active=False → reason=None
+
+    Args:
+        specs      : symbol specs
+        state      : state فعلی
+        state_dir  : مسیر paper-state (برای بررسی فایل KILL)
+        repo_root  : ریشه مخزن (اختیاری) — بررسی KILL ثانویه
+
+    Returns:
+        engine_config با کلیدهای kill_switch_active و kill_switch_reason
+    """
+    cfg = _enrich_specs_for_engine(specs)
+
+    ks_active = True
+    ks_reason = "fail-closed: kill_switch check did not complete"
+
+    try:
+        result = is_kill_switch_active(
+            state_dir, state=state, repo_root=repo_root,
+        )
+
+        # اعتبارسنجی صریح خروجی
+        if not isinstance(result, tuple) or len(result) != 2:
+            ks_active = True
+            try:
+                rtype = type(result).__name__
+                rlen = len(result) if hasattr(result, "__len__") else "N/A"
+            except Exception:
+                rtype = "unknown"
+                rlen = "N/A"
+            ks_reason = (
+                f"fail-closed: invalid kill_switch output "
+                f"(type={rtype}, len={rlen})"
+            )
+        else:
+            active_val, reason_val = result
+            if not isinstance(active_val, bool):
+                ks_active = True
+                ks_reason = (
+                    f"fail-closed: kill_switch active flag not bool "
+                    f"(got {type(active_val).__name__})"
+                )
+            elif active_val:
+                ks_active = True
+                ks_reason = (
+                    reason_val if reason_val is not None
+                    else "kill_switch active (no reason provided)"
+                )
+            else:
+                ks_active = False
+                ks_reason = None
+
+    except Exception as e:
+        ks_active = True
+        ks_reason = (
+            f"fail-closed: kill_switch raised "
+            f"{type(e).__name__}: {e}"
+        )
+
+    cfg["kill_switch_active"] = ks_active
+    cfg["kill_switch_reason"] = ks_reason
     return cfg
 
 
@@ -187,9 +270,18 @@ def main():
     print(f"  reason : {sig.get('reason', '')}")
     print()
 
-    # ---- 7. paper_engine ----
-    engine_config = _enrich_specs_for_engine(specs)
+    # ---- 7. Kill Switch + engine config ----
+    engine_config = _build_engine_config_with_kill_switch(
+        specs, state, state_dir, repo_root=os.getcwd(),
+    )
+    ks_active = engine_config.get("kill_switch_active")
+    ks_reason = engine_config.get("kill_switch_reason")
+    print(f"🛑 Kill switch check:")
+    print(f"   active : {ks_active}")
+    print(f"   reason : {ks_reason}")
+    print()
 
+    # ---- 8. paper_engine ----
     print("⚙️  Processing through paper_engine...")
     print(f"  leverage     : {engine_config.get('leverage')}")
     print(f"  leverage_cap : {engine_config.get('leverage_cap')}")
@@ -213,10 +305,10 @@ def main():
     for ev in events:
         print(f"    [{ev.get('type')}] "
               f"side={ev.get('side')} price={ev.get('price')} "
-              f"reason={ev.get('reason')}")
+              f"reason={ev.get('reason')} stage={ev.get('stage')}")
     print()
 
-    # ---- 8. Append events ----
+    # ---- 9. Append events ----
     if events:
         n_app, n_sk = append_events(state_dir, events)
         print(f"📝 Events appended: {n_app}, skipped: {n_sk}")
@@ -224,7 +316,7 @@ def main():
         print(f"📝 No events to append")
     print()
 
-    # ---- 9. Ensure last_processed_candle_ts ----
+    # ---- 10. Ensure last_processed_candle_ts ----
     if state.get("last_processed_candle_ts") != new_candle_ts:
         state["last_processed_candle_ts"] = new_candle_ts
 
@@ -240,7 +332,7 @@ def main():
     print(f"✅ State saved")
     print()
 
-    # ---- 10. Summary ----
+    # ---- 11. Summary ----
     total_events = events_count(state_dir)
 
     print("=" * 70)
@@ -248,6 +340,7 @@ def main():
     print("=" * 70)
     print(f"  candle_ts          : {new_candle_ts}")
     print(f"  signal             : {sig['signal']}")
+    print(f"  kill_switch_active : {ks_active}")
     print(f"  events_generated   : {len(events)}")
     print(f"  total_events       : {total_events}")
     print(f"  equity             : {state['equity']}")
