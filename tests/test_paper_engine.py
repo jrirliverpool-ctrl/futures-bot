@@ -1,5 +1,23 @@
 """
 test_paper_engine.py — Full test suite for Paper Engine.
+
+پوشش (42 تست):
+  - Helpers (3)
+  - Position Sizing (3)
+  - SL / BE / TP1 (9)
+  - Entry (2)
+  - Day / Week Reset (2)
+  - Circuit Breakers (4)
+  - Cooldown (1)
+  - Engine Behavior (3)
+  - Determinism (1)
+  - Stage B — Leverage (6)
+  - pending_entry clearing (3)
+  - Kill Switch — Point A/B (5)
+
+توجه:
+  - ۳۷ تست اول بدون تغییر از نسخه‌ی قبلی.
+  - ۵ تست Kill Switch جدید در انتهای فایل.
 """
 
 import sys, os, copy
@@ -65,6 +83,13 @@ def _cfg():
     return c
 
 
+def _cfg_with_kill_switch(reason="test kill"):
+    c = _cfg()
+    c["kill_switch_active"] = True
+    c["kill_switch_reason"] = reason
+    return c
+
+
 def _mk_state():
     return copy.deepcopy(DEFAULT_STATE)
 
@@ -75,6 +100,16 @@ def _pending_entry(side="LONG"):
         "signal_candle_ts": 1000,
         "atr_at_signal": 500.0,
         "close_at_signal": 85000.0,
+    }
+
+
+def _long_signal(ts=1000):
+    return {
+        "signal": "LONG",
+        "signal_candle_ts": ts,
+        "atr_at_signal": 500.0,
+        "close": 85000.0,
+        "reason": "test",
     }
 
 
@@ -516,12 +551,6 @@ def test_leverage_above_cap_rejects():
 # ============================================================
 
 def test_pending_entry_cleared_on_leverage_rejection():
-    """
-    leverage بالای cap → رد ورود + وضعیت مالی دست‌نخورده.
-
-    نکته: execute_pending_entry همان state را درجا تغییر می‌دهد
-    و همان را برمی‌گرداند؛ پس باید snapshot قبل از فراخوانی بگیریم.
-    """
     state = _mk_state()
     state["pending_entry"] = _pending_entry("LONG")
 
@@ -531,7 +560,6 @@ def test_pending_entry_cleared_on_leverage_rejection():
 
     candle = _candle(3600000, 85100, 85300, 85000, 85200)
 
-    # snapshot قبل از فراخوانی (چون تابع in-place است)
     equity_before = state["equity"]
     daily_loss_before = state["daily_loss"]
     weekly_loss_before = state["weekly_loss"]
@@ -539,15 +567,11 @@ def test_pending_entry_cleared_on_leverage_rejection():
 
     new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
 
-    # 1. pending_entry پاک شده
     assert new_state["pending_entry"] is None
-    # 2. پوزیشنی باز نشده
     assert new_state["position"] is None
-    # 3. ENTRY_REJECTED با دلیل مشخص
     rejected = [e for e in events if e["type"] == "ENTRY_REJECTED"]
     assert len(rejected) == 1
     assert rejected[0]["reason"] == "leverage_exceeds_cap"
-    # 4. وضعیت مالی دست‌نخورده
     assert new_state["equity"] == equity_before
     assert new_state["daily_loss"] == daily_loss_before
     assert new_state["weekly_loss"] == weekly_loss_before
@@ -591,20 +615,164 @@ def test_pending_entry_no_leverage_still_opens():
 
 
 # ============================================================
+# Kill Switch — Point A (Signal Acceptance)
+# ============================================================
+
+def test_kill_switch_point_a_blocks_signal():
+    """
+    Kill Switch فعال → سیگنال LONG پذیرفته نمی‌شود.
+    - pending_entry ساخته نمی‌شود
+    - event KILL_SWITCH_BLOCKED با stage="signal_acceptance"
+    - هیچ SIGNAL event تولید نمی‌شود
+    """
+    state = _mk_state()
+    klines = [_candle(1000, 100, 101, 99, 100)]
+    indicators = {"atr": [1.0]}
+    cfg = _cfg_with_kill_switch("test kill")
+
+    new_state, events = process_candle(
+        state, klines, indicators, 0, SPECS, cfg, signal=_long_signal(),
+    )
+
+    assert new_state["pending_entry"] is None
+    assert new_state["position"] is None
+
+    ks = [e for e in events if e["type"] == "KILL_SWITCH_BLOCKED"]
+    assert len(ks) == 1
+    assert ks[0]["stage"] == "signal_acceptance"
+    assert ks[0]["side"] == "LONG"
+    assert ks[0]["reason"] == "test kill"
+
+    # SIGNAL نباید ساخته شود
+    assert not any(e["type"] == "SIGNAL" for e in events)
+    print("✅ test_kill_switch_point_a_blocks_signal passed")
+
+
+def test_kill_switch_point_a_no_event_for_no_trade():
+    """
+    Kill Switch فعال + NO_TRADE → هیچ event اضافی تولید نمی‌شود.
+    """
+    state = _mk_state()
+    klines = [_candle(1000, 100, 101, 99, 100)]
+    indicators = {"atr": [1.0]}
+    cfg = _cfg_with_kill_switch()
+
+    signal = {
+        "signal": "NO_TRADE",
+        "signal_candle_ts": 1000,
+        "atr_at_signal": 1.0,
+        "close": 100.0,
+        "reason": "no trend",
+    }
+
+    new_state, events = process_candle(
+        state, klines, indicators, 0, SPECS, cfg, signal=signal,
+    )
+
+    assert new_state["pending_entry"] is None
+    ks = [e for e in events if e["type"] == "KILL_SWITCH_BLOCKED"]
+    assert len(ks) == 0
+    print("✅ test_kill_switch_point_a_no_event_for_no_trade passed")
+
+
+# ============================================================
+# Kill Switch — Point B (Entry Execution)
+# ============================================================
+
+def test_kill_switch_point_b_blocks_pending_entry():
+    """
+    Kill Switch فعال + pending_entry موجود → ورود اجرا نمی‌شود.
+    - position باز نمی‌شود
+    - pending_entry پاک می‌شود
+    - event KILL_SWITCH_BLOCKED با stage="entry_execution"
+    - هیچ ENTRY event ثبت نمی‌شود
+    """
+    state = _mk_state()
+    state["pending_entry"] = _pending_entry("LONG")
+
+    candle = _candle(3600000, 85100, 85300, 85000, 85200)
+    cfg = _cfg_with_kill_switch("test kill B")
+
+    new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
+
+    assert new_state["position"] is None
+    assert new_state["pending_entry"] is None
+
+    ks = [e for e in events if e["type"] == "KILL_SWITCH_BLOCKED"]
+    assert len(ks) == 1
+    assert ks[0]["stage"] == "entry_execution"
+    assert ks[0]["side"] == "LONG"
+    assert ks[0]["reason"] == "test kill B"
+
+    assert not any(e["type"] == "ENTRY" for e in events)
+    print("✅ test_kill_switch_point_b_blocks_pending_entry passed")
+
+
+def test_kill_switch_point_b_preserves_account_state():
+    """
+    Kill Switch در نقطه B → equity/daily_loss/weekly_loss/CB دست‌نخورده.
+    """
+    state = _mk_state()
+    state["pending_entry"] = _pending_entry("LONG")
+
+    equity_before = state["equity"]
+    dl_before = state["daily_loss"]
+    wl_before = state["weekly_loss"]
+    cb_before = state["circuit_breaker_active"]
+
+    candle = _candle(3600000, 85100, 85300, 85000, 85200)
+    cfg = _cfg_with_kill_switch()
+
+    new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
+
+    assert new_state["equity"] == equity_before
+    assert new_state["daily_loss"] == dl_before
+    assert new_state["weekly_loss"] == wl_before
+    assert new_state["circuit_breaker_active"] == cb_before
+    print("✅ test_kill_switch_point_b_preserves_account_state passed")
+
+
+def test_kill_switch_does_not_block_position_management():
+    """
+    Kill Switch فعال + position باز → SL همچنان اجرا می‌شود.
+    (Kill Switch فقط ورودهای جدید را مسدود می‌کند.)
+    """
+    state = _mk_state()
+    state["position"] = _make_position()
+    state["pending_entry"] = None
+
+    # کندل که SL را می‌زند
+    candle = _candle(3600000, 85000, 85100, 84000, 84500)
+    indicators = {"atr": [500.0]}
+    cfg = _cfg_with_kill_switch()
+    cfg["contract_multiplier_for_pnl"] = SPECS["contract_multiplier"]
+
+    new_state, events = process_candle(
+        state, [candle], indicators, 0, SPECS, cfg, signal=None,
+    )
+
+    assert new_state["position"] is None
+    exits = [e for e in events if e["type"] == "EXIT"]
+    assert len(exits) == 1
+    assert exits[0]["reason"] == "SL"
+    print("✅ test_kill_switch_does_not_block_position_management passed")
+
+
+# ============================================================
 # Main
 # ============================================================
 
 if __name__ == "__main__":
     tests = [
-        # Helpers
+        # Helpers (3)
         test_floor_to_step,
         test_apply_slippage,
         test_compute_initial_levels,
-        # Sizing
+        # Sizing (3)
         test_position_size_valid,
         test_position_size_below_min,
         test_position_size_min_notional,
-        # SL/BE/TP1
+        # SL/BE/TP1 (9)
         test_sl_hit_long,
         test_sl_first_ambiguity,
         test_be_moved,
@@ -614,35 +782,42 @@ if __name__ == "__main__":
         test_trailing_sl_never_moves_backward,
         test_time_exit,
         test_short_sl_hit,
-        # Entry
+        # Entry (2)
         test_pending_entry_executed,
         test_event_contains_entry_information,
-        # Day/Week
+        # Day/Week (2)
         test_daily_loss_resets_on_new_day,
         test_weekly_loss_resets_on_new_week,
-        # Circuit breakers
+        # Circuit breakers (4)
         test_daily_breaker,
         test_weekly_breaker,
         test_total_dd_from_peak,
         test_total_dd_uses_peak_equity,
-        # Cooldown
+        # Cooldown (1)
         test_cooldown_blocks_signal,
-        # Engine
+        # Engine (3)
         test_engine_does_not_generate_signal,
         test_signal_becomes_pending_not_immediate_entry,
         test_no_signal_when_position_open,
-        # Determinism
+        # Determinism (1)
         test_deterministic_replay,
-        # Stage B — leverage
+        # Stage B — leverage (6)
         test_leverage_none_skips_validation,
         test_leverage_valid_accepts,
         test_leverage_bool_rejects,
         test_leverage_zero_rejects,
         test_leverage_above_exchange_max_rejects,
         test_leverage_above_cap_rejects,
+        # pending_entry clearing (3)
         test_pending_entry_cleared_on_leverage_rejection,
         test_pending_entry_cleared_on_bool_leverage,
         test_pending_entry_no_leverage_still_opens,
+        # Kill Switch — Point A/B (5)
+        test_kill_switch_point_a_blocks_signal,
+        test_kill_switch_point_a_no_event_for_no_trade,
+        test_kill_switch_point_b_blocks_pending_entry,
+        test_kill_switch_point_b_preserves_account_state,
+        test_kill_switch_does_not_block_position_management,
     ]
 
     passed, failed = 0, 0
