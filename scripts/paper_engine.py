@@ -10,11 +10,13 @@ Responsibilities:
   - Conservative SL-first ambiguity
   - Deterministic event logging
   - Stage B leverage validation (fail-closed)
+  - Kill switch at signal acceptance (A) and entry execution (B)
 
 Non-responsibilities:
   - Signal generation (comes from outside)
   - Indicator calculation
   - Live order submission
+  - Reading KILL file (that's run_paper's job via kill_switch module)
 
 Pure Python. No pandas/numpy.
 """
@@ -156,8 +158,23 @@ def execute_pending_entry(state, candle, specs, config):
     if pending is None:
         return state, events
 
-    side = pending["side"]
     ts = int(candle[0])
+
+    # ---- Kill switch check (Point B — fail-closed) ----
+    # اگر kill_switch_active=True باشد، هیچ ورودی اجرا نمی‌شود.
+    # pending_entry پاک می‌شود تا در اجرای بعدی دوباره تلاش نشود.
+    if config.get("kill_switch_active", False):
+        events.append({
+            "type": "KILL_SWITCH_BLOCKED",
+            "stage": "entry_execution",
+            "reason": config.get("kill_switch_reason"),
+            "side": pending.get("side"),
+            "timestamp": ts,
+        })
+        state["pending_entry"] = None
+        return state, events
+
+    side = pending["side"]
     open_price = float(candle[1])
 
     entry_price = apply_slippage(
@@ -175,7 +192,6 @@ def execute_pending_entry(state, candle, specs, config):
     )
 
     if qty is None:
-        # تشخیص دقیق علت رد برای لاگ شفاف
         lev = config.get("leverage")
         reason = "invalid_or_below_min_position_size"
         if lev is not None:
@@ -411,12 +427,12 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
     # Period reset
     reset_period_losses_if_needed(state, ts)
 
-    # Entry from previous signal
+    # ---- Entry from previous signal (Point B inside) ----
     if state.get("pending_entry") is not None:
         state, entry_events = execute_pending_entry(state, candle, specs, config)
         events.extend(entry_events)
 
-    # Position management
+    # ---- Position management ----
     position_closed = False
     if state.get("position") is not None:
         atr_current = indicators["atr"][i]
@@ -439,7 +455,7 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
         else:
             state["position"] = pos_after
 
-    # Circuit breakers
+    # ---- Circuit breakers ----
     if not state.get("circuit_breaker_active", False):
         if state["daily_loss"] >= state["initial_equity"] * config["daily_loss_limit"]:
             state["circuit_breaker_active"] = True
@@ -468,33 +484,48 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
                 "timestamp": ts,
             })
 
-    # Signal ingestion
+    # ---- Signal ingestion (Point A) ----
+    # Kill switch فقط ورودهای جدید را مسدود می‌کند.
+    # مدیریت پوزیشن باز دست‌نخورده می‌ماند (SL/TP/Trailing/Time Exit).
+    ks_active = config.get("kill_switch_active", False)
+
     if (signal is not None and
         state.get("position") is None and
         state.get("pending_entry") is None and
         not position_closed and
         not state.get("circuit_breaker_active")):
 
-        cooldown_until = state.get("cooldown_until_index")
-        if cooldown_until is not None and i < cooldown_until:
-            events.append({
-                "type": "COOLDOWN_SKIP",
-                "until_index": cooldown_until,
-                "timestamp": ts,
-            })
-        elif signal.get("signal") in ("LONG", "SHORT"):
-            state["pending_entry"] = {
-                "side": signal["signal"],
-                "signal_candle_ts": signal["signal_candle_ts"],
-                "atr_at_signal": signal["atr_at_signal"],
-                "close_at_signal": signal["close"],
-            }
-            events.append({
-                "type": "SIGNAL",
-                "signal": signal["signal"],
-                "reason": signal.get("reason"),
-                "timestamp": ts,
-            })
+        if ks_active:
+            # Kill switch فعال → سیگنال جدید پذیرفته نمی‌شود
+            if signal.get("signal") in ("LONG", "SHORT"):
+                events.append({
+                    "type": "KILL_SWITCH_BLOCKED",
+                    "stage": "signal_acceptance",
+                    "reason": config.get("kill_switch_reason"),
+                    "side": signal["signal"],
+                    "timestamp": ts,
+                })
+        else:
+            cooldown_until = state.get("cooldown_until_index")
+            if cooldown_until is not None and i < cooldown_until:
+                events.append({
+                    "type": "COOLDOWN_SKIP",
+                    "until_index": cooldown_until,
+                    "timestamp": ts,
+                })
+            elif signal.get("signal") in ("LONG", "SHORT"):
+                state["pending_entry"] = {
+                    "side": signal["signal"],
+                    "signal_candle_ts": signal["signal_candle_ts"],
+                    "atr_at_signal": signal["atr_at_signal"],
+                    "close_at_signal": signal["close"],
+                }
+                events.append({
+                    "type": "SIGNAL",
+                    "signal": signal["signal"],
+                    "reason": signal.get("reason"),
+                    "timestamp": ts,
+                })
 
     state["last_processed_candle_ts"] = ts
     return state, events
@@ -540,6 +571,8 @@ DEFAULT_CONFIG = {
     "total_dd_limit": 0.15,
     "slippage_pct": 0.0005,
     "interval_ms": 3_600_000,
+    "kill_switch_active": False,
+    "kill_switch_reason": None,
 }
 
 DEFAULT_STATE = {
