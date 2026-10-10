@@ -1,0 +1,36 @@
+name: Binance Feed Unit Tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/binance_feed.py'
+      - 'tests/test_binance_feed.py'
+      - '.github/workflows/test_binance_feed.yml'
+  pull_request:
+    paths:
+      - 'scripts/binance_feed.py'
+      - 'tests/test_binance_feed.py'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile scripts/binance_feed.py
+          python -m py_compile tests/test_binance_feed.py
+
+      - name: Run Binance Feed tests
+        run: python tests/test_binance_feed.py
