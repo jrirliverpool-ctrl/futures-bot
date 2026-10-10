@@ -16,13 +16,15 @@ test_binance_feed.py — Unit tests for binance_feed.py.
 
 سیاست ترتیب:
   fetch_binance_klines_range، پاسخ نامرتب API را نرمال‌سازی می‌کند
-  (حذف تکراری + مرتب‌سازی صعودی). این رفتار در تست
-  test_range_dedup_and_sort پوشش داده شده.
+  (حذف تکراری + مرتب‌سازی صعودی).
 
 سیاست گپ:
   fetch_binance_klines_range گپ‌های درونی را «قبول» می‌کند
   (fail نمی‌دهد). تشخیص گپ مسئولیت find_gaps است.
-  تست test_range_multi_page_with_gap این قرارداد را تثبیت می‌کند.
+
+قرارداد end_ms:
+  end_ms در fetch_binance_klines_range یک مرز «شامل» است
+  (ts <= end_ms پذیرفته می‌شود).
 """
 
 import os
@@ -402,10 +404,11 @@ def test_range_multi_page():
     ts = 1_700_000_000_000
     interval_ms = 3_600_000
 
-    page1 = _batch(ts, MAX_LIMIT)
-    next_ts = ts + MAX_LIMIT * interval_ms
-    page2 = _batch(next_ts, 5)
-    end_ms = next_ts + 5 * interval_ms
+    page1 = _batch(ts, MAX_LIMIT)           # ts .. ts+999*int
+    next_ts = ts + MAX_LIMIT * interval_ms  # = ts+1000*int
+    page2 = _batch(next_ts, 5)              # ts+1000*int .. ts+1004*int
+    # آخرین کندل موجود در page2 در next_ts + 4*int است
+    end_ms = next_ts + 4 * interval_ms
 
     session = MockSession([
         MockResponse(200, json_data=page1),
@@ -435,10 +438,9 @@ def test_range_multi_page_with_gap():
     ts = 1_700_000_000_000
     interval_ms = 3_600_000
 
-    page1 = _batch(ts, MAX_LIMIT)  # ts .. ts+999*int
-    # page2 با گپ 3 کندلی شروع می‌شود:
+    page1 = _batch(ts, MAX_LIMIT)
     page2_start = ts + (MAX_LIMIT + 3) * interval_ms
-    page2 = _batch(page2_start, 5)  # ts+1003*int .. ts+1007*int
+    page2 = _batch(page2_start, 5)
 
     end_ms = ts + (MAX_LIMIT + 8) * interval_ms
 
@@ -539,7 +541,6 @@ def test_range_strict_false_allows_partial():
 def test_range_dedup_and_sort():
     ts = 1_700_000_000_000
     interval_ms = 3_600_000
-    # داده‌ی نا-مرتب با تکراری
     raw = [
         _candle(ts + 2 * interval_ms),
         _candle(ts),
