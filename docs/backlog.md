@@ -92,3 +92,61 @@ state ذخیره‌شده در برنچ `paper-state` hash قدیمی
   فعلی Paper Trading هیچ تأثیری ایجاد نمی‌کند.
 - تا زمان تصمیم‌گیری، **هیچ تغییری در state.json یا
   events.jsonl اعمال نمی‌شود**.
+
+---
+
+## [BACKLOG-002] Toobit Historical Data Unavailable
+
+**Status:** 🟢 RESOLVED — Decision: use Binance Public for historical backtesting
+**Priority:** 🟡 Medium
+**Created:** 2026-10-11
+**Resolved:** 2026-10-11
+
+### خلاصه
+
+Probeهای انجام‌شده نشان دادند که:
+
+- endpoint بررسی‌شده‌ی `/quote/v1/klines` حداکثر ۱۰۰۰ کندل آخر را برمی‌گرداند.
+- پارامترهای `startTime` و `endTime` در آزمایش‌های انجام‌شده، بازه‌ی
+  تاریخی را به‌درستی فیلتر نکردند.
+- هشت endpoint کاندید برای تاریخچه‌ی کندل‌ها، پاسخ 404 برگرداندند.
+
+### نتیجه‌گیری
+
+در endpointهای بررسی‌شده، مسیر قابل‌اتکایی برای دریافت داده‌ی
+تاریخی چندساله‌ی Toobit پیدا نشد.
+
+این عدم‌یافتن به معنای نبود کامل نیست؛ بلکه مسیرهای آزمایش‌شده
+تأیید نشدند. اگر در آینده مستندات رسمی endpoint جدیدی را معرفی
+کرد، بررسی مجدد انجام می‌شود.
+
+### تصمیم
+
+برای Backtest چندساله، از **Binance Public API** به‌عنوان منبع
+داده‌ی تاریخی جایگزین استفاده می‌کنیم:
+
+- Endpoint: `https://api.binance.com/api/v3/klines`
+- Symbol: `BTCUSDT`
+- Interval: `1h`
+- Pagination: استفاده از `startTime`، `endTime` و `limit=1000`
+- API key: برای این endpoint عمومی لازم نیست.
+
+### محدودیت‌ها و تفاوت‌ها
+
+- **داده‌ی Binance با Toobit یکسان نیست:** تفاوت در High/Low و
+  سایر مقادیر کندل ممکن است بر سیگنال Donchian و ATR اثر بگذارد.
+- **Commission و Slippage:** بر اساس مشخصات Toobit مدل می‌شوند،
+  نه Binance.
+- **Paper Trading:** همچنان از داده‌ی زنده‌ی Toobit استفاده می‌کند.
+- **Backtest چندساله:** نتایج با برچسب منبع داده‌ی Binance
+  ثبت می‌شوند.
+
+### اقدامات بعدی
+
+1. ساخت `scripts/binance_feed.py` مستقل از `data_feed.py`.
+2. پیاده‌سازی `fetch_binance_klines_range(symbol, interval,
+   start_ms, end_ms)`.
+3. افزودن تست‌های مستقل برای صفحه‌بندی، بازه‌ی زمانی، ترتیب
+   کندل‌ها، حذف داده‌های تکراری و پاسخ‌های ناقص.
+4. اجرای Backtest چندساله با پارامترهای ثابت V1 و ثبت منبع داده.
+5. اجرای آزمون خارج از نمونه (OOS) بدون تغییر پارامترهای طلایی V1.
