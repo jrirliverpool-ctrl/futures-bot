@@ -4,9 +4,9 @@ probe_binance_history.py — تأیید دریافت داده‌ی تاریخی 
 هدف (محدود و صریح):
   - اثبات قابلیت دریافت بازه‌ی تاریخی بلندمدت (چند ماه تا چند سال)
   - سنجش صحت صفحه‌بندی روی بازه‌های طولانی
-  - شمارش دقیق retryها به تفکیک علت (429 / 5xx / timeout / other)
-  - تشخیص دقیق نقص بازه و تفکیک gap از truncation
-  - توقف فوری در صورت مشاهده‌ی HTTP 418
+  - شمارش retryها به تفکیک علت (429 / 5xx / timeout / other)
+  - تشخیص دقیق نقص بازه بر پایه‌ی مجموعه‌ی timestampها
+  - توقف فوری در صورت مشاهده‌ی HTTP 418 (مستقل از ماژول)
 
 آنچه این Probe اثبات نمی‌کند:
   - کیفیت داده برای استراتژی (فقط پوشش و ساختار)
@@ -19,20 +19,28 @@ probe_binance_history.py — تأیید دریافت داده‌ی تاریخی 
 
 قرارداد: این اسکریپت در همان پوشه‌ی binance_feed.py است (هر دو در scripts/).
 
-نکات سازگاری با binance_feed.py (تأییدشده با tests/test_binance_feed.py):
+نکات سازگاری با binance_feed.py:
   - end_ms در fetch_binance_klines_range یک مرز «شامل» است.
   - پاسخ خالی با strict_completeness=False → [] بدون استثنا.
   - 418 در _should_retry_http نیست → raise_for_status() آن را HTTPError می‌کند.
 
-جداسازی سه مفهوم (خواسته‌ی طراحی):
-  fetch_status   — نتیجه‌ی خود عملیات دریافت در سطح HTTP/exception.
-                   مقادیر: "not_started" | "ok" | "aborted_418" |
-                           "aborted_deadline" | "http_error" |
-                           "truncated_module_error" | "invalid_candle" | "error"
-  completeness   — وضعیت پوشش داده، مستقل از اینکه fetch موفق بوده یا نه.
-                   مقادیر: "complete" | "incomplete" | "unknown"
-  verdict_ok     — تنها وقتی True است که هم fetch_status == "ok"
-                   و هم completeness == "complete".
+سه مفهوم جدا در گزارش:
+  fetch_status       — نتیجه‌ی HTTP/exception در خود عملیات دریافت
+  completeness       — پوشش داده، مستقل از موفقیت HTTP
+  verdict_ok         — تنها وقتی True است که fetch_status == "ok"
+                       و completeness == "complete"
+
+v2 (نسبت به v1):
+  1. 418 در InstrumentedSession مستقیماً RateLimitBan می‌اندازد
+     (توقف قطعی، مستقل از رفتار binance_feed).
+  2. شمارش retry با برچسب صریح «تخمینی» و مستندسازی فرض.
+  3. تشخیص truncation بر پایه‌ی last_ts vs eff_end (به‌جای صرفاً
+     len(raw) >= max_candles).
+  4. محاسبه‌ی missing از تفاضل مجموعه‌ی timestampهای مورد انتظار و
+     timestampهای واقعی (نه تفاضل تعداد ردیف‌ها).
+  5. MIN_REQUEST_WINDOW_S صریح + عدم شروع درخواست زیر آستانه.
+  6. --align {floor,ceil} با پیش‌فرض ceil.
+  7. شکست نوشتن گزارش JSON → exit_code = 1.
 """
 
 import argparse
@@ -57,12 +65,12 @@ from binance_feed import (
 
 
 # ============================================================
-# Mode profiles
+# Constants
 # ============================================================
 
 MODE_PROFILES = {
     "short": {
-        "fixed_start": None,          # offset-based
+        "fixed_start": None,               # offset-based
         "start_offset_days": 180,
         "max_candles": 10_000,
         "max_iterations": 20,
@@ -76,6 +84,17 @@ MODE_PROFILES = {
         "max_seconds": 1800,
     },
 }
+
+# آستانه‌ی حداقلی برای شروع یک درخواست جدید. اگر زمان باقی‌مانده کمتر از
+# این مقدار باشد، هیچ درخواست جدیدی آغاز نمی‌شود و DeadlineExceeded صادر
+# می‌گردد. این باعث می‌شود deadline واقعاً سخت‌گیرانه رعایت شود، نه اینکه
+# با timeout کوتاه از آن عبور کنیم.
+DEFAULT_MIN_REQUEST_WINDOW_S = 0.5
+
+# برچسب روش شمارش retry. شمارش بر پایه‌ی trace جلسه تخمینی است و نه
+# قطعی؛ چون به این فرض وابسته است که binance_feed پارامترهای درخواست را
+# بین تلاش‌های مجدد حفظ می‌کند (که در نسخه‌ی فعلی همین‌طور است).
+RETRY_COUNT_METHOD = "estimated_from_session_trace"
 
 
 # ============================================================
@@ -104,13 +123,17 @@ class InstrumentedSession:
 
     ویژگی‌ها:
       - ثبت هر درخواست: URL، params، outcome، status، latency، Retry-After
-      - اعمال مهلت روی هر درخواست: timeout مؤثر = min(timeout, remaining)
-      - توقف فوری پس از 418: get بعدی بلافاصله RateLimitBan می‌اندازد
+      - اعمال مهلت روی هر درخواست: timeout مؤثر = min(requested, remaining)
+      - عدم شروع درخواست جدید اگر remaining < min_request_window_s
+      - توقف فوری پس از 418: خود wrapper مستقیماً RateLimitBan می‌اندازد
+        (مستقل از اینکه binance_feed چه می‌کند)
     """
 
-    def __init__(self, inner=None, deadline_monotonic=None):
+    def __init__(self, inner=None, deadline_monotonic=None,
+                 min_request_window_s=DEFAULT_MIN_REQUEST_WINDOW_S):
         self.inner = inner if inner is not None else requests
         self.deadline_monotonic = deadline_monotonic
+        self.min_request_window_s = min_request_window_s
         self.records = []
         self.aborted = False
         self.abort_reason = None
@@ -119,16 +142,15 @@ class InstrumentedSession:
         if self.deadline_monotonic is None:
             return requested
         remaining = self.deadline_monotonic - time.monotonic()
-        if remaining <= 0:
+        if remaining < self.min_request_window_s:
             self.aborted = True
             self.abort_reason = self.abort_reason or "max_seconds exceeded"
-            raise DeadlineExceeded("probe max_seconds exceeded")
+            raise DeadlineExceeded(
+                f"remaining {remaining:.3f}s < "
+                f"min_request_window_s={self.min_request_window_s}"
+            )
         base = float(requested) if requested is not None else 15.0
-        # کف کوچک برای اینکه requests مقدار 0 نگیرد؛ اگر باقی‌مانده کمتر
-        # از این کف باشد، عملاً درخواست بعدی timeout می‌شود و حلقه
-        # در همان نقطه متوقف می‌گردد.
-        floor = 0.1
-        return max(floor, min(base, remaining))
+        return max(self.min_request_window_s, min(base, remaining))
 
     def get(self, url, params=None, timeout=None):
         if self.aborted:
@@ -169,8 +191,13 @@ class InstrumentedSession:
         })
 
         if status == 418:
+            # ثبت شد؛ اکنون توقف قطعی، مستقل از ماژول.
+            # این استثنا زیرکلاس ProbeAborted است، نه Timeout/ConnectionError؛
+            # پس از try/except داخلی fetch_binance_klines عبور می‌کند و
+            # مستقیماً به main() می‌رسد.
             self.aborted = True
             self.abort_reason = "418 received"
+            raise RateLimitBan("418 received")
 
         return response
 
@@ -193,34 +220,52 @@ def _floor_to_interval(ms: int, interval_ms: int) -> int:
     return (ms // interval_ms) * interval_ms
 
 
+def _ceil_to_interval(ms: int, interval_ms: int) -> int:
+    if ms % interval_ms == 0:
+        return ms
+    return ((ms // interval_ms) + 1) * interval_ms
+
+
 def _iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
-def resolve_window(start_iso, end_iso, interval, now_ms=None):
+def resolve_window(start_iso, end_iso, interval, now_ms=None, align="ceil"):
     """
     بازه‌ی مؤثر = بازه‌ی کندل‌های *بسته*.
+
+    align:
+      - "ceil" (پیش‌فرض): اولین کندلی که openTime آن ≥ start_ms است.
+        یعنی کندل‌های قبل از زمان درخواست وارد بازه نمی‌شوند.
+      - "floor": آخرین کندلی که openTime آن ≤ start_ms است.
+        یعنی کندل حاوی زمان شروع نیز وارد بازه می‌شود.
 
     قرارداد:
       - کندل با openTime = O زمانی بسته است که O + interval_ms <= now.
       - endTime برای binance_feed «شامل» است (ts <= end_ms).
-      - برای مقاومت نسبت به رفتار API، مقدار ارسالی به ماژول را
-        eff_end + interval_ms می‌گذاریم و در Probe بر اساس
-        [eff_start, eff_end] فیلتر دقیق اعمال می‌کنیم.
+      - برای مقاومت نسبت به رفتار API، مقدار ارسالی به ماژول
+        eff_end + interval_ms است؛ فیلتر دقیق در Probe اعمال می‌شود.
 
-    Returns dict: eff_start_ms, eff_end_ms, binance_end_ms, expected_count
+    Returns dict: eff_start_ms, eff_end_ms, binance_end_ms, expected_count,
+                  requested_start_ms, align
     """
     if interval not in INTERVAL_MS:
         raise ValueError(f"Unsupported interval: {interval}")
+    if align not in ("floor", "ceil"):
+        raise ValueError(f"Unsupported align: {align}")
+
     interval_ms = INTERVAL_MS[interval]
     if now_ms is None:
         now_ms = int(time.time() * 1000)
 
-    start_ms = _parse_iso_utc(start_iso)
+    requested_start_ms = _parse_iso_utc(start_iso)
     requested_end = _parse_iso_utc(end_iso) if end_iso else now_ms
     requested_end = min(requested_end, now_ms)
 
-    eff_start_ms = _floor_to_interval(start_ms, interval_ms)
+    if align == "floor":
+        eff_start_ms = _floor_to_interval(requested_start_ms, interval_ms)
+    else:
+        eff_start_ms = _ceil_to_interval(requested_start_ms, interval_ms)
 
     candidate_end = _floor_to_interval(
         requested_end - interval_ms, interval_ms,
@@ -242,15 +287,102 @@ def resolve_window(start_iso, end_iso, interval, now_ms=None):
         "eff_end_ms": eff_end_ms,
         "binance_end_ms": binance_end_ms,
         "expected_count": expected_count,
+        "requested_start_ms": requested_start_ms,
+        "align": align,
     }
 
 
 # ============================================================
-# Retry classification
+# Timestamp set analysis
+# ============================================================
+
+def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
+    """
+    تحلیل دقیق timestampها.
+
+    missing از تفاضل مجموعه‌ی مورد انتظار و واقعی محاسبه می‌شود
+    (نه از تفاضل تعداد ردیف‌ها)، بنابراین تکرار یا out-of-window
+    نمی‌تواند آن را منحرف کند.
+
+    Returns dict:
+      duplicates, actual_unique, missing_count, missing_pct,
+      missing_ranges (list of {start_iso, end_iso, count}),
+      extra_count, aligned_actual_count
+    """
+    interval_ms = INTERVAL_MS[interval]
+    expected_count = (eff_end_ms - eff_start_ms) // interval_ms + 1
+
+    # مجموعه‌ی timestampهای واقعی + شمارش تکرارها
+    actual_ts = set()
+    duplicates = 0
+    extra_count = 0
+    for c in closed_candles:
+        ts = int(c[0])
+        if ts < eff_start_ms or ts > eff_end_ms:
+            extra_count += 1
+            continue
+        if (ts - eff_start_ms) % interval_ms != 0:
+            extra_count += 1
+            continue
+        if ts in actual_ts:
+            duplicates += 1
+        else:
+            actual_ts.add(ts)
+
+    # پیمایش ترتیبی روی موقعیت‌های مورد انتظار، استخراج بازه‌های پیوسته‌ی مفقود
+    missing_ranges = []
+    current_run_start = None
+    missing_count = 0
+    for i in range(expected_count):
+        ts = eff_start_ms + i * interval_ms
+        if ts not in actual_ts:
+            if current_run_start is None:
+                current_run_start = ts
+            missing_count += 1
+        else:
+            if current_run_start is not None:
+                missing_ranges.append({
+                    "start_ms": current_run_start,
+                    "end_ms": ts - interval_ms,
+                    "count": (ts - current_run_start) // interval_ms,
+                })
+                current_run_start = None
+    if current_run_start is not None:
+        missing_ranges.append({
+            "start_ms": current_run_start,
+            "end_ms": eff_end_ms,
+            "count": (eff_end_ms - current_run_start) // interval_ms + 1,
+        })
+
+    missing_pct = (
+        (missing_count / expected_count * 100) if expected_count else 0.0
+    )
+
+    # نمونه‌ی قابل‌چاپ برای گزارش
+    missing_sample = []
+    for r in missing_ranges[:10]:
+        missing_sample.append({
+            "start_iso": _iso(r["start_ms"]),
+            "end_iso": _iso(r["end_ms"]),
+            "count": r["count"],
+        })
+
+    return {
+        "duplicates": duplicates,
+        "actual_unique": len(actual_ts),
+        "extra_count": extra_count,
+        "missing_count": missing_count,
+        "missing_pct": round(missing_pct, 6),
+        "missing_ranges_total": len(missing_ranges),
+        "missing_ranges_sample": missing_sample,
+    }
+
+
+# ============================================================
+# Retry classification (estimated)
 # ============================================================
 
 def _classify_record(rec):
-    """برچسب علت شکست هر درخواست."""
     if rec["outcome"] != "ok":
         return "timeout"        # شامل Timeout و ConnectionError
     s = rec["status"]
@@ -273,21 +405,14 @@ def classify_attempts(records):
     """
     گروه‌بندی درخواست‌های متوالی به «فراخوان‌های منطقی».
 
-    روش: «مرز موفقیت» — یک فراخوان منطقی جدید وقتی شروع می‌شود که:
-      (الف) تلاش قبلی موفق بوده باشد (حلقه‌ی retry بعد از 2xx ادامه نمی‌یابد)، یا
-      (ب) پارامترهای درخواست تغییر کرده باشد (صفحه‌ی جدید).
+    ⚠️ این شمارش *تخمینی* است. فرض می‌کند binance_feed پارامترهای
+    درخواست را بین تلاش‌های مجدد حفظ می‌کند (که در نسخه‌ی فعلی همین است).
+    اگر پارامترها بین retryها تغییر کنند، این تابع ممکن است یک فراخوان
+    منطقی را به دو گروه بشکند یا برعکس.
 
-    این روش نسبت به «پارامتر یکسان» تنها مقاوم‌تر است، چون:
-      - هر 2xx به‌طور قطع پایان یک فراخوان منطقی است.
-      - دو فراخوان مستقل با پارامترهای یکسان، به‌درستی جدا می‌شوند
-        (به‌شرط اینکه تلاش اول با 2xx تمام شده باشد).
-
-    Returns dict با کلیدهای:
-      attempts_total, attempts_success,
-      attempts_failed_429, attempts_failed_5xx,
-      attempts_failed_timeout, attempts_failed_other,
-      logical_calls, retries_total,
-      retries_by_cause = {429, 5xx, timeout, other}
+    قاعده: یک فراخوان منطقی جدید شروع می‌شود اگر
+      (الف) تلاش قبلی با 2xx تمام شده باشد، یا
+      (ب) پارامترهای درخواست تغییر کرده باشند.
     """
     empty = {
         "attempts_total": 0,
@@ -325,7 +450,6 @@ def classify_attempts(records):
                 attempts_success += 1
             else:
                 failed[_classify_record(r)] += 1
-        # retry = هر تلاش به‌جز آخرین تلاش گروه
         for r in g[:-1]:
             retries_by_cause[_classify_record(r)] += 1
 
@@ -344,6 +468,7 @@ def classify_attempts(records):
             "timeout": retries_by_cause["timeout"],
             "other": retries_by_cause["other"],
         },
+        "method": RETRY_COUNT_METHOD,
     }
 
 
@@ -361,9 +486,14 @@ def _parse_args(argv=None):
     p.add_argument("--start", default=None,
                    help="ISO UTC. اگر ندهی، بر اساس mode تعیین می‌شود.")
     p.add_argument("--end", default=None, help="ISO UTC. پیش‌فرض: اکنون.")
+    p.add_argument("--align", default="ceil", choices=("floor", "ceil"),
+                   help="نحوه‌ی تراز کردن start. پیش‌فرض: ceil")
     p.add_argument("--max-candles", type=int, default=None)
     p.add_argument("--max-iterations", type=int, default=None)
     p.add_argument("--max-seconds", type=int, default=None)
+    p.add_argument("--min-request-window", type=float,
+                   default=DEFAULT_MIN_REQUEST_WINDOW_S,
+                   help="کمترین زمان لازم برای شروع یک درخواست جدید.")
     p.add_argument("--max-retries", type=int, default=3)
     p.add_argument("--backoff-base", type=float, default=0.5)
     p.add_argument("--timeout", type=int, default=15)
@@ -397,6 +527,7 @@ def _parse_args(argv=None):
 def _new_report(args):
     return {
         "probe": "binance_history",
+        "version": "v2",
         "started_at_iso": datetime.now(timezone.utc).isoformat(),
         "arguments": {
             "symbol": args.symbol,
@@ -404,9 +535,11 @@ def _new_report(args):
             "mode": args.mode,
             "start": args.start,
             "end": args.end,
+            "align": args.align,
             "max_candles": args.max_candles,
             "max_iterations": args.max_iterations,
             "max_seconds": args.max_seconds,
+            "min_request_window": args.min_request_window,
             "max_retries": args.max_retries,
             "backoff_base": args.backoff_base,
             "timeout": args.timeout,
@@ -418,33 +551,37 @@ def _new_report(args):
         "http": None,
         "open_candles_removed": None,
         "dropped_out_of_window": None,
-        # سه مفهوم جدا:
-        "fetch_status": "not_started",   # HTTP / exception layer
-        "completeness": "unknown",       # data quality layer
-        "truncation_reason": None,       # max_candles | max_iterations | None
-        "verdict_ok": False,             # هر دو شرط با هم
+        "fetch_status": "not_started",     # HTTP/exception layer
+        "completeness": "unknown",         # data quality layer
+        "truncation_reason": None,         # max_candles|max_iterations|early_stop|None
+        "verdict_ok": False,
         "fetch_error": None,
+        "report_write_error": None,
         "fatal_error": None,
     }
 
 
 def _print_header(args):
     print("=" * 72)
-    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification")
+    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2)")
     print("=" * 72)
     print(f"  symbol     : {args.symbol}")
     print(f"  interval   : {args.interval}")
     print(f"  mode       : {args.mode}")
-    print(f"  start      : {args.start}")
+    print(f"  start      : {args.start}  (align={args.align})")
     print(f"  end        : {args.end or 'now'}")
     print(f"  max_candles: {args.max_candles}")
     print(f"  max_iter   : {args.max_iterations}")
     print(f"  max_seconds: {args.max_seconds}")
+    print(f"  min_req_win: {args.min_request_window}s")
     print(f"  purpose    : تأیید پوشش تاریخی + صفحه‌بندی (نه Backtest)")
     print("=" * 72)
 
 
 def _finalize_and_print(report, out_path):
+    """
+    چاپ خلاصه و نوشتن گزارش JSON. Returns bool (write_ok).
+    """
     print()
     print("=" * 72)
     if report["verdict_ok"]:
@@ -462,13 +599,18 @@ def _finalize_and_print(report, out_path):
     print(f"  symbol/interval  : "
           f"{report['arguments']['symbol']} / "
           f"{report['arguments']['interval']}")
-    print(f"  range            : {w.get('effective_start_iso')} → "
-          f"{w.get('effective_end_iso')}")
+    print(f"  requested_start  : {w.get('requested_start_iso')}")
+    print(f"  effective_start  : {w.get('effective_start_iso')} "
+          f"(align={w.get('align')})")
+    print(f"  effective_end    : {w.get('effective_end_iso')}")
     print(f"  expected/actual  : "
           f"{w.get('expected_count')}/{c.get('actual')}")
     print(f"  missing          : {c.get('missing')} "
           f"({c.get('missing_pct', 0):.4f}%)")
+    print(f"  missing_ranges   : {c.get('missing_ranges_total')} "
+          f"(sample: {c.get('missing_ranges_sample')})")
     print(f"  duplicates       : {c.get('duplicates')}")
+    print(f"  extra            : {c.get('extra')}")
     print(f"  gaps             : {c.get('gaps_total')} "
           f"(missing {c.get('total_missing_from_gaps')})")
     print(f"  open_removed     : {report.get('open_candles_removed')}")
@@ -477,13 +619,16 @@ def _finalize_and_print(report, out_path):
     print(f"  completeness     : {report.get('completeness', 'unknown')}")
     print(f"  truncation       : {report.get('truncation_reason')}")
     print(f"  requests         : {h.get('attempts_total')} "
-          f"(retries: {h.get('retries_total')})")
+          f"(retries: {h.get('retries_total')}, "
+          f"method={h.get('method')})")
     print(f"  retries_by_cause : {h.get('retries_by_cause')}")
     print(f"  418 seen         : "
           f"{h.get('abort_reason') == '418 received'}")
     print(f"  wall_clock_s     : {f.get('wall_clock_s')}")
     if report.get("fetch_error"):
         print(f"  fetch_error      : {report['fetch_error']}")
+    if report.get("report_write_error"):
+        print(f"  report_write_err : {report['report_write_error']}")
     if report.get("fatal_error"):
         print(f"  fatal_error      : {report['fatal_error']}")
 
@@ -493,6 +638,7 @@ def _finalize_and_print(report, out_path):
     print("  ⚠️ مطابقت با Toobit و Commission نیازمند Probe جداگانه است.")
     print("=" * 72)
 
+    write_ok = True
     if out_path:
         try:
             p = Path(out_path)
@@ -503,8 +649,11 @@ def _finalize_and_print(report, out_path):
             )
             print(f"\n  📝 report written to {out_path}")
         except Exception as e:
+            report["report_write_error"] = f"{type(e).__name__}: {e}"
             print(f"\n  ❌ failed to write report: "
                   f"{type(e).__name__}: {e}")
+            write_ok = False
+    return write_ok
 
 
 # ============================================================
@@ -522,14 +671,19 @@ def main(argv=None):
     try:
         # ---- Stage 1: window ----
         print("\n[Stage 1] Resolving effective window (closed candles only)...")
-        win = resolve_window(args.start, args.end, args.interval)
+        win = resolve_window(
+            args.start, args.end, args.interval, align=args.align,
+        )
         report["window"] = {
+            "requested_start_iso": _iso(win["requested_start_ms"]),
             "effective_start_iso": _iso(win["eff_start_ms"]),
             "effective_end_iso": _iso(win["eff_end_ms"]),
             "effective_start_ms": win["eff_start_ms"],
             "effective_end_ms": win["eff_end_ms"],
             "expected_count": win["expected_count"],
+            "align": win["align"],
         }
+        print(f"  requested_start: {_iso(win['requested_start_ms'])}")
         print(f"  eff_start_iso  : {_iso(win['eff_start_ms'])}")
         print(f"  eff_end_iso    : {_iso(win['eff_end_ms'])}")
         print(f"  expected_count : {win['expected_count']}")
@@ -538,7 +692,10 @@ def main(argv=None):
         # ---- Stage 2: fetch ----
         print("\n[Stage 2] Fetching range (strict_completeness=False)...")
         deadline = time.monotonic() + args.max_seconds
-        session = InstrumentedSession(deadline_monotonic=deadline)
+        session = InstrumentedSession(
+            deadline_monotonic=deadline,
+            min_request_window_s=args.min_request_window,
+        )
 
         t0 = time.monotonic()
         fetch_error = None
@@ -593,7 +750,7 @@ def main(argv=None):
         }
         report["fetch_error"] = fetch_error
 
-        # HTTP stats — همیشه ثبت می‌شوند، حتی در شکست
+        # HTTP stats — همیشه ثبت می‌شوند
         stats = classify_attempts(session.records)
         stats["session_aborted"] = session.aborted
         stats["abort_reason"] = session.abort_reason
@@ -635,29 +792,43 @@ def main(argv=None):
             print(f"  dropped (open candle)   : {open_removed}")
             print(f"  final count             : {len(closed)}")
 
-            print("\n  Structural diagnostics:")
+            print("\n  Structural diagnostics (summarize_candles):")
             s = summarize_candles(closed, args.interval)
-            actual = s["count"]
-            expected = win["expected_count"]
-            missing = expected - actual
-            missing_pct = (missing / expected * 100) if expected else 0.0
-
             print(f"    count       : {s['count']}")
             print(f"    first_iso   : {s['first_iso']}")
             print(f"    last_iso    : {s['last_iso']}")
             print(f"    duplicates  : {s['duplicates']}")
             print(f"    gap_count   : {s['gap_count']}")
             print(f"    total_miss  : {s['total_missing']}")
-            print(f"    expected    : {expected}")
-            print(f"    actual      : {actual}")
-            print(f"    missing     : {missing} ({missing_pct:.4f}%)")
+
+            # ---- Stage 3b: timestamp set analysis (authoritative) ----
+            print("\n  Timestamp set analysis (authoritative):")
+            tsa = analyze_timestamps(
+                closed,
+                win["eff_start_ms"], win["eff_end_ms"], args.interval,
+            )
+            expected = win["expected_count"]
+            actual_unique = tsa["actual_unique"]
+            missing = tsa["missing_count"]
+
+            print(f"    expected        : {expected}")
+            print(f"    actual_unique   : {actual_unique}")
+            print(f"    missing         : {missing} "
+                  f"({tsa['missing_pct']:.4f}%)")
+            print(f"    missing_ranges  : {tsa['missing_ranges_total']}")
+            print(f"    duplicates      : {tsa['duplicates']}")
+            print(f"    extra           : {tsa['extra_count']}")
 
             report["counts"] = {
                 "expected": expected,
-                "actual": actual,
+                "actual": len(closed),
+                "actual_unique": actual_unique,
                 "missing": missing,
-                "missing_pct": round(missing_pct, 6),
-                "duplicates": s["duplicates"],
+                "missing_pct": tsa["missing_pct"],
+                "missing_ranges_total": tsa["missing_ranges_total"],
+                "missing_ranges_sample": tsa["missing_ranges_sample"],
+                "duplicates": tsa["duplicates"],
+                "extra": tsa["extra_count"],
                 "first_iso": s["first_iso"],
                 "last_iso": s["last_iso"],
                 "gaps_total": s["gap_count"],
@@ -665,18 +836,27 @@ def main(argv=None):
             }
             report["gaps_sample"] = s["gaps"][:20]
 
-            # ---- تشخیص truncation ناشی از سقف‌های ایمنی ----
-            truncated_by = None
-            if len(raw) >= args.max_candles:
+            # ---- تشخیص truncation بر پایه‌ی آخرین timestamp واقعی ----
+            last_ts = max((int(c[0]) for c in closed), default=None)
+            reached_end = (
+                last_ts is not None and last_ts >= win["eff_end_ms"]
+            )
+
+            if reached_end:
+                truncated_by = None
+            elif len(raw) >= args.max_candles:
                 truncated_by = "max_candles"
             elif stats["logical_calls"] >= args.max_iterations:
                 truncated_by = "max_iterations"
+            else:
+                truncated_by = "early_stop"
             report["truncation_reason"] = truncated_by
 
             # ---- تعیین completeness ----
             if (
                 missing == 0
-                and s["duplicates"] == 0
+                and tsa["duplicates"] == 0
+                and tsa["extra_count"] == 0
                 and truncated_by is None
             ):
                 report["completeness"] = "complete"
@@ -684,7 +864,7 @@ def main(argv=None):
                 report["completeness"] = "incomplete"
 
             # ---- Stage 4: HTTP summary ----
-            print("\n[Stage 4] HTTP instrumentation...")
+            print("\n[Stage 4] HTTP instrumentation (retry counts estimated)...")
             print(f"  attempts_total          : {stats['attempts_total']}")
             print(f"  attempts_success        : {stats['attempts_success']}")
             print(f"  attempts_failed_429     : {stats['attempts_failed_429']}")
@@ -696,6 +876,7 @@ def main(argv=None):
             print(f"  logical_calls           : {stats['logical_calls']}")
             print(f"  retries_total           : {stats['retries_total']}")
             print(f"  retries_by_cause        : {stats['retries_by_cause']}")
+            print(f"  method                  : {stats['method']}")
             print(f"  418 seen                : "
                   f"{stats['abort_reason'] == '418 received'}")
 
@@ -721,7 +902,7 @@ def main(argv=None):
         exit_code = 1
 
     finally:
-        # گزارش HTTP را حتی اگر Stage 3-5 اجرا نشده باشد پر کن
+        # HTTP stats را حتی اگر Stage 3-5 اجرا نشده باشد پر کن
         if session is not None and report.get("http") is None:
             stats = classify_attempts(session.records)
             stats["session_aborted"] = session.aborted
@@ -729,7 +910,11 @@ def main(argv=None):
             report["http"] = stats
 
         report["finished_at_iso"] = datetime.now(timezone.utc).isoformat()
-        _finalize_and_print(report, args.out)
+
+        # نوشتن گزارش؛ اگر شکست خورد، exit_code را override کن
+        write_ok = _finalize_and_print(report, args.out)
+        if not write_ok:
+            exit_code = 1
 
     return exit_code
 
