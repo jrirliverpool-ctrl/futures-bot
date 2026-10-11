@@ -15,9 +15,16 @@ binance_feed.py — لایه‌ی دریافت داده‌ی تاریخی از B
   - تشخیص دقیق گپ‌های زمانی
 
 قرارداد:
-  - Endpoint: https://api.binance.com/api/v3/klines
+  - Endpoint: https://data-api.binance.vision/api/v3/klines
   - هر کندل: [openTime_ms, open, high, low, close, volume, closeTime_ms, ...]
   - Same index layout as Toobit → سازگار با indicators.compute_all
+
+انتخاب BASE_URL:
+  Binance دو endpoint جداگانه دارد:
+    - api.binance.com          → ترافیک حساب کاربری و تریدینگ (geo-restricted)
+    - data-api.binance.vision  → داده‌های عمومی بازار (توصیه‌ی رسمی Binance)
+  برای Backtest فقط به داده‌ی عمومی نیاز داریم، پس از endpoint دوم
+  استفاده می‌کنیم. این یک مسیر مجاز و رسمی است، نه دور زدن محدودیت.
 
 محدودیت‌ها (مستند در BACKLOG-002):
   - داده‌ی Binance ≠ داده‌ی Toobit
@@ -32,7 +39,9 @@ import requests
 from datetime import datetime, timezone
 
 
-BASE_URL = "https://api.binance.com"
+# Public market-data endpoint (recommended by Binance for public data).
+# api.binance.com is geo-restricted from GitHub Actions runners.
+BASE_URL = "https://data-api.binance.vision"
 KLINES_PATH = "/api/v3/klines"
 
 MAX_LIMIT = 1000
@@ -148,10 +157,8 @@ def _validate_candle(candle, strict: bool = True) -> bool:
     # finite check (بدون math.isfinite چون bool هم رد کنیم)
     for name, val in (("open", o), ("high", h),
                       ("low", l), ("close", c), ("volume", v)):
-        # nan check
         if val != val:
             return _fail(f"{name} is NaN")
-        # inf check
         if val in (float("inf"), float("-inf")):
             return _fail(f"{name} is infinite")
 
