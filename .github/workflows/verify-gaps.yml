@@ -5,7 +5,7 @@ on:
 
 jobs:
   verify:
-    name: Fetch long range + verify gaps
+    name: Fetch long range and verify gaps
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -29,8 +29,6 @@ jobs:
           python scripts/probe_binance_history.py \
             --mode long \
             --out reports/probe_long.json || true
-          # || true چون Probe ممکن است exit 1 بدهد (به‌خاطر gap)
-          # ولی گزارش JSON را نوشته است.
 
       - name: Verify each gap independently
         run: |
