@@ -41,6 +41,10 @@ v2 (نسبت به v1):
   5. MIN_REQUEST_WINDOW_S صریح + عدم شروع درخواست زیر آستانه.
   6. --align {floor,ceil} با پیش‌فرض ceil.
   7. شکست نوشتن گزارش JSON → exit_code = 1.
+
+v2.1 (اصلاح باگ):
+  - کلید "method" به دیکشنری empty در classify_attempts اضافه شد
+    تا خروجی در حالت records=[] با حالت غیرخالی یکدست باشد.
 """
 
 import argparse
@@ -87,8 +91,7 @@ MODE_PROFILES = {
 
 # آستانه‌ی حداقلی برای شروع یک درخواست جدید. اگر زمان باقی‌مانده کمتر از
 # این مقدار باشد، هیچ درخواست جدیدی آغاز نمی‌شود و DeadlineExceeded صادر
-# می‌گردد. این باعث می‌شود deadline واقعاً سخت‌گیرانه رعایت شود، نه اینکه
-# با timeout کوتاه از آن عبور کنیم.
+# می‌گردد.
 DEFAULT_MIN_REQUEST_WINDOW_S = 0.5
 
 # برچسب روش شمارش retry. شمارش بر پایه‌ی trace جلسه تخمینی است و نه
@@ -192,9 +195,6 @@ class InstrumentedSession:
 
         if status == 418:
             # ثبت شد؛ اکنون توقف قطعی، مستقل از ماژول.
-            # این استثنا زیرکلاس ProbeAborted است، نه Timeout/ConnectionError؛
-            # پس از try/except داخلی fetch_binance_klines عبور می‌کند و
-            # مستقیماً به main() می‌رسد.
             self.aborted = True
             self.abort_reason = "418 received"
             raise RateLimitBan("418 received")
@@ -236,9 +236,7 @@ def resolve_window(start_iso, end_iso, interval, now_ms=None, align="ceil"):
 
     align:
       - "ceil" (پیش‌فرض): اولین کندلی که openTime آن ≥ start_ms است.
-        یعنی کندل‌های قبل از زمان درخواست وارد بازه نمی‌شوند.
       - "floor": آخرین کندلی که openTime آن ≤ start_ms است.
-        یعنی کندل حاوی زمان شروع نیز وارد بازه می‌شود.
 
     قرارداد:
       - کندل با openTime = O زمانی بسته است که O + interval_ms <= now.
@@ -301,18 +299,15 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
     تحلیل دقیق timestampها.
 
     missing از تفاضل مجموعه‌ی مورد انتظار و واقعی محاسبه می‌شود
-    (نه از تفاضل تعداد ردیف‌ها)، بنابراین تکرار یا out-of-window
-    نمی‌تواند آن را منحرف کند.
+    (نه از تفاضل تعداد ردیف‌ها).
 
     Returns dict:
-      duplicates, actual_unique, missing_count, missing_pct,
-      missing_ranges (list of {start_iso, end_iso, count}),
-      extra_count, aligned_actual_count
+      duplicates, actual_unique, extra_count,
+      missing_count, missing_pct, missing_ranges_total, missing_ranges_sample
     """
     interval_ms = INTERVAL_MS[interval]
     expected_count = (eff_end_ms - eff_start_ms) // interval_ms + 1
 
-    # مجموعه‌ی timestampهای واقعی + شمارش تکرارها
     actual_ts = set()
     duplicates = 0
     extra_count = 0
@@ -329,7 +324,6 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
         else:
             actual_ts.add(ts)
 
-    # پیمایش ترتیبی روی موقعیت‌های مورد انتظار، استخراج بازه‌های پیوسته‌ی مفقود
     missing_ranges = []
     current_run_start = None
     missing_count = 0
@@ -358,7 +352,6 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
         (missing_count / expected_count * 100) if expected_count else 0.0
     )
 
-    # نمونه‌ی قابل‌چاپ برای گزارش
     missing_sample = []
     for r in missing_ranges[:10]:
         missing_sample.append({
@@ -384,7 +377,7 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
 
 def _classify_record(rec):
     if rec["outcome"] != "ok":
-        return "timeout"        # شامل Timeout و ConnectionError
+        return "timeout"
     s = rec["status"]
     if s == 429:
         return "429"
@@ -406,13 +399,7 @@ def classify_attempts(records):
     گروه‌بندی درخواست‌های متوالی به «فراخوان‌های منطقی».
 
     ⚠️ این شمارش *تخمینی* است. فرض می‌کند binance_feed پارامترهای
-    درخواست را بین تلاش‌های مجدد حفظ می‌کند (که در نسخه‌ی فعلی همین است).
-    اگر پارامترها بین retryها تغییر کنند، این تابع ممکن است یک فراخوان
-    منطقی را به دو گروه بشکند یا برعکس.
-
-    قاعده: یک فراخوان منطقی جدید شروع می‌شود اگر
-      (الف) تلاش قبلی با 2xx تمام شده باشد، یا
-      (ب) پارامترهای درخواست تغییر کرده باشند.
+    درخواست را بین تلاش‌های مجدد حفظ می‌کند.
     """
     empty = {
         "attempts_total": 0,
@@ -424,6 +411,7 @@ def classify_attempts(records):
         "logical_calls": 0,
         "retries_total": 0,
         "retries_by_cause": {"429": 0, "5xx": 0, "timeout": 0, "other": 0},
+        "method": RETRY_COUNT_METHOD,
     }
     if not records:
         return empty
@@ -527,7 +515,7 @@ def _parse_args(argv=None):
 def _new_report(args):
     return {
         "probe": "binance_history",
-        "version": "v2",
+        "version": "v2.1",
         "started_at_iso": datetime.now(timezone.utc).isoformat(),
         "arguments": {
             "symbol": args.symbol,
@@ -551,9 +539,9 @@ def _new_report(args):
         "http": None,
         "open_candles_removed": None,
         "dropped_out_of_window": None,
-        "fetch_status": "not_started",     # HTTP/exception layer
-        "completeness": "unknown",         # data quality layer
-        "truncation_reason": None,         # max_candles|max_iterations|early_stop|None
+        "fetch_status": "not_started",
+        "completeness": "unknown",
+        "truncation_reason": None,
         "verdict_ok": False,
         "fetch_error": None,
         "report_write_error": None,
@@ -563,7 +551,7 @@ def _new_report(args):
 
 def _print_header(args):
     print("=" * 72)
-    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2)")
+    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2.1)")
     print("=" * 72)
     print(f"  symbol     : {args.symbol}")
     print(f"  interval   : {args.interval}")
@@ -750,7 +738,6 @@ def main(argv=None):
         }
         report["fetch_error"] = fetch_error
 
-        # HTTP stats — همیشه ثبت می‌شوند
         stats = classify_attempts(session.records)
         stats["session_aborted"] = session.aborted
         stats["abort_reason"] = session.abort_reason
@@ -801,7 +788,6 @@ def main(argv=None):
             print(f"    gap_count   : {s['gap_count']}")
             print(f"    total_miss  : {s['total_missing']}")
 
-            # ---- Stage 3b: timestamp set analysis (authoritative) ----
             print("\n  Timestamp set analysis (authoritative):")
             tsa = analyze_timestamps(
                 closed,
@@ -836,7 +822,7 @@ def main(argv=None):
             }
             report["gaps_sample"] = s["gaps"][:20]
 
-            # ---- تشخیص truncation بر پایه‌ی آخرین timestamp واقعی ----
+            # ---- تشخیص truncation ----
             last_ts = max((int(c[0]) for c in closed), default=None)
             reached_end = (
                 last_ts is not None and last_ts >= win["eff_end_ms"]
@@ -902,7 +888,6 @@ def main(argv=None):
         exit_code = 1
 
     finally:
-        # HTTP stats را حتی اگر Stage 3-5 اجرا نشده باشد پر کن
         if session is not None and report.get("http") is None:
             stats = classify_attempts(session.records)
             stats["session_aborted"] = session.aborted
@@ -911,7 +896,6 @@ def main(argv=None):
 
         report["finished_at_iso"] = datetime.now(timezone.utc).isoformat()
 
-        # نوشتن گزارش؛ اگر شکست خورد، exit_code را override کن
         write_ok = _finalize_and_print(report, args.out)
         if not write_ok:
             exit_code = 1
