@@ -5,9 +5,9 @@ on:
 
 jobs:
   verify:
-    name: Verify gaps from long probe
+    name: Fetch long range + verify gaps
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -23,23 +23,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Download latest long report artifact
+      - name: Probe long — regenerate report
         run: |
           mkdir -p reports
-          # گزارش probe_long.json باید قبلاً در مخزن یا artifact باشد.
-          # اینجا فرض می‌کنیم در کنار مخزن داری. اگر نداری، ابتدا Probe long را دوباره اجرا کن.
+          python scripts/probe_binance_history.py \
+            --mode long \
+            --out reports/probe_long.json || true
+          # || true چون Probe ممکن است exit 1 بدهد (به‌خاطر gap)
+          # ولی گزارش JSON را نوشته است.
 
-      - name: Run verify_gaps
+      - name: Verify each gap independently
         run: |
           python scripts/verify_gaps.py \
             --gaps-from reports/probe_long.json \
             --out reports/verify_gaps_report.json
 
-      - name: Upload verification report
+      - name: Upload both reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: verify-gaps-report
-          path: reports/verify_gaps_report.json
+          name: verify-gaps-artifacts
+          path: |
+            reports/probe_long.json
+            reports/verify_gaps_report.json
           if-no-files-found: warn
           retention-days: 30
