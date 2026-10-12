@@ -1,0 +1,275 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at_iso": "2026-10-12T13:20:00+00:00",
+  "symbol": "BTCUSDT",
+  "market": "spot",
+  "interval": "1h",
+  "source": "data-api.binance.vision",
+  "source_url": "https://data-api.binance.vision/api/v3/klines",
+
+  "field_semantics": {
+    "start_iso": "timestamp of the FIRST missing candle (openTime, inclusive)",
+    "end_iso": "timestamp of the LAST missing candle (openTime, inclusive)",
+    "count": "number of missing candles; equal to (end_ms - start_ms)/interval_ms + 1",
+    "note_1h": "for 1h interval: a gap with start_iso=02:00 and end_iso=07:00 has 6 missing candles at 02,03,04,05,06,07"
+  },
+
+  "verification": {
+    "method": "api_query_individual_candle",
+    "verified_at_iso": "2026-10-12T13:12:00+00:00",
+    "verification_report": "reports/verify_gaps_report.json",
+    "verdict_summary": "20/20 confirmed_gap; 60/60 candles confirmed missing",
+    "scope": "each missing candle queried individually with startTime=ts, endTime=ts+interval-1, limit=1"
+  },
+
+  "cause_classification_policy": {
+    "rule": "cause is asserted only when an official Binance announcement is archived in this repository and its time window matches the gap",
+    "default_cause": "unknown_legacy_gap",
+    "auditable": true
+  },
+
+  "policy": {
+    "acceptance": "accepted_with_known_gaps",
+    "no_synthetic_candles": true,
+    "backtest_must_handle_gaps": true,
+    "complete_with_known_gaps_is_not_complete": true
+  },
+
+  "gaps": [
+    {
+      "id": 1,
+      "start_iso": "2019-03-12T02:00:00+00:00",
+      "end_iso": "2019-03-12T07:00:00+00:00",
+      "count": 6,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": "binance_scheduled_maintenance",
+      "candidate_evidence_ref": null,
+      "note": "الگوی ساعتی سازگار با maintenance؛ مدرک رسمی در مخزن بایگانی نشده"
+    },
+    {
+      "id": 2,
+      "start_iso": "2019-05-15T03:00:00+00:00",
+      "end_iso": "2019-05-15T12:00:00+00:00",
+      "count": 10,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": "binance_scheduled_maintenance",
+      "candidate_evidence_ref": null,
+      "note": "الگوی ساعتی سازگار با maintenance؛ مدرک رسمی در مخزن بایگانی نشده"
+    },
+    {
+      "id": 3,
+      "start_iso": "2019-08-15T02:00:00+00:00",
+      "end_iso": "2019-08-15T09:00:00+00:00",
+      "count": 8,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": "binance_scheduled_maintenance",
+      "candidate_evidence_ref": null,
+      "note": "الگوی ساعتی سازگار با maintenance؛ مدرک رسمی در مخزن بایگانی نشده"
+    },
+    {
+      "id": 4,
+      "start_iso": "2019-11-13T02:00:00+00:00",
+      "end_iso": "2019-11-13T03:00:00+00:00",
+      "count": 2,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": "binance_scheduled_maintenance",
+      "candidate_evidence_ref": null,
+      "note": "الگوی ساعتی سازگار با maintenance؛ مدرک رسمی در مخزن بایگانی نشده"
+    },
+    {
+      "id": 5,
+      "start_iso": "2019-11-25T02:00:00+00:00",
+      "end_iso": "2019-11-25T03:00:00+00:00",
+      "count": 2,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 6,
+      "start_iso": "2020-02-09T02:00:00+00:00",
+      "end_iso": "2020-02-09T02:00:00+00:00",
+      "count": 1,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 7,
+      "start_iso": "2020-02-19T12:00:00+00:00",
+      "end_iso": "2020-02-19T16:00:00+00:00",
+      "count": 5,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": "ساعت غیرمعمول"
+    },
+    {
+      "id": 8,
+      "start_iso": "2020-03-04T10:00:00+00:00",
+      "end_iso": "2020-03-04T10:00:00+00:00",
+      "count": 1,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 9,
+      "start_iso": "2020-04-25T02:00:00+00:00",
+      "end_iso": "2020-04-25T03:00:00+00:00",
+      "count": 2,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 10,
+      "start_iso": "2020-06-28T02:00:00+00:00",
+      "end_iso": "2020-06-28T04:00:00+00:00",
+      "count": 3,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 11,
+      "start_iso": "2020-11-30T06:00:00+00:00",
+      "end_iso": "2020-11-30T06:00:00+00:00",
+      "count": 1,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 12,
+      "start_iso": "2020-12-21T14:00:00+00:00",
+      "end_iso": "2020-12-21T17:00:00+00:00",
+      "count": 4,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": "ساعت غیرمعمول"
+    },
+    {
+      "id": 13,
+      "start_iso": "2020-12-25T02:00:00+00:00",
+      "end_iso": "2020-12-25T02:00:00+00:00",
+      "count": 1,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 14,
+      "start_iso": "2021-02-11T04:00:00+00:00",
+      "end_iso": "2021-02-11T04:00:00+00:00",
+      "count": 1,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 15,
+      "start_iso": "2021-03-06T02:00:00+00:00",
+      "end_iso": "2021-03-06T02:00:00+00:00",
+      "count": 1,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 16,
+      "start_iso": "2021-04-20T02:00:00+00:00",
+      "end_iso": "2021-04-20T03:00:00+00:00",
+      "count": 2,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 17,
+      "start_iso": "2021-04-25T05:00:00+00:00",
+      "end_iso": "2021-04-25T07:00:00+00:00",
+      "count": 3,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": "ساعت غیرمعمول"
+    },
+    {
+      "id": 18,
+      "start_iso": "2021-08-13T02:00:00+00:00",
+      "end_iso": "2021-08-13T05:00:00+00:00",
+      "count": 4,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": null
+    },
+    {
+      "id": 19,
+      "start_iso": "2021-09-29T07:00:00+00:00",
+      "end_iso": "2021-09-29T08:00:00+00:00",
+      "count": 2,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": "ساعت غیرمعمول"
+    },
+    {
+      "id": 20,
+      "start_iso": "2023-03-24T13:00:00+00:00",
+      "end_iso": "2023-03-24T13:00:00+00:00",
+      "count": 1,
+      "cause": "unknown_legacy_gap",
+      "cause_confidence": "unverified",
+      "candidate_cause": null,
+      "candidate_evidence_ref": null,
+      "note": "ساعت غیرمعمول"
+    }
+  ],
+
+  "summary": {
+    "gaps_total": 20,
+    "candles_missing_total": 60,
+    "cause_breakdown": {
+      "binance_scheduled_maintenance": 0,
+      "unknown_legacy_gap": 20
+    },
+    "candidate_maintenance_count": 4,
+    "first_gap_iso": "2019-03-12T02:00:00+00:00",
+    "last_gap_iso": "2023-03-24T13:00:00+00:00",
+    "last_observed_gap_end_iso": "2023-03-24T13:00:00+00:00",
+    "clean_since_observation_iso": "2023-03-24T14:00:00+00:00",
+    "clean_since_note": "بعد از این زمان، در داده‌های بررسی‌شده‌ی جاری هیچ gap شناخته‌شده‌ای مشاهده نشده است؛ این یک مشاهده است، نه تضمین کامل‌بودن داده‌های آینده."
+  }
+}
