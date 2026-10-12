@@ -11,6 +11,11 @@ v2.2 (نسبت به v2.1):
 v2.2.1 (اصلاح):
   - اعتبارسنجی هم‌پوشانی بازه‌ها در load_known_gaps.
   - ثبت fetch_status = "known_gaps_error" هنگام خطای فایل مرجع.
+
+v2.2.2 (اصلاح):
+  - بررسی هم‌ترازی start_ms و end_ms به‌صورت جداگانه (نه فقط اختلاف).
+    این باگ باعث می‌شد بازه‌های تک‌کندلی نامنطبق (مثل 03:30 → 03:30)
+    اشتباهاً معتبر تلقی شوند.
 """
 
 import argparse
@@ -232,8 +237,8 @@ def load_known_gaps(path, symbol, interval):
 
     Raises:
         KnownGapsError: اگر فایل نباشد، schema ناسازگار باشد،
-        symbol/interval مطابقت نداشته باشد، count با start/end
-        سازگار نباشد، یا بازه‌ها هم‌پوشانی داشته باشند.
+        symbol/interval مطابقت نداشته باشد، start/end نامنطبق باشند،
+        count با start/end سازگار نباشد، یا بازه‌ها هم‌پوشانی داشته باشند.
     """
     p = Path(path)
     if not p.exists():
@@ -278,9 +283,16 @@ def load_known_gaps(path, symbol, interval):
 
         if end_ms < start_ms:
             raise KnownGapsError(f"gap #{i}: end_iso < start_iso")
-        if (end_ms - start_ms) % interval_ms != 0:
+
+        # بررسی هم‌ترازی هر مرز به‌صورت جداگانه با شبکه‌ی زمانی interval
+        if start_ms % interval_ms != 0:
             raise KnownGapsError(
-                f"gap #{i}: start_iso/end_iso not aligned to interval "
+                f"gap #{i}: start_iso not aligned to interval "
+                f"{interval}"
+            )
+        if end_ms % interval_ms != 0:
+            raise KnownGapsError(
+                f"gap #{i}: end_iso not aligned to interval "
                 f"{interval}"
             )
 
@@ -550,7 +562,7 @@ def _parse_args(argv=None):
 def _new_report(args):
     return {
         "probe": "binance_history",
-        "version": "v2.2.1",
+        "version": "v2.2.2",
         "started_at_iso": datetime.now(timezone.utc).isoformat(),
         "arguments": {
             "symbol": args.symbol,
@@ -589,7 +601,7 @@ def _new_report(args):
 
 def _print_header(args):
     print("=" * 72)
-    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2.2.1)")
+    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2.2.2)")
     print("=" * 72)
     print(f"  symbol     : {args.symbol}")
     print(f"  interval   : {args.interval}")
