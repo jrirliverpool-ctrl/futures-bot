@@ -133,7 +133,7 @@ jobs:
       - name: Verify each gap independently
         run: |
           python scripts/verify_gaps.py \
-            --from-report reports/probe_long.json \
+            --gaps-from reports/probe_long.json \
             --out reports/verify_gaps_report.json
 
       - name: Upload verification report
