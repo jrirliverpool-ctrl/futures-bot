@@ -1,50 +1,17 @@
 """
 probe_binance_history.py — تأیید دریافت داده‌ی تاریخی چندساله از Binance.
 
-هدف (محدود و صریح):
-  - اثبات قابلیت دریافت بازه‌ی تاریخی بلندمدت (چند ماه تا چند سال)
-  - سنجش صحت صفحه‌بندی روی بازه‌های طولانی
-  - شمارش retryها به تفکیک علت (429 / 5xx / timeout / other)
-  - تشخیص دقیق نقص بازه بر پایه‌ی مجموعه‌ی timestampها
-  - توقف فوری در صورت مشاهده‌ی HTTP 418 (مستقل از ماژول)
+v2.2 (نسبت به v2.1):
+  - افزودن --known-gaps PATH برای بارگذاری فهرست مرجع شکاف‌ها.
+  - بررسی دقیق اینکه timestampهای مفقود در فهرست known هستند یا خیر.
+  - سه مقدار جدید completeness: complete / complete_with_known_gaps / incomplete
+  - فیلدهای جدید: missing_known, missing_unknown, unknown_missing_sample
+  - تحلیل timestamp اکنون missing_ts_list را برمی‌گرداند.
 
-آنچه این Probe اثبات نمی‌کند:
-  - کیفیت داده برای استراتژی (فقط پوشش و ساختار)
-  - سودآوری (هیچ Backtest اجرا نمی‌شود)
-  - تطابق با داده‌ی Toobit (BACKLOG-002)
-
-هیچ Backtest اجرا نمی‌شود.
-هیچ state ذخیره نمی‌شود.
-هیچ سفارشی ارسال نمی‌شود.
-
-قرارداد: این اسکریپت در همان پوشه‌ی binance_feed.py است (هر دو در scripts/).
-
-نکات سازگاری با binance_feed.py:
-  - end_ms در fetch_binance_klines_range یک مرز «شامل» است.
-  - پاسخ خالی با strict_completeness=False → [] بدون استثنا.
-  - 418 در _should_retry_http نیست → raise_for_status() آن را HTTPError می‌کند.
-
-سه مفهوم جدا در گزارش:
-  fetch_status       — نتیجه‌ی HTTP/exception در خود عملیات دریافت
-  completeness       — پوشش داده، مستقل از موفقیت HTTP
-  verdict_ok         — تنها وقتی True است که fetch_status == "ok"
-                       و completeness == "complete"
-
-v2 (نسبت به v1):
-  1. 418 در InstrumentedSession مستقیماً RateLimitBan می‌اندازد
-     (توقف قطعی، مستقل از رفتار binance_feed).
-  2. شمارش retry با برچسب صریح «تخمینی» و مستندسازی فرض.
-  3. تشخیص truncation بر پایه‌ی last_ts vs eff_end (به‌جای صرفاً
-     len(raw) >= max_candles).
-  4. محاسبه‌ی missing از تفاضل مجموعه‌ی timestampهای مورد انتظار و
-     timestampهای واقعی (نه تفاضل تعداد ردیف‌ها).
-  5. MIN_REQUEST_WINDOW_S صریح + عدم شروع درخواست زیر آستانه.
-  6. --align {floor,ceil} با پیش‌فرض ceil.
-  7. شکست نوشتن گزارش JSON → exit_code = 1.
-
-v2.1 (اصلاح باگ):
-  - کلید "method" به دیکشنری empty در classify_attempts اضافه شد
-    تا خروجی در حالت records=[] با حالت غیرخالی یکدست باشد.
+اصول:
+  - هیچ کندل مصنوعی ساخته نمی‌شود.
+  - complete_with_known_gaps معادل complete نیست و در گزارش صریح است.
+  - شکاف ناشناخته → incomplete و exit code 1.
 """
 
 import argparse
@@ -68,13 +35,9 @@ from binance_feed import (
 )
 
 
-# ============================================================
-# Constants
-# ============================================================
-
 MODE_PROFILES = {
     "short": {
-        "fixed_start": None,               # offset-based
+        "fixed_start": None,
         "start_offset_days": 180,
         "max_candles": 10_000,
         "max_iterations": 20,
@@ -89,15 +52,9 @@ MODE_PROFILES = {
     },
 }
 
-# آستانه‌ی حداقلی برای شروع یک درخواست جدید. اگر زمان باقی‌مانده کمتر از
-# این مقدار باشد، هیچ درخواست جدیدی آغاز نمی‌شود و DeadlineExceeded صادر
-# می‌گردد.
 DEFAULT_MIN_REQUEST_WINDOW_S = 0.5
-
-# برچسب روش شمارش retry. شمارش بر پایه‌ی trace جلسه تخمینی است و نه
-# قطعی؛ چون به این فرض وابسته است که binance_feed پارامترهای درخواست را
-# بین تلاش‌های مجدد حفظ می‌کند (که در نسخه‌ی فعلی همین‌طور است).
 RETRY_COUNT_METHOD = "estimated_from_session_trace"
+KNOWN_GAPS_SCHEMA_VERSION_SUPPORTED = ("1.0.0",)
 
 
 # ============================================================
@@ -105,15 +62,19 @@ RETRY_COUNT_METHOD = "estimated_from_session_trace"
 # ============================================================
 
 class ProbeAborted(Exception):
-    """توقف عمدی Probe (418 یا اتمام مهلت)."""
+    pass
 
 
 class DeadlineExceeded(ProbeAborted):
-    """مهلت زمانی اجرا تمام شد."""
+    pass
 
 
 class RateLimitBan(ProbeAborted):
-    """HTTP 418 مشاهده شد — هیچ درخواست دیگری ارسال نمی‌شود."""
+    pass
+
+
+class KnownGapsError(Exception):
+    """خطا در بارگذاری یا اعتبارسنجی فایل known_gaps."""
 
 
 # ============================================================
@@ -121,17 +82,6 @@ class RateLimitBan(ProbeAborted):
 # ============================================================
 
 class InstrumentedSession:
-    """
-    Wrapper روی requests (یا session تزریقی).
-
-    ویژگی‌ها:
-      - ثبت هر درخواست: URL، params، outcome، status، latency، Retry-After
-      - اعمال مهلت روی هر درخواست: timeout مؤثر = min(requested, remaining)
-      - عدم شروع درخواست جدید اگر remaining < min_request_window_s
-      - توقف فوری پس از 418: خود wrapper مستقیماً RateLimitBan می‌اندازد
-        (مستقل از اینکه binance_feed چه می‌کند)
-    """
-
     def __init__(self, inner=None, deadline_monotonic=None,
                  min_request_window_s=DEFAULT_MIN_REQUEST_WINDOW_S):
         self.inner = inner if inner is not None else requests
@@ -194,7 +144,6 @@ class InstrumentedSession:
         })
 
         if status == 418:
-            # ثبت شد؛ اکنون توقف قطعی، مستقل از ماژول.
             self.aborted = True
             self.abort_reason = "418 received"
             raise RateLimitBan("418 received")
@@ -206,7 +155,7 @@ class InstrumentedSession:
 # Time helpers
 # ============================================================
 
-def _parse_iso_utc(s: str) -> int:
+def _parse_iso_utc(s):
     s = s.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -216,37 +165,21 @@ def _parse_iso_utc(s: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def _floor_to_interval(ms: int, interval_ms: int) -> int:
+def _floor_to_interval(ms, interval_ms):
     return (ms // interval_ms) * interval_ms
 
 
-def _ceil_to_interval(ms: int, interval_ms: int) -> int:
+def _ceil_to_interval(ms, interval_ms):
     if ms % interval_ms == 0:
         return ms
     return ((ms // interval_ms) + 1) * interval_ms
 
 
-def _iso(ms: int) -> str:
+def _iso(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
 def resolve_window(start_iso, end_iso, interval, now_ms=None, align="ceil"):
-    """
-    بازه‌ی مؤثر = بازه‌ی کندل‌های *بسته*.
-
-    align:
-      - "ceil" (پیش‌فرض): اولین کندلی که openTime آن ≥ start_ms است.
-      - "floor": آخرین کندلی که openTime آن ≤ start_ms است.
-
-    قرارداد:
-      - کندل با openTime = O زمانی بسته است که O + interval_ms <= now.
-      - endTime برای binance_feed «شامل» است (ts <= end_ms).
-      - برای مقاومت نسبت به رفتار API، مقدار ارسالی به ماژول
-        eff_end + interval_ms است؛ فیلتر دقیق در Probe اعمال می‌شود.
-
-    Returns dict: eff_start_ms, eff_end_ms, binance_end_ms, expected_count,
-                  requested_start_ms, align
-    """
     if interval not in INTERVAL_MS:
         raise ValueError(f"Unsupported interval: {interval}")
     if align not in ("floor", "ceil"):
@@ -291,20 +224,116 @@ def resolve_window(start_iso, end_iso, interval, now_ms=None, align="ceil"):
 
 
 # ============================================================
+# Known gaps loader
+# ============================================================
+
+def load_known_gaps(path, symbol, interval):
+    """
+    بارگذاری و اعتبارسنجی فایل known_gaps.
+
+    Raises:
+        KnownGapsError: اگر فایل نباشد، schema ناسازگار باشد، یا
+        symbol/interval با فراخوانی جاری مطابقت نداشته باشد،
+        یا محاسبات count با start_iso/end_iso سازگار نباشد.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise KnownGapsError(f"known_gaps file not found: {path}")
+
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise KnownGapsError(f"cannot parse known_gaps JSON: {e}")
+
+    schema = data.get("schema_version")
+    if schema not in KNOWN_GAPS_SCHEMA_VERSION_SUPPORTED:
+        raise KnownGapsError(
+            f"unsupported schema_version: {schema!r}; "
+            f"supported: {KNOWN_GAPS_SCHEMA_VERSION_SUPPORTED}"
+        )
+
+    if data.get("symbol") != symbol:
+        raise KnownGapsError(
+            f"known_gaps symbol {data.get('symbol')!r} does not match "
+            f"requested symbol {symbol!r}"
+        )
+    if data.get("interval") != interval:
+        raise KnownGapsError(
+            f"known_gaps interval {data.get('interval')!r} does not match "
+            f"requested interval {interval!r}"
+        )
+
+    gaps = data.get("gaps")
+    if not isinstance(gaps, list):
+        raise KnownGapsError("known_gaps 'gaps' field must be a list")
+
+    interval_ms = INTERVAL_MS[interval]
+    validated = []
+
+    for i, g in enumerate(gaps):
+        try:
+            start_ms = _parse_iso_utc(g["start_iso"])
+            end_ms = _parse_iso_utc(g["end_iso"])
+        except Exception as e:
+            raise KnownGapsError(f"gap #{i}: invalid iso timestamps: {e}")
+
+        if end_ms < start_ms:
+            raise KnownGapsError(
+                f"gap #{i}: end_iso < start_iso"
+            )
+        if (end_ms - start_ms) % interval_ms != 0:
+            raise KnownGapsError(
+                f"gap #{i}: start_iso/end_iso not aligned to interval "
+                f"{interval}"
+            )
+
+        computed_count = (end_ms - start_ms) // interval_ms + 1
+        declared_count = int(g.get("count", -1))
+        if computed_count != declared_count:
+            raise KnownGapsError(
+                f"gap #{i}: count mismatch — declared {declared_count}, "
+                f"computed {computed_count}"
+            )
+
+        validated.append({
+            "id": g.get("id", i + 1),
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "count": declared_count,
+            "cause": g.get("cause"),
+            "cause_confidence": g.get("cause_confidence"),
+            "candidate_cause": g.get("candidate_cause"),
+            "start_iso": g["start_iso"],
+            "end_iso": g["end_iso"],
+        })
+
+    return {
+        "schema_version": schema,
+        "symbol": data["symbol"],
+        "interval": data["interval"],
+        "source": data.get("source"),
+        "gaps": validated,
+        "summary": data.get("summary") or {},
+    }
+
+
+def build_known_ts_set(known_gaps_doc, interval):
+    """ساخت مجموعه‌ی timestampهای known (میلی‌ثانیه)."""
+    interval_ms = INTERVAL_MS[interval]
+    ts_set = set()
+    for g in known_gaps_doc["gaps"]:
+        ts = g["start_ms"]
+        while ts <= g["end_ms"]:
+            ts_set.add(ts)
+            ts += interval_ms
+    return ts_set
+
+
+# ============================================================
 # Timestamp set analysis
 # ============================================================
 
 def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
-    """
-    تحلیل دقیق timestampها.
-
-    missing از تفاضل مجموعه‌ی مورد انتظار و واقعی محاسبه می‌شود
-    (نه از تفاضل تعداد ردیف‌ها).
-
-    Returns dict:
-      duplicates, actual_unique, extra_count,
-      missing_count, missing_pct, missing_ranges_total, missing_ranges_sample
-    """
     interval_ms = INTERVAL_MS[interval]
     expected_count = (eff_end_ms - eff_start_ms) // interval_ms + 1
 
@@ -324,15 +353,16 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
         else:
             actual_ts.add(ts)
 
+    missing_ts_list = []
     missing_ranges = []
     current_run_start = None
-    missing_count = 0
+
     for i in range(expected_count):
         ts = eff_start_ms + i * interval_ms
         if ts not in actual_ts:
             if current_run_start is None:
                 current_run_start = ts
-            missing_count += 1
+            missing_ts_list.append(ts)
         else:
             if current_run_start is not None:
                 missing_ranges.append({
@@ -341,6 +371,7 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
                     "count": (ts - current_run_start) // interval_ms,
                 })
                 current_run_start = None
+
     if current_run_start is not None:
         missing_ranges.append({
             "start_ms": current_run_start,
@@ -348,6 +379,7 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
             "count": (eff_end_ms - current_run_start) // interval_ms + 1,
         })
 
+    missing_count = len(missing_ts_list)
     missing_pct = (
         (missing_count / expected_count * 100) if expected_count else 0.0
     )
@@ -368,11 +400,12 @@ def analyze_timestamps(closed_candles, eff_start_ms, eff_end_ms, interval):
         "missing_pct": round(missing_pct, 6),
         "missing_ranges_total": len(missing_ranges),
         "missing_ranges_sample": missing_sample,
+        "missing_ts_list": missing_ts_list,
     }
 
 
 # ============================================================
-# Retry classification (estimated)
+# Retry classification
 # ============================================================
 
 def _classify_record(rec):
@@ -395,12 +428,6 @@ def _is_success(rec):
 
 
 def classify_attempts(records):
-    """
-    گروه‌بندی درخواست‌های متوالی به «فراخوان‌های منطقی».
-
-    ⚠️ این شمارش *تخمینی* است. فرض می‌کند binance_feed پارامترهای
-    درخواست را بین تلاش‌های مجدد حفظ می‌کند.
-    """
     empty = {
         "attempts_total": 0,
         "attempts_success": 0,
@@ -471,23 +498,21 @@ def _parse_args(argv=None):
     p.add_argument("--symbol", default="BTCUSDT")
     p.add_argument("--interval", default="1h", choices=SUPPORTED_INTERVALS)
     p.add_argument("--mode", default="short", choices=("short", "long"))
-    p.add_argument("--start", default=None,
-                   help="ISO UTC. اگر ندهی، بر اساس mode تعیین می‌شود.")
-    p.add_argument("--end", default=None, help="ISO UTC. پیش‌فرض: اکنون.")
-    p.add_argument("--align", default="ceil", choices=("floor", "ceil"),
-                   help="نحوه‌ی تراز کردن start. پیش‌فرض: ceil")
+    p.add_argument("--start", default=None)
+    p.add_argument("--end", default=None)
+    p.add_argument("--align", default="ceil", choices=("floor", "ceil"))
     p.add_argument("--max-candles", type=int, default=None)
     p.add_argument("--max-iterations", type=int, default=None)
     p.add_argument("--max-seconds", type=int, default=None)
     p.add_argument("--min-request-window", type=float,
-                   default=DEFAULT_MIN_REQUEST_WINDOW_S,
-                   help="کمترین زمان لازم برای شروع یک درخواست جدید.")
+                   default=DEFAULT_MIN_REQUEST_WINDOW_S)
     p.add_argument("--max-retries", type=int, default=3)
     p.add_argument("--backoff-base", type=float, default=0.5)
     p.add_argument("--timeout", type=int, default=15)
     p.add_argument("--sleep-between", type=float, default=0.15)
-    p.add_argument("--out", default=None,
-                   help="مسیر فایل JSON گزارش. اگر ندهی، فقط stdout.")
+    p.add_argument("--known-gaps", default=None,
+                   help="مسیر فایل known_gaps JSON (اختیاری)")
+    p.add_argument("--out", default=None)
 
     args = p.parse_args(argv)
     profile = MODE_PROFILES[args.mode]
@@ -515,7 +540,7 @@ def _parse_args(argv=None):
 def _new_report(args):
     return {
         "probe": "binance_history",
-        "version": "v2.1",
+        "version": "v2.2",
         "started_at_iso": datetime.now(timezone.utc).isoformat(),
         "arguments": {
             "symbol": args.symbol,
@@ -531,8 +556,10 @@ def _new_report(args):
             "max_retries": args.max_retries,
             "backoff_base": args.backoff_base,
             "timeout": args.timeout,
+            "known_gaps_file": args.known_gaps,
         },
         "window": None,
+        "known_gaps": None,
         "fetch": None,
         "counts": None,
         "gaps_sample": None,
@@ -543,6 +570,7 @@ def _new_report(args):
         "completeness": "unknown",
         "truncation_reason": None,
         "verdict_ok": False,
+        "has_known_gaps": False,
         "fetch_error": None,
         "report_write_error": None,
         "fatal_error": None,
@@ -551,7 +579,7 @@ def _new_report(args):
 
 def _print_header(args):
     print("=" * 72)
-    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2.1)")
+    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2.2)")
     print("=" * 72)
     print(f"  symbol     : {args.symbol}")
     print(f"  interval   : {args.interval}")
@@ -562,14 +590,12 @@ def _print_header(args):
     print(f"  max_iter   : {args.max_iterations}")
     print(f"  max_seconds: {args.max_seconds}")
     print(f"  min_req_win: {args.min_request_window}s")
+    print(f"  known_gaps : {args.known_gaps or '(none)'}")
     print(f"  purpose    : تأیید پوشش تاریخی + صفحه‌بندی (نه Backtest)")
     print("=" * 72)
 
 
 def _finalize_and_print(report, out_path):
-    """
-    چاپ خلاصه و نوشتن گزارش JSON. Returns bool (write_ok).
-    """
     print()
     print("=" * 72)
     if report["verdict_ok"]:
@@ -582,6 +608,7 @@ def _finalize_and_print(report, out_path):
     c = report.get("counts") or {}
     h = report.get("http") or {}
     f = report.get("fetch") or {}
+    kg = report.get("known_gaps")
 
     print(f"  mode             : {report['arguments']['mode']}")
     print(f"  symbol/interval  : "
@@ -595,8 +622,13 @@ def _finalize_and_print(report, out_path):
           f"{w.get('expected_count')}/{c.get('actual')}")
     print(f"  missing          : {c.get('missing')} "
           f"({c.get('missing_pct', 0):.4f}%)")
-    print(f"  missing_ranges   : {c.get('missing_ranges_total')} "
-          f"(sample: {c.get('missing_ranges_sample')})")
+    if kg:
+        print(f"  known_gaps_used  : {kg.get('gaps_total')} gaps, "
+              f"{kg.get('candles_total')} candles in reference")
+        print(f"  missing_known    : {c.get('missing_known')}")
+        print(f"  missing_unknown  : {c.get('missing_unknown')}")
+    else:
+        print(f"  known_gaps_used  : (none — همه‌ی missing ناشناخته)")
     print(f"  duplicates       : {c.get('duplicates')}")
     print(f"  extra            : {c.get('extra')}")
     print(f"  gaps             : {c.get('gaps_total')} "
@@ -605,6 +637,7 @@ def _finalize_and_print(report, out_path):
     print(f"  dropped_oow      : {report.get('dropped_out_of_window')}")
     print(f"  fetch_status     : {report['fetch_status']}")
     print(f"  completeness     : {report.get('completeness', 'unknown')}")
+    print(f"  has_known_gaps   : {report.get('has_known_gaps')}")
     print(f"  truncation       : {report.get('truncation_reason')}")
     print(f"  requests         : {h.get('attempts_total')} "
           f"(retries: {h.get('retries_total')}, "
@@ -623,7 +656,7 @@ def _finalize_and_print(report, out_path):
     print()
     print("  ⚠️ این Probe فقط پوشش و ساختار داده را تأیید می‌کند.")
     print("  ⚠️ اثبات سودآوری استراتژی نیست و Backtest اجرا نمی‌کند.")
-    print("  ⚠️ مطابقت با Toobit و Commission نیازمند Probe جداگانه است.")
+    print("  ⚠️ complete_with_known_gaps معادل complete نیست.")
     print("=" * 72)
 
     write_ok = True
@@ -657,6 +690,41 @@ def main(argv=None):
     exit_code = 1
 
     try:
+        # ---- Stage 0: load known_gaps (if provided) ----
+        known_ts_set = set()
+        known_gaps_doc = None
+
+        if args.known_gaps:
+            print("\n[Stage 0] Loading known_gaps reference...")
+            try:
+                known_gaps_doc = load_known_gaps(
+                    args.known_gaps, args.symbol, args.interval,
+                )
+                known_ts_set = build_known_ts_set(
+                    known_gaps_doc, args.interval,
+                )
+                report["known_gaps"] = {
+                    "file": args.known_gaps,
+                    "schema_version": known_gaps_doc["schema_version"],
+                    "symbol": known_gaps_doc["symbol"],
+                    "interval": known_gaps_doc["interval"],
+                    "gaps_total": len(known_gaps_doc["gaps"]),
+                    "candles_total": len(known_ts_set),
+                }
+                print(f"  file        : {args.known_gaps}")
+                print(f"  schema      : {known_gaps_doc['schema_version']}")
+                print(f"  gaps loaded : {len(known_gaps_doc['gaps'])}")
+                print(f"  candles set : {len(known_ts_set)}")
+                print("  ✅ known_gaps loaded")
+            except KnownGapsError as e:
+                print(f"  ❌ known_gaps error: {e}")
+                report["fetch_status"] = "known_gaps_error"
+                report["fetch_error"] = f"KnownGapsError: {e}"
+                report["verdict_ok"] = False
+                return 1
+        else:
+            print("\n[Stage 0] known_gaps: not provided")
+
         # ---- Stage 1: window ----
         print("\n[Stage 1] Resolving effective window (closed candles only)...")
         win = resolve_window(
@@ -750,7 +818,6 @@ def main(argv=None):
         if aborted_reason:
             print(f"  aborted_reason       : {aborted_reason}")
 
-        # ---- خروج زودهنگام در صورت شکست fetch ----
         if report["fetch_status"] != "ok":
             report["completeness"] = "unknown"
             report["truncation_reason"] = None
@@ -797,13 +864,23 @@ def main(argv=None):
             actual_unique = tsa["actual_unique"]
             missing = tsa["missing_count"]
 
+            missing_ts = set(tsa["missing_ts_list"])
+            known_missing_ts = missing_ts & known_ts_set
+            unknown_missing_ts = missing_ts - known_ts_set
+
             print(f"    expected        : {expected}")
             print(f"    actual_unique   : {actual_unique}")
             print(f"    missing         : {missing} "
                   f"({tsa['missing_pct']:.4f}%)")
+            print(f"    missing_known   : {len(known_missing_ts)}")
+            print(f"    missing_unknown : {len(unknown_missing_ts)}")
             print(f"    missing_ranges  : {tsa['missing_ranges_total']}")
             print(f"    duplicates      : {tsa['duplicates']}")
             print(f"    extra           : {tsa['extra_count']}")
+
+            unknown_sample = [
+                _iso(ts) for ts in sorted(unknown_missing_ts)[:20]
+            ]
 
             report["counts"] = {
                 "expected": expected,
@@ -811,8 +888,11 @@ def main(argv=None):
                 "actual_unique": actual_unique,
                 "missing": missing,
                 "missing_pct": tsa["missing_pct"],
+                "missing_known": len(known_missing_ts),
+                "missing_unknown": len(unknown_missing_ts),
                 "missing_ranges_total": tsa["missing_ranges_total"],
                 "missing_ranges_sample": tsa["missing_ranges_sample"],
+                "unknown_missing_sample": unknown_sample,
                 "duplicates": tsa["duplicates"],
                 "extra": tsa["extra_count"],
                 "first_iso": s["first_iso"],
@@ -822,7 +902,7 @@ def main(argv=None):
             }
             report["gaps_sample"] = s["gaps"][:20]
 
-            # ---- تشخیص truncation ----
+            # ---- truncation ----
             last_ts = max((int(c[0]) for c in closed), default=None)
             reached_end = (
                 last_ts is not None and last_ts >= win["eff_end_ms"]
@@ -838,7 +918,7 @@ def main(argv=None):
                 truncated_by = "early_stop"
             report["truncation_reason"] = truncated_by
 
-            # ---- تعیین completeness ----
+            # ---- completeness ----
             if (
                 missing == 0
                 and tsa["duplicates"] == 0
@@ -846,10 +926,20 @@ def main(argv=None):
                 and truncated_by is None
             ):
                 report["completeness"] = "complete"
+                report["has_known_gaps"] = False
+            elif (
+                missing > 0
+                and len(unknown_missing_ts) == 0
+                and tsa["duplicates"] == 0
+                and tsa["extra_count"] == 0
+                and truncated_by is None
+            ):
+                report["completeness"] = "complete_with_known_gaps"
+                report["has_known_gaps"] = True
             else:
                 report["completeness"] = "incomplete"
+                report["has_known_gaps"] = len(known_missing_ts) > 0
 
-            # ---- Stage 4: HTTP summary ----
             print("\n[Stage 4] HTTP instrumentation (retry counts estimated)...")
             print(f"  attempts_total          : {stats['attempts_total']}")
             print(f"  attempts_success        : {stats['attempts_success']}")
@@ -866,7 +956,6 @@ def main(argv=None):
             print(f"  418 seen                : "
                   f"{stats['abort_reason'] == '418 received'}")
 
-            # ---- Stage 5: sample prices ----
             print("\n[Stage 5] Last 3 candle closes:")
             for c in closed[-3:]:
                 ts = int(c[0])
@@ -876,9 +965,9 @@ def main(argv=None):
                 )
                 print(f"  {iso_str}: {close}")
 
-            # ---- Verdict ----
-            report["verdict_ok"] = (
-                report["completeness"] == "complete"
+            # verdict_ok: برای complete و complete_with_known_gaps → True
+            report["verdict_ok"] = report["completeness"] in (
+                "complete", "complete_with_known_gaps",
             )
             exit_code = 0 if report["verdict_ok"] else 1
 
