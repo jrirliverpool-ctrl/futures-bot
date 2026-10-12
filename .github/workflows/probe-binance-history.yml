@@ -44,6 +44,7 @@ jobs:
           mkdir -p reports
           python scripts/probe_binance_history.py \
             --mode short \
+            --known-gaps data/known_gaps_btcusdt_1h.json \
             --out reports/probe_short.json
 
       - name: Upload short report
@@ -86,6 +87,7 @@ jobs:
           mkdir -p reports
           python scripts/probe_binance_history.py \
             --mode long \
+            --known-gaps data/known_gaps_btcusdt_1h.json \
             --out reports/probe_long.json || true
 
       - name: Upload long report
