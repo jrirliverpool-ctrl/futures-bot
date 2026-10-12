@@ -36,6 +36,9 @@ jobs:
       - name: Unit tests — probe_history
         run: python tests/test_probe_history.py
 
+      - name: Unit tests — known_gaps
+        run: python tests/test_probe_known_gaps.py
+
       - name: Probe live — connectivity
         run: python scripts/probe_binance_live.py
 
