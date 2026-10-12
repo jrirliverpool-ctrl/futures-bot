@@ -6,12 +6,11 @@ v2.2 (نسبت به v2.1):
   - بررسی دقیق اینکه timestampهای مفقود در فهرست known هستند یا خیر.
   - سه مقدار جدید completeness: complete / complete_with_known_gaps / incomplete
   - فیلدهای جدید: missing_known, missing_unknown, unknown_missing_sample
-  - تحلیل timestamp اکنون missing_ts_list را برمی‌گرداند.
+  - analyze_timestamps اکنون missing_ts_list را برمی‌گرداند.
 
-اصول:
-  - هیچ کندل مصنوعی ساخته نمی‌شود.
-  - complete_with_known_gaps معادل complete نیست و در گزارش صریح است.
-  - شکاف ناشناخته → incomplete و exit code 1.
+v2.2.1 (اصلاح):
+  - اعتبارسنجی هم‌پوشانی بازه‌ها در load_known_gaps.
+  - ثبت fetch_status = "known_gaps_error" هنگام خطای فایل مرجع.
 """
 
 import argparse
@@ -232,9 +231,9 @@ def load_known_gaps(path, symbol, interval):
     بارگذاری و اعتبارسنجی فایل known_gaps.
 
     Raises:
-        KnownGapsError: اگر فایل نباشد، schema ناسازگار باشد، یا
-        symbol/interval با فراخوانی جاری مطابقت نداشته باشد،
-        یا محاسبات count با start_iso/end_iso سازگار نباشد.
+        KnownGapsError: اگر فایل نباشد، schema ناسازگار باشد،
+        symbol/interval مطابقت نداشته باشد، count با start/end
+        سازگار نباشد، یا بازه‌ها هم‌پوشانی داشته باشند.
     """
     p = Path(path)
     if not p.exists():
@@ -278,9 +277,7 @@ def load_known_gaps(path, symbol, interval):
             raise KnownGapsError(f"gap #{i}: invalid iso timestamps: {e}")
 
         if end_ms < start_ms:
-            raise KnownGapsError(
-                f"gap #{i}: end_iso < start_iso"
-            )
+            raise KnownGapsError(f"gap #{i}: end_iso < start_iso")
         if (end_ms - start_ms) % interval_ms != 0:
             raise KnownGapsError(
                 f"gap #{i}: start_iso/end_iso not aligned to interval "
@@ -306,6 +303,19 @@ def load_known_gaps(path, symbol, interval):
             "start_iso": g["start_iso"],
             "end_iso": g["end_iso"],
         })
+
+    # بررسی هم‌پوشانی — پس از مرتب‌سازی بر اساس start_ms
+    validated.sort(key=lambda g: g["start_ms"])
+    for i in range(1, len(validated)):
+        prev = validated[i - 1]
+        cur = validated[i]
+        if cur["start_ms"] <= prev["end_ms"]:
+            raise KnownGapsError(
+                f"overlapping gaps: gap #{prev['id']} "
+                f"({prev['start_iso']} → {prev['end_iso']}) "
+                f"and gap #{cur['id']} "
+                f"({cur['start_iso']} → {cur['end_iso']})"
+            )
 
     return {
         "schema_version": schema,
@@ -540,7 +550,7 @@ def _parse_args(argv=None):
 def _new_report(args):
     return {
         "probe": "binance_history",
-        "version": "v2.2",
+        "version": "v2.2.1",
         "started_at_iso": datetime.now(timezone.utc).isoformat(),
         "arguments": {
             "symbol": args.symbol,
@@ -579,7 +589,7 @@ def _new_report(args):
 
 def _print_header(args):
     print("=" * 72)
-    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2.2)")
+    print("🔍 PROBE BINANCE HISTORY — Historical Fetch Verification (v2.2.1)")
     print("=" * 72)
     print(f"  symbol     : {args.symbol}")
     print(f"  interval   : {args.interval}")
@@ -690,7 +700,7 @@ def main(argv=None):
     exit_code = 1
 
     try:
-        # ---- Stage 0: load known_gaps (if provided) ----
+        # ---- Stage 0: load known_gaps ----
         known_ts_set = set()
         known_gaps_doc = None
 
@@ -965,7 +975,6 @@ def main(argv=None):
                 )
                 print(f"  {iso_str}: {close}")
 
-            # verdict_ok: برای complete و complete_with_known_gaps → True
             report["verdict_ok"] = report["completeness"] in (
                 "complete", "complete_with_known_gaps",
             )
