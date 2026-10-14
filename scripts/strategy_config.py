@@ -5,6 +5,11 @@ strategy_config.py — Single Source of Truth برای پارامترهای Apex
   - افزودن leverage_per_trade (V1 clarification)
   - get_engine_config اکنون leverage و leverage_cap را پاس می‌دهد
 
+تغییرات 1.0.1 (policy v2.2.3):
+  - get_engine_config اکنون be_trigger_at_r را نیز پاس می‌دهد.
+    (پیش از این، مقادیر در STRATEGY_CONFIG بود ولی engine آن را
+    نمی‌خواند و مقدار 1R را hard-code می‌کرد.)
+
 تغییر هر پارامتر در این فایل → strategy_hash عوض می‌شود.
 Spec: docs/strategy_v1.md
 """
@@ -87,6 +92,7 @@ def get_engine_config() -> dict:
         "sl_atr_mult": STRATEGY_CONFIG["sl_atr_mult"],
         "tp1_atr_mult": STRATEGY_CONFIG["tp1_atr_mult"],
         "trailing_atr_mult": STRATEGY_CONFIG["trailing_atr_mult"],
+        "be_trigger_at_r": STRATEGY_CONFIG["be_trigger_at_r"],   # ← NEW
         "be_sl_offset_atr": STRATEGY_CONFIG["be_sl_offset_atr"],
         "time_exit_candles": STRATEGY_CONFIG["time_exit_candles"],
         "cooldown_candles": STRATEGY_CONFIG["cooldown_candles"],
