@@ -2,7 +2,10 @@
 run_paper.py — Paper Trading orchestrator برای ApexQuant.
 
 هر اجرا:
-  1. state را از STATE_DIR می‌خواند (یا init می‌کند)
+  1. state را از STATE_DIR می‌خواند (strict=True) یا init می‌کند
+     - اگر strategy_hash متفاوت باشد → exit(1) با پیام روشن
+     - اگر پوزیشن باز داشته باشد → هشدار صریح
+     - state.json و events.jsonl هرگز تغییر نمی‌کنند در reject
   2. آخرین کندل بسته‌شده را از Toobit می‌گیرد
   3. اگر کندل جدید است:
        a. indicators بساز
@@ -15,17 +18,6 @@ run_paper.py — Paper Trading orchestrator برای ApexQuant.
   4. اگر کندل جدید نیست → skip
   5. اگر بیش از MAX_CATCHUP_CANDLES عقب‌ماندگی باشد، فقط قدیمی‌ترین‌ها
      پردازش می‌شوند و مقدار lag در state و خروجی گزارش می‌شود.
-     اجرای بعدی، باقی‌مانده را پردازش می‌کند (self-healing).
-
-Kill Switch:
-  - پیش از پردازش، is_kill_switch_active() صدا زده می‌شود.
-  - نتیجه در engine_config تزریق می‌شود:
-      kill_switch_active, kill_switch_reason
-  - fail-closed:
-      * خطای بررسی → active=True
-      * خروجی نامعتبر → active=True
-      * active non-bool → active=True
-  - خود موتور (paper_engine) فقط این دو فیلد را می‌خواند.
 
 هیچ سفارش واقعی به صرافی ارسال نمی‌شود.
 
@@ -66,8 +58,6 @@ from kill_switch import is_kill_switch_active
 # Constants
 # ============================================================
 
-# حداکثر تعداد کندل‌هایی که در یک اجرا پردازش می‌شوند.
-# اگر عقب‌ماندگی بیشتر باشد، باقی در اجرای بعدی پردازش می‌شود.
 MAX_CATCHUP_CANDLES = 100
 
 
@@ -76,7 +66,6 @@ MAX_CATCHUP_CANDLES = 100
 # ============================================================
 
 def _build_indicators(klines: list) -> dict:
-    """compute_all با پارامترهای strategy_config."""
     p = get_indicator_params()
     return compute_all(
         klines,
@@ -88,14 +77,6 @@ def _build_indicators(klines: list) -> dict:
 
 
 def _enrich_specs_for_engine(specs: dict) -> dict:
-    """
-    engine config از strategy_config + injection.
-
-    get_engine_config() شامل:
-      leverage, leverage_cap, risk_per_trade, ...
-
-    اینجا فقط contract_multiplier_for_pnl اضافه می‌شود.
-    """
     cfg = get_engine_config()
     cfg["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
     return cfg
@@ -103,16 +84,6 @@ def _enrich_specs_for_engine(specs: dict) -> dict:
 
 def _build_engine_config_with_kill_switch(specs, state, state_dir,
                                            repo_root=None):
-    """
-    ساخت engine config + تزریق وضعیت Kill Switch.
-
-    Fail-closed:
-      - خطای is_kill_switch_active → active=True
-      - خروجی غیر tuple یا با طول ≠ 2 → active=True
-      - active non-bool → active=True
-      - active=True و reason=None → reason پیش‌فرض
-      - active=False → reason=None
-    """
     cfg = _enrich_specs_for_engine(specs)
 
     ks_active = True
@@ -166,22 +137,63 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir,
 
 
 def _find_new_candles(klines: list, last_processed_ts) -> list:
-    """
-    فهرست indexهای کندل‌های جدید (ts > last_processed_ts)، به ترتیب صعودی.
-
-    - اگر last_processed_ts None باشد، همه‌ی کندل‌ها بازگردانده می‌شوند.
-    - اگر klines خالی باشد، [].
-    """
     if not klines:
         return []
-
     if last_processed_ts is None:
         return list(range(len(klines)))
-
     return [
         i for i, c in enumerate(klines)
         if int(c[0]) > last_processed_ts
     ]
+
+
+def _handle_hash_mismatch(state_dir: str, error: Exception):
+    """
+    چاپ پیام روشن درباره‌ی mismatch و exit(1).
+
+    هیچ فایلی تغییر نمی‌کند. state.json و events.jsonl دست‌نخورده می‌مانند.
+    """
+    print()
+    print("=" * 70)
+    print("❌ STATE HASH MISMATCH — PAPER RUN ABORTED")
+    print("=" * 70)
+    print(f"  state_dir : {state_dir}")
+    print(f"  error     : {error}")
+    print()
+
+    # خواندن تشخیصی (non-strict) برای بررسی پوزیشن باز
+    # این خواندن، state را تغییر نمی‌دهد و فقط برای دیاگ است.
+    try:
+        diagnostic = load_state(state_dir, strict=False)
+        position = diagnostic.get("position")
+    except Exception as diag_e:
+        position = None
+        print(f"  (could not read state for diagnostics: {diag_e})")
+        print()
+
+    if position is not None:
+        print("  ⚠️  OPEN POSITION DETECTED")
+        print(f"     side           : {position.get('side')}")
+        print(f"     entry_price    : {position.get('entry_price')}")
+        print(f"     remaining_size : {position.get('remaining_size')}")
+        print(f"     entry_candle_ts: {position.get('entry_candle_ts')}")
+        print()
+        print("  Manual intervention required:")
+        print("    1. Investigate why strategy_hash changed.")
+        print("    2. Do NOT delete state.json without manual review.")
+        print("    3. If migration is intentional, use load_state(strict=False)")
+        print("       in a dedicated migration script, then update state.")
+    else:
+        print("  No open position in state.")
+        print()
+        print("  Manual options:")
+        print("    1. Restore the previous strategy (git checkout), OR")
+        print("    2. Perform an explicit migration via a dedicated script,")
+        print("       then re-run paper with matching hash.")
+
+    print()
+    print("  ⛔ state.json and events.jsonl have NOT been modified.")
+    print("=" * 70)
 
 
 # ============================================================
@@ -206,8 +218,12 @@ def main():
     # ---- 1. State ----
     was_existing = state_exists(state_dir)
     if was_existing:
-        state = load_state(state_dir)
-        print(f"✅ State loaded (existing)")
+        try:
+            state = load_state(state_dir)  # strict=True پیش‌فرض
+            print(f"✅ State loaded (existing)")
+        except ValueError as e:
+            _handle_hash_mismatch(state_dir, e)
+            sys.exit(1)
     else:
         state = init_state(state_dir, initial_equity=1000.0, symbol=symbol)
         print(f"✅ State initialized")
@@ -321,14 +337,12 @@ def main():
             print("   Last successful state was saved before this failure.")
             sys.exit(1)
 
-        # events را append کن
         if events:
             n_app, n_sk = append_events(state_dir, events)
             total_events_generated += n_app
         else:
             n_app, n_sk = 0, 0
 
-        # state را به‌روز کن
         state["last_processed_candle_ts"] = candle_ts
         state["symbol"] = symbol
         state["contract_multiplier"] = specs["contract_multiplier"]
