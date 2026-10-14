@@ -1,0 +1,22 @@
+name: Print Strategy Hash
+
+on:
+  workflow_dispatch:
+
+jobs:
+  print:
+    name: Print strategy hash
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Print strategy hash
+        run: python scripts/compute_hash.py
