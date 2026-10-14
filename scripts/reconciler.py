@@ -13,6 +13,13 @@ reconciler.py — Public Dry-Run Reconciliation.
   - خروجی dict، deterministic
   - اگر last_processed_candle_ts غایب/None باشد، صریح گزارش می‌شود
 
+سیاست strict در Reconciler:
+  - Reconciler باید state با hash متفاوت را هم بخواند تا بتواند
+    mismatch را تشخیص بدهد و به‌صورت check گزارش کند.
+  - سیاست fail-closed (strict=True) در run_paper اعمال می‌شود،
+    نه در reconciler.
+  - به همین دلیل در این فایل صریحاً strict=False استفاده می‌شود.
+
 Spec: docs/step9a_paper_persistence.md
 """
 
@@ -89,9 +96,15 @@ def _check_state_exists(state_dir: str) -> dict:
 
 
 def _check_state_loads(state_dir: str) -> tuple:
-    """Returns: (check, state_or_None)"""
+    """
+    بارگذاری state با strict=False.
+
+    Reconciler وظیفه‌اش تشخیص است، نه fail-closed. باید بتواند
+    state با hash متفاوت را بخواند تا خودش mismatch را به‌عنوان
+    check گزارش کند (نه اینکه با استثنا متوقف شود).
+    """
     try:
-        state = load_state(state_dir)
+        state = load_state(state_dir, strict=False)
         return _check("state_loads", True, "state.json loaded"), state
     except Exception as e:
         return _check("state_loads", False, f"load failed: {e}"), None
@@ -158,7 +171,6 @@ def _check_last_processed_vs_latest(klines: list,
             level="warning",
         )
 
-    # lpct نباید از آخرین کندل جلوتر باشد
     if lpct > last_candle_ts:
         return _check(
             "last_processed_vs_latest", False,
@@ -265,7 +277,7 @@ def reconcile_public(state_dir: str, symbol: str = "BTC-SWAP-USDT",
         return _result(STATUS_ERROR, checks,
                        "state.json missing → ERROR")
 
-    # ---- 2. State loads ----
+    # ---- 2. State loads (strict=False) ----
     chk_load, state = _check_state_loads(state_dir)
     checks.append(chk_load)
     if not chk_load["ok"]:
@@ -297,10 +309,7 @@ def reconcile_public(state_dir: str, symbol: str = "BTC-SWAP-USDT",
                        "no klines → cannot proceed")
 
     # ---- 6. Last candle closed ----
-    # now_ms فقط از data_feed
     now_ms = int(klines[-1][0]) + INTERVAL_MS.get(interval, 0) * 2
-    # ↑ این approximation است: now ≈ last_ts + 2×interval.
-    #   در اجرای واقعی، data_feed می‌تواند now_ms را از serverTime برگرداند.
     checks.append(_check_last_candle_closed(klines, interval, now_ms))
 
     # ---- 7. last_processed vs latest ----
