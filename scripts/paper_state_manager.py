@@ -43,6 +43,16 @@ event_id = 16-char hex از SHA256 روی canonical JSON شامل:
 تمام فیلدهای هویت event در fingerprint وارد می‌شوند تا
 دو event متفاوت هرگز fingerprint یکسان نگیرند.
 
+سیاست strict (policy v2.2.3)
+════════════════════════════
+load_state پیش‌فرض strict=True است. یعنی اگر state.json با
+strategy_hash متفاوتی ذخیره شده باشد، ValueError می‌دهد و
+run_paper با پیام روشن متوقف می‌شود. این تصمیم عمدی است تا
+تغییر استراتژی وسط دوره‌ی Paper، بی‌صدا پذیرفته نشود.
+
+برای migration صریح، load_state(state_dir, strict=False)
+هنوز کار می‌کند — ولی باید آگاهانه فراخوانی شود.
+
 Spec: docs/step9a_paper_persistence.md
 """
 
@@ -77,12 +87,20 @@ def events_file(state_dir: str) -> str:
 # State I/O
 # ============================================================
 
-def load_state(state_dir: str, strict: bool = False) -> dict:
+def load_state(state_dir: str, strict: bool = True) -> dict:
     """
     Load state.json از state_dir.
 
-    strict=False به‌صورت پیش‌فرض چون paper-state ممکن است
-    با نسخه‌ی متفاوتی از strategy ساخته شده باشد.
+    strict=True (پیش‌فرض):
+        strategy_hash ذخیره‌شده باید با hash فعلی استراتژی مطابقت داشته باشد.
+        در غیر این صورت ValueError با پیام روشن.
+
+    strict=False:
+        فقط برای migration صریح و آگاهانه. هیچ بازنویسی خودکار
+        strategy_hash در state رخ نمی‌دهد؛ فقط پذیرش بارگذاری.
+
+    Raises:
+        FileNotFoundError, ValueError, json.JSONDecodeError
     """
     return _load_state_json(state_file(state_dir), strict=strict)
 
@@ -119,8 +137,6 @@ def _fingerprint(event: dict, strategy_hash: str) -> str:
     fingerprint 16-char از محتوای کامل event.
 
     شامل تمام فیلدهای هویت event تا collision رخ ندهد.
-    اگر دو event فقط در یکی از این فیلدها تفاوت داشته باشند،
-    fingerprint آن‌ها متفاوت خواهد بود.
     """
     payload = {
         "strategy_hash": strategy_hash,
