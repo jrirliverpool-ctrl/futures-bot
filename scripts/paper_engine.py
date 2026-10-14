@@ -11,6 +11,7 @@ Responsibilities:
   - Deterministic event logging
   - Stage B leverage validation (fail-closed)
   - Kill switch at signal acceptance (A) and entry execution (B)
+  - ATR fail-safe: fallback به atr_at_entry، یا ValueError صریح
 
 Non-responsibilities:
   - Signal generation (comes from outside)
@@ -46,6 +47,49 @@ def apply_slippage(price: float, is_entry: bool, side: str, slip_pct: float) -> 
     if side == "SHORT":
         return price * (1 - slip_pct) if is_entry else price * (1 + slip_pct)
     raise ValueError(f"Invalid side: {side}")
+
+
+def _is_valid_atr(x) -> bool:
+    """
+    بررسی معتبر بودن ATR: عدد متناهی و > 0.
+
+    NaN، ±Inf، bool، None، و اعداد غیرعددی رد می‌شوند.
+    """
+    if isinstance(x, bool):
+        return False
+    if not isinstance(x, (int, float)):
+        return False
+    if x != x:  # NaN
+        return False
+    if x == float("inf") or x == float("-inf"):
+        return False
+    if x <= 0:
+        return False
+    return True
+
+
+def _resolve_atr(atr_current, atr_at_entry) -> float:
+    """
+    تعیین ATR معتبر برای مدیریت پوزیشن.
+
+    ترتیب انتخاب:
+      1. atr_current اگر معتبر باشد.
+      2. atr_at_entry اگر معتبر باشد (fallback برای warmup).
+      3. ValueError با پیام صریح.
+
+    Raises:
+        ValueError: اگر هیچ‌کدام معتبر نبودند.
+    """
+    if _is_valid_atr(atr_current):
+        return float(atr_current)
+    if _is_valid_atr(atr_at_entry):
+        return float(atr_at_entry)
+    raise ValueError(
+        f"ATR unavailable for position management: "
+        f"atr_current={atr_current!r}, "
+        f"atr_at_entry={atr_at_entry!r}. "
+        f"Both must be finite positive numbers."
+    )
 
 
 def compute_initial_levels(entry_price, atr_at_signal, side, config):
@@ -161,8 +205,6 @@ def execute_pending_entry(state, candle, specs, config):
     ts = int(candle[0])
 
     # ---- Kill switch check (Point B — fail-closed) ----
-    # اگر kill_switch_active=True باشد، هیچ ورودی اجرا نمی‌شود.
-    # pending_entry پاک می‌شود تا در اجرای بعدی دوباره تلاش نشود.
     if config.get("kill_switch_active", False):
         events.append({
             "type": "KILL_SWITCH_BLOCKED",
@@ -258,8 +300,12 @@ def manage_position_on_candle(pos, candle, atr_current, config):
     c = float(candle[4])
     ts = int(candle[0])
 
-    if atr_current <= 0:
-        atr_current = pos["atr_at_entry"]
+    # ATR fail-safe: fallback به atr_at_entry، یا ValueError صریح.
+    # این جایگزین `if atr_current <= 0` قدیمی است که با None و NaN
+    # و ±Inf رفتار نادرست داشت.
+    atr_current = _resolve_atr(
+        atr_current, pos.get("atr_at_entry"),
+    )
 
     p = copy.deepcopy(pos)
     events = []
@@ -496,7 +542,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
         not state.get("circuit_breaker_active")):
 
         if ks_active:
-            # Kill switch فعال → سیگنال جدید پذیرفته نمی‌شود
             if signal.get("signal") in ("LONG", "SHORT"):
                 events.append({
                     "type": "KILL_SWITCH_BLOCKED",
