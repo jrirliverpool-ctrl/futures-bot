@@ -1,14 +1,17 @@
 """
-test_state_hash_strict.py — تست سیاست strict در بارگذاری state.
+test_state_hash_strict.py — تست سیاست strict در بارگذاری state
+و رفتار fail-safe در مدیریت ATR.
 
-قرارداد مورد انتظار (پیش از پیاده‌سازی):
+قرارداد:
   - paper_state_manager.load_state پیش‌فرض strict=True
   - run_paper هنگام hash mismatch با پیام صریح exit(1) می‌دهد
   - state.json و events.jsonl در rejection دست‌نخورده می‌مانند
   - پوزیشن باز در state، هشدار diag صریح می‌گیرد
-  - هنگام hash matching، اجرا عادی ادامه می‌یابد
+  - paper_engine هنگام ATR=None از atr_at_entry استفاده می‌کند
+  - اگر هر دو ATR نامعتبر باشند، ValueError با پیام روشن
 
-⚠️ این تست‌ها پیش از پیاده‌سازی شکست می‌خورند — هدف است.
+⚠️ تست‌های hash با کد فعلی شکست می‌خورند (هدف).
+⚠️ تست‌های ATR با کد فعلی با TypeError شکست می‌خورند (هدف).
 """
 
 import inspect
@@ -28,6 +31,7 @@ sys.path.insert(
 import run_paper as rp
 from state_manager import default_state
 from paper_state_manager import load_state
+from paper_engine import manage_position_on_candle
 
 
 BASE_TS = 1_698_796_800_000
@@ -68,6 +72,34 @@ def _write_state(state_dir, state):
     return path
 
 
+def _make_position_fixture(atr_at_entry=1.0):
+    return {
+        "side": "LONG", "entry_price": 100.0,
+        "entry_candle_ts": BASE_TS, "size": 1.0,
+        "remaining_size": 1.0, "tp1_size": 0.0,
+        "realized_pnl": 0.0, "initial_sl": 98.0,
+        "current_sl": 98.0, "initial_tp1": 104.0,
+        "tp1_hit": False, "be_moved": False,
+        "trailing_active": False,
+        "highest_high_since_entry": 100.0,
+        "lowest_low_since_entry": 100.0,
+        "candles_since_entry": 0, "atr_at_entry": atr_at_entry,
+        "signal_candle_ts": BASE_TS - HOUR,
+    }
+
+
+def _engine_config_fixture():
+    return {
+        "sl_atr_mult": 1.5,
+        "tp1_atr_mult": 2.0,
+        "trailing_atr_mult": 1.5,
+        "be_sl_offset_atr": 0.1,
+        "be_trigger_at_r": 1.0,
+        "time_exit_candles": 48,
+        "contract_multiplier_for_pnl": 1.0,
+    }
+
+
 def _make_state_dir(td, *, hash_override=None, with_position=False,
                     last_processed=None):
     state_dir = os.path.join(td, "state")
@@ -78,29 +110,12 @@ def _make_state_dir(td, *, hash_override=None, with_position=False,
     if hash_override is not None:
         state["strategy_hash"] = hash_override
     if with_position:
-        state["position"] = {
-            "side": "LONG", "entry_price": 100.0,
-            "entry_candle_ts": BASE_TS, "size": 1.0,
-            "remaining_size": 1.0, "tp1_size": 0.0,
-            "realized_pnl": 0.0, "initial_sl": 98.0,
-            "current_sl": 98.0, "initial_tp1": 104.0,
-            "tp1_hit": False, "be_moved": False,
-            "trailing_active": False,
-            "highest_high_since_entry": 100.0,
-            "lowest_low_since_entry": 100.0,
-            "candles_since_entry": 0, "atr_at_entry": 1.0,
-            "signal_candle_ts": BASE_TS - HOUR,
-        }
+        state["position"] = _make_position_fixture()
     _write_state(state_dir, state)
     return state_dir
 
 
 def _read_bytes(path):
-    """
-    محتوای فایل را بایت‌به‌بایت برمی‌گرداند.
-    اگر فایل وجود نداشته باشد → None.
-    این حالت برای تأیید «فایل نباید ایجاد شود» مهم است.
-    """
     if not os.path.exists(path):
         return None
     with open(path, "rb") as f:
@@ -132,9 +147,6 @@ def _run_main(state_dir, klines):
 
 
 def _assert_mismatch_hint(stdout):
-    """
-    تأیید می‌کند که پیام خروجی، علت mismatch را صریح نشان می‌دهد.
-    """
     low = stdout.lower()
     has_hash_hint = (
         "hash mismatch" in low
@@ -149,10 +161,6 @@ def _assert_mismatch_hint(stdout):
 
 
 def _assert_position_hint(stdout):
-    """
-    تأیید می‌کند که هشدار پوزیشن باز، صریح و مرتبط با mismatch است.
-    نه فقط کلمه‌ی position در یک پیام عمومی.
-    """
     low = stdout.lower()
     has_position = "position" in low
     has_action = (
@@ -170,11 +178,10 @@ def _assert_position_hint(stdout):
 
 
 # ============================================================
-# Tests
+# Hash strict tests (7)
 # ============================================================
 
 def test_default_load_is_strict():
-    """پیش‌فرض load_state باید strict=True باشد."""
     sig = inspect.signature(load_state)
     default = sig.parameters["strict"].default
     assert default is True, (
@@ -183,7 +190,6 @@ def test_default_load_is_strict():
 
 
 def test_matching_hash_loads_normally():
-    """با hash یکسان، بارگذاری بدون خطا."""
     with tempfile.TemporaryDirectory() as td:
         state_dir = _make_state_dir(td, hash_override=None)
         loaded = load_state(state_dir)
@@ -191,7 +197,6 @@ def test_matching_hash_loads_normally():
 
 
 def test_mismatched_hash_raises_by_default():
-    """با hash متفاوت، پیش‌فرض باید ValueError بدهد."""
     with tempfile.TemporaryDirectory() as td:
         state_dir = _make_state_dir(td, hash_override=WRONG_HASH)
         try:
@@ -205,7 +210,6 @@ def test_mismatched_hash_raises_by_default():
 
 
 def test_mismatched_hash_can_be_forced():
-    """strict=False صریح، پذیرش state قدیمی را ممکن می‌کند (بدون بازنویسی hash)."""
     with tempfile.TemporaryDirectory() as td:
         state_dir = _make_state_dir(td, hash_override=WRONG_HASH)
         loaded = load_state(state_dir, strict=False)
@@ -215,12 +219,6 @@ def test_mismatched_hash_can_be_forced():
 
 
 def test_run_paper_exits_on_mismatch_no_position():
-    """
-    اجرای run_paper با hash mismatch و بدون پوزیشن:
-      - exit code 1
-      - state.json دست‌نخورده
-      - events.jsonl (اگر نبود) ساخته نمی‌شود
-    """
     with tempfile.TemporaryDirectory() as td:
         state_dir = _make_state_dir(td, hash_override=WRONG_HASH,
                                     with_position=False)
@@ -248,15 +246,11 @@ def test_run_paper_exits_on_mismatch_no_position():
 
 
 def test_run_paper_exits_on_mismatch_with_position():
-    """
-    اجرای run_paper با hash mismatch و پوزیشن باز:
-      - exit code 1
-      - state.json دست‌نخورده
-      - پیام شامل اشاره‌ی صریح به پوزیشن باز و نیاز به اقدام دستی
-    """
     with tempfile.TemporaryDirectory() as td:
-        state_dir = _make_state_dir(td, hash_override=WRONG_HASH,
-                                    with_position=True)
+        state_dir = _make_state_dir(
+            td, hash_override=WRONG_HASH, with_position=True,
+            last_processed=None,
+        )
         state_path = os.path.join(state_dir, "state.json")
         state_before = _read_bytes(state_path)
 
@@ -273,13 +267,9 @@ def test_run_paper_exits_on_mismatch_with_position():
 
 
 def test_run_paper_proceeds_on_matching_hash():
-    """
-    با hash یکسان و وجود ۲ کندل جدید، هر دو باید پردازش شوند
-    و آخرین ts ذخیره‌شده = آخرین کندل.
-    """
     with tempfile.TemporaryDirectory() as td:
         klines = _make_candles(300)
-        # ۲ کندل جدید: 298 و 299
+        # ۲ کندل جدید (298, 299) با ATR معتبر
         state_dir = _make_state_dir(
             td, hash_override=None,
             last_processed=int(klines[297][0]),
@@ -298,11 +288,50 @@ def test_run_paper_proceeds_on_matching_hash():
 
 
 # ============================================================
+# ATR fail-safe tests (2)
+# ============================================================
+
+def test_paper_engine_fallback_when_atr_current_none():
+    """ATR=None ولی atr_at_entry معتبر → fallback، بدون استثنا."""
+    pos = _make_position_fixture(atr_at_entry=1.0)
+    candle = [BASE_TS + HOUR, 100.0, 100.5, 99.5, 100.0, 1000.0]
+    cfg = _engine_config_fixture()
+
+    # atr_current=None نباید باعث TypeError شود
+    new_pos, events, exited = manage_position_on_candle(
+        pos, candle, atr_current=None, config=cfg,
+    )
+    assert isinstance(new_pos, dict), (
+        "fallback باید dict برگرداند"
+    )
+    assert isinstance(events, list)
+
+
+def test_paper_engine_raises_when_both_atr_invalid():
+    """ATR=None و atr_at_entry=None → ValueError با پیام روشن."""
+    pos = _make_position_fixture(atr_at_entry=None)
+    candle = [BASE_TS + HOUR, 100.0, 100.5, 99.5, 100.0, 1000.0]
+    cfg = _engine_config_fixture()
+
+    try:
+        manage_position_on_candle(
+            pos, candle, atr_current=None, config=cfg,
+        )
+        assert False, "expected ValueError when both ATRs invalid"
+    except ValueError as e:
+        msg = str(e).lower()
+        assert "atr" in msg, (
+            f"error message باید صریحاً به ATR اشاره کند: {e}"
+        )
+
+
+# ============================================================
 # Main
 # ============================================================
 
 if __name__ == "__main__":
     tests = [
+        # Hash strict (7)
         test_default_load_is_strict,
         test_matching_hash_loads_normally,
         test_mismatched_hash_raises_by_default,
@@ -310,6 +339,9 @@ if __name__ == "__main__":
         test_run_paper_exits_on_mismatch_no_position,
         test_run_paper_exits_on_mismatch_with_position,
         test_run_paper_proceeds_on_matching_hash,
+        # ATR fail-safe (2)
+        test_paper_engine_fallback_when_atr_current_none,
+        test_paper_engine_raises_when_both_atr_invalid,
     ]
 
     passed = 0
@@ -317,7 +349,7 @@ if __name__ == "__main__":
     failures = []
 
     print("=" * 68)
-    print(f"🧪 State Hash Strict Tests ({len(tests)} total)")
+    print(f"🧪 State Hash Strict + ATR Fail-Safe Tests ({len(tests)} total)")
     print("=" * 68)
     print()
 
