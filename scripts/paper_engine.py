@@ -12,6 +12,7 @@ Responsibilities:
   - Stage B leverage validation (fail-closed)
   - Kill switch at signal acceptance (A) and entry execution (B)
   - ATR fail-safe: fallback به atr_at_entry، یا ValueError صریح
+  - BE trigger از config (به‌جای 1R hard-coded)
 
 Non-responsibilities:
   - Signal generation (comes from outside)
@@ -50,16 +51,11 @@ def apply_slippage(price: float, is_entry: bool, side: str, slip_pct: float) -> 
 
 
 def _is_valid_atr(x) -> bool:
-    """
-    بررسی معتبر بودن ATR: عدد متناهی و > 0.
-
-    NaN، ±Inf، bool، None، و اعداد غیرعددی رد می‌شوند.
-    """
     if isinstance(x, bool):
         return False
     if not isinstance(x, (int, float)):
         return False
-    if x != x:  # NaN
+    if x != x:
         return False
     if x == float("inf") or x == float("-inf"):
         return False
@@ -69,17 +65,6 @@ def _is_valid_atr(x) -> bool:
 
 
 def _resolve_atr(atr_current, atr_at_entry) -> float:
-    """
-    تعیین ATR معتبر برای مدیریت پوزیشن.
-
-    ترتیب انتخاب:
-      1. atr_current اگر معتبر باشد.
-      2. atr_at_entry اگر معتبر باشد (fallback برای warmup).
-      3. ValueError با پیام صریح.
-
-    Raises:
-        ValueError: اگر هیچ‌کدام معتبر نبودند.
-    """
     if _is_valid_atr(atr_current):
         return float(atr_current)
     if _is_valid_atr(atr_at_entry):
@@ -107,23 +92,9 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
 def calculate_position_size(equity, entry_price, stop_loss, specs,
                             risk_per_trade,
                             leverage=None, leverage_cap=None):
-    """
-    محاسبه qty بر اساس ریسک.
-
-    Stage B — leverage validation (fail-closed):
-      - اگر leverage ارسال شده ولی نامعتبر:
-          bool / non-int / ≤ 0 / > exchange max / > cap → return None
-      - اگر leverage=None → اعتبارسنجی اهرم رد می‌شود
-        (فقط برای backward compatibility تست‌های قدیمی)
-
-    توجه:
-      این تابع فقط qty را محدود می‌کند.
-      بررسی margin و notional cap مسئولیت جداگانه‌ای است.
-    """
     if equity <= 0 or risk_per_trade <= 0:
         return None
 
-    # Stage B — leverage validation
     if leverage is not None:
         if isinstance(leverage, bool) or not isinstance(leverage, int):
             return None
@@ -204,7 +175,6 @@ def execute_pending_entry(state, candle, specs, config):
 
     ts = int(candle[0])
 
-    # ---- Kill switch check (Point B — fail-closed) ----
     if config.get("kill_switch_active", False):
         events.append({
             "type": "KILL_SWITCH_BLOCKED",
@@ -300,9 +270,6 @@ def manage_position_on_candle(pos, candle, atr_current, config):
     c = float(candle[4])
     ts = int(candle[0])
 
-    # ATR fail-safe: fallback به atr_at_entry، یا ValueError صریح.
-    # این جایگزین `if atr_current <= 0` قدیمی است که با None و NaN
-    # و ±Inf رفتار نادرست داشت.
     atr_current = _resolve_atr(
         atr_current, pos.get("atr_at_entry"),
     )
@@ -345,13 +312,14 @@ def manage_position_on_candle(pos, candle, atr_current, config):
         p["lowest_low_since_entry"] = min(p["lowest_low_since_entry"], l)
 
     # --------------------------------------------------------
-    # 3. BE
+    # 3. BE — آستانه از config خوانده می‌شود (نه 1R hard-coded)
     # --------------------------------------------------------
     if not p["be_moved"]:
         risk_distance = abs(p["entry_price"] - p["initial_sl"])
+        r_mult = config["be_trigger_at_r"]
         be_trigger = (
-            p["entry_price"] + risk_distance if side == "LONG"
-            else p["entry_price"] - risk_distance
+            p["entry_price"] + r_mult * risk_distance if side == "LONG"
+            else p["entry_price"] - r_mult * risk_distance
         )
         be_reached = (
             (side == "LONG" and h >= be_trigger) or
@@ -470,15 +438,12 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
     candle = klines[i]
     ts = int(candle[0])
 
-    # Period reset
     reset_period_losses_if_needed(state, ts)
 
-    # ---- Entry from previous signal (Point B inside) ----
     if state.get("pending_entry") is not None:
         state, entry_events = execute_pending_entry(state, candle, specs, config)
         events.extend(entry_events)
 
-    # ---- Position management ----
     position_closed = False
     if state.get("position") is not None:
         atr_current = indicators["atr"][i]
@@ -501,7 +466,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
         else:
             state["position"] = pos_after
 
-    # ---- Circuit breakers ----
     if not state.get("circuit_breaker_active", False):
         if state["daily_loss"] >= state["initial_equity"] * config["daily_loss_limit"]:
             state["circuit_breaker_active"] = True
@@ -530,9 +494,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
                 "timestamp": ts,
             })
 
-    # ---- Signal ingestion (Point A) ----
-    # Kill switch فقط ورودهای جدید را مسدود می‌کند.
-    # مدیریت پوزیشن باز دست‌نخورده می‌ماند (SL/TP/Trailing/Time Exit).
     ks_active = config.get("kill_switch_active", False)
 
     if (signal is not None and
@@ -581,10 +542,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
 # ============================================================
 
 def run_engine(klines, indicators, signals, initial_state, specs, config, start_index=0):
-    """
-    signals: list indexed identically with klines. Strategy is external.
-    Engine only consumes its output.
-    """
     state = copy.deepcopy(initial_state)
     all_events = []
     config = copy.deepcopy(config)
@@ -607,6 +564,7 @@ DEFAULT_CONFIG = {
     "risk_per_trade": 0.01,
     "sl_atr_mult": 1.5,
     "tp1_atr_mult": 2.0,
+    "be_trigger_at_r": 1.0,          # ← NEW: مقدار پیش‌فرض سازگار با رفتار قبلی
     "trailing_atr_mult": 1.5,
     "be_sl_offset_atr": 0.1,
     "time_exit_candles": 48,
