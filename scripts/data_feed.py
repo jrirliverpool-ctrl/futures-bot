@@ -6,6 +6,8 @@ data_feed.py — لایه دریافت داده بازار از Toobit.
   - Retry با exponential backoff
   - Retry روی timeout / connection / HTTP 429 / HTTP 5xx
   - عدم retry روی HTTP 4xx (به‌جز 429)
+  - اعتبارسنجی ساختار و مقادیر هر کندل (strict=True)
+  - اعتبارسنجی ترتیب و یکتایی timestampها
   - فیلتر کندل‌های بسته‌شده
   - اعتبارسنجی interval و limit
   - بدون دخالت در Strategy / Position / Order
@@ -33,6 +35,10 @@ INTERVAL_MS = {
 SUPPORTED_INTERVALS = tuple(INTERVAL_MS.keys())
 
 
+# ============================================================
+# Input validation (args)
+# ============================================================
+
 def _validate_fetch_args(interval: str, limit: int, max_retries: int):
     if interval not in INTERVAL_MS:
         raise ValueError(
@@ -53,6 +59,142 @@ def _should_retry_http(status_code: int) -> bool:
     return status_code == 429 or 500 <= status_code <= 599
 
 
+# ============================================================
+# Candle validation (data integrity)
+# ============================================================
+
+def _is_finite_number(x) -> bool:
+    if isinstance(x, bool):
+        return False
+    if not isinstance(x, float):
+        return False
+    if x != x:  # NaN
+        return False
+    if x == float("inf") or x == float("-inf"):
+        return False
+    return True
+
+
+def _validate_candle(candle, index: int = None):
+    """
+    اعتبارسنجی یک کندل خام Toobit.
+
+    Raises:
+        ValueError: اگر کندل ساختار یا مقادیر نامعتبر داشته باشد.
+
+    ساختار مورد انتظار:
+      [openTime_ms, open, high, low, close, volume, ...]
+      حداقل ۶ فیلد.
+    """
+    where = f"candle[{index}]" if index is not None else "candle"
+
+    if not isinstance(candle, (list, tuple)):
+        raise ValueError(
+            f"{where}: not a list/tuple, got {type(candle).__name__}"
+        )
+    if len(candle) < 6:
+        raise ValueError(
+            f"{where}: has only {len(candle)} fields, need >= 6"
+        )
+
+    # timestamp
+    try:
+        ts = int(candle[0])
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"{where}: openTime not int-parseable: {candle[0]!r}"
+        )
+    if ts <= 0:
+        raise ValueError(f"{where}: openTime must be > 0, got {ts}")
+
+    # OHLCV conversion
+    try:
+        o = float(candle[1])
+        h = float(candle[2])
+        l = float(candle[3])
+        c = float(candle[4])
+        v = float(candle[5])
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"{where}: OHLCV contains non-numeric value: {candle[1:6]!r}"
+        )
+
+    # Finite check
+    for name, val in (("open", o), ("high", h), ("low", l),
+                      ("close", c), ("volume", v)):
+        if val != val:
+            raise ValueError(f"{where}: {name} is NaN")
+        if val == float("inf") or val == float("-inf"):
+            raise ValueError(f"{where}: {name} is infinite ({val})")
+
+    # Positive prices
+    for name, val in (("open", o), ("high", h), ("low", l), ("close", c)):
+        if val <= 0:
+            raise ValueError(f"{where}: {name} must be > 0, got {val}")
+
+    # Volume
+    if v < 0:
+        raise ValueError(f"{where}: volume must be >= 0, got {v}")
+
+    # OHLC relationships
+    if l > h:
+        raise ValueError(f"{where}: low ({l}) > high ({h})")
+    if l > min(o, c):
+        raise ValueError(
+            f"{where}: low ({l}) > min(open, close) ({min(o, c)})"
+        )
+    if h < max(o, c):
+        raise ValueError(
+            f"{where}: high ({h}) < max(open, close) ({max(o, c)})"
+        )
+
+
+def _validate_klines_sequence(klines: list):
+    """
+    اعتبارسنجی ترتیب صعودی و یکتایی timestampها.
+
+    Raises:
+        ValueError: اگر ترتیب نقض شده باشد یا timestamp تکراری وجود داشته باشد.
+    """
+    if not klines:
+        return
+
+    timestamps = []
+    for i, c in enumerate(klines):
+        try:
+            ts = int(c[0])
+        except (ValueError, TypeError, IndexError, KeyError):
+            raise ValueError(
+                f"candle[{i}]: cannot extract timestamp for sequence check"
+            )
+        timestamps.append(ts)
+
+    # Uniqueness
+    seen = set()
+    dups = []
+    for ts in timestamps:
+        if ts in seen:
+            dups.append(ts)
+        seen.add(ts)
+    if dups:
+        raise ValueError(
+            f"duplicate timestamps in klines: {dups[:3]} "
+            f"(total {len(dups)} duplicates)"
+        )
+
+    # Strictly ascending
+    for i in range(1, len(timestamps)):
+        if timestamps[i] <= timestamps[i - 1]:
+            raise ValueError(
+                f"timestamps not strictly ascending at index {i}: "
+                f"{timestamps[i - 1]} -> {timestamps[i]}"
+            )
+
+
+# ============================================================
+# Fetch
+# ============================================================
+
 def fetch_klines(
     symbol: str,
     interval: str,
@@ -63,7 +205,7 @@ def fetch_klines(
     session=None,
 ) -> list:
     """
-    دریافت Klines خام از Toobit.
+    دریافت Klines خام از Toobit با اعتبارسنجی کامل.
 
     Retry:
       - timeout
@@ -74,6 +216,7 @@ def fetch_klines(
     No retry (propagate immediately):
       - HTTP 4xx (به‌جز 429)  → requests.HTTPError
       - invalid JSON / structure → ValueError
+      - invalid candle / sequence → ValueError
     """
     _validate_fetch_args(interval, limit, max_retries)
     if backoff_base < 0:
@@ -108,9 +251,7 @@ def fetch_klines(
                     time.sleep(backoff_base * (2 ** attempt))
                     continue
                 break
-            # Non-retryable 4xx → propagate HTTPError directly (no wrapping).
             response.raise_for_status()
-            # Defensive fallback if raise_for_status didn't raise:
             raise requests.HTTPError(f"HTTP {status}")
 
         # Success path
@@ -123,12 +264,24 @@ def fetch_klines(
             raise ValueError(
                 f"Unexpected response type: {type(data).__name__}"
             )
+
+        # Validate each candle
+        for i, candle in enumerate(data):
+            _validate_candle(candle, index=i)
+
+        # Validate order and uniqueness
+        _validate_klines_sequence(data)
+
         return data
 
     raise RuntimeError(
         f"Failed to fetch klines after {max_retries} attempts: {last_error}"
     )
 
+
+# ============================================================
+# Closed candle filtering
+# ============================================================
 
 def is_candle_closed(candle_ts_ms: int, now_ms: int, interval: str) -> bool:
     """
@@ -155,7 +308,13 @@ def filter_closed_candles(candles: list, interval: str, now_ms: int = None) -> l
 
 
 def fetch_closed_klines(symbol: str, interval: str, limit: int = 300, **kwargs) -> list:
-    """Fetch + closed-candle filtering."""
+    """
+    Fetch + closed-candle filtering.
+
+    نکته: اعتبارسنجی در fetch_klines انجام می‌شود، پس این تابع
+    حتی اگر همه‌ی کندل‌ها بعداً فیلتر شوند، داده‌ی نامعتبر را
+    بی‌صدا نمی‌پذیرد.
+    """
     raw = fetch_klines(symbol, interval, limit, **kwargs)
     return filter_closed_candles(raw, interval)
 
