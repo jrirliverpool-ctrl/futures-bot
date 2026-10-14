@@ -6,24 +6,24 @@ run_paper.py — Paper Trading orchestrator برای ApexQuant.
   2. آخرین کندل بسته‌شده را از Toobit می‌گیرد
   3. اگر کندل جدید است:
        a. indicators بساز
-       b. strategy signal
-       c. Kill Switch check (fail-closed)
-       d. paper_engine.process_candle
-       e. events را append کن
-       f. state را save کن
+       b. برای هر کندل جدید (به‌ترتیب صعودی، حداکثر MAX_CATCHUP_CANDLES):
+          i.   strategy signal
+          ii.  Kill Switch check (fail-closed)
+          iii. paper_engine.process_candle
+          iv.  events را append کن
+          v.   state را save کن
   4. اگر کندل جدید نیست → skip
-
-Stage B leverage validation:
-  - engine_config که از get_engine_config() می‌آید، شامل
-    leverage و leverage_cap است.
+  5. اگر بیش از MAX_CATCHUP_CANDLES عقب‌ماندگی باشد، فقط قدیمی‌ترین‌ها
+     پردازش می‌شوند و مقدار lag در state و خروجی گزارش می‌شود.
+     اجرای بعدی، باقی‌مانده را پردازش می‌کند (self-healing).
 
 Kill Switch:
-  - پیش از پردازش کندل، is_kill_switch_active() صدا زده می‌شود.
+  - پیش از پردازش، is_kill_switch_active() صدا زده می‌شود.
   - نتیجه در engine_config تزریق می‌شود:
       kill_switch_active, kill_switch_reason
   - fail-closed:
       * خطای بررسی → active=True
-      * خروجی نامعتبر (None/غیر tuple/طول≠2) → active=True
+      * خروجی نامعتبر → active=True
       * active non-bool → active=True
   - خود موتور (paper_engine) فقط این دو فیلد را می‌خواند.
 
@@ -60,6 +60,15 @@ from strategy_config import (
 )
 from compute_hash import compute_strategy_hash
 from kill_switch import is_kill_switch_active
+
+
+# ============================================================
+# Constants
+# ============================================================
+
+# حداکثر تعداد کندل‌هایی که در یک اجرا پردازش می‌شوند.
+# اگر عقب‌ماندگی بیشتر باشد، باقی در اجرای بعدی پردازش می‌شود.
+MAX_CATCHUP_CANDLES = 100
 
 
 # ============================================================
@@ -103,15 +112,6 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir,
       - active non-bool → active=True
       - active=True و reason=None → reason پیش‌فرض
       - active=False → reason=None
-
-    Args:
-        specs      : symbol specs
-        state      : state فعلی
-        state_dir  : مسیر paper-state (برای بررسی فایل KILL)
-        repo_root  : ریشه مخزن (اختیاری) — بررسی KILL ثانویه
-
-    Returns:
-        engine_config با کلیدهای kill_switch_active و kill_switch_reason
     """
     cfg = _enrich_specs_for_engine(specs)
 
@@ -123,7 +123,6 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir,
             state_dir, state=state, repo_root=repo_root,
         )
 
-        # اعتبارسنجی صریح خروجی
         if not isinstance(result, tuple) or len(result) != 2:
             ks_active = True
             try:
@@ -166,13 +165,23 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir,
     return cfg
 
 
-def _detect_new_candle(klines: list, last_processed_ts) -> tuple:
+def _find_new_candles(klines: list, last_processed_ts) -> list:
+    """
+    فهرست indexهای کندل‌های جدید (ts > last_processed_ts)، به ترتیب صعودی.
+
+    - اگر last_processed_ts None باشد، همه‌ی کندل‌ها بازگردانده می‌شوند.
+    - اگر klines خالی باشد، [].
+    """
     if not klines:
-        return False, None
-    last_ts = int(klines[-1][0])
-    if last_processed_ts is not None and last_ts <= last_processed_ts:
-        return False, None
-    return True, len(klines) - 1
+        return []
+
+    if last_processed_ts is None:
+        return list(range(len(klines)))
+
+    return [
+        i for i, c in enumerate(klines)
+        if int(c[0]) > last_processed_ts
+    ]
 
 
 # ============================================================
@@ -238,10 +247,10 @@ def main():
         print(f"⚠️  کندل کافی نیست ({len(klines)} < 250) — exit")
         sys.exit(0)
 
-    # ---- 4. New candle? ----
-    should_process, idx = _detect_new_candle(klines, last_processed)
+    # ---- 4. New candles ----
+    new_indices = _find_new_candles(klines, last_processed)
 
-    if not should_process:
+    if not new_indices:
         print(f"⏭  No new closed candle. Last processed = {last_processed}")
         print(f"   Latest available    = {int(klines[-1][0])}")
         print()
@@ -250,8 +259,22 @@ def main():
         print("=" * 70)
         sys.exit(0)
 
-    new_candle_ts = int(klines[idx][0])
-    print(f"🆕 New candle detected: {new_candle_ts}")
+    total_new = len(new_indices)
+    if total_new > MAX_CATCHUP_CANDLES:
+        to_process = new_indices[:MAX_CATCHUP_CANDLES]
+        lag = total_new - MAX_CATCHUP_CANDLES
+    else:
+        to_process = new_indices
+        lag = 0
+
+    first_ts = int(klines[to_process[0]][0])
+    last_to_process_ts = int(klines[to_process[-1]][0])
+
+    print(f"🆕 {total_new} new candles detected")
+    print(f"   processing    : {len(to_process)}")
+    print(f"   catchup_lag   : {lag}")
+    print(f"   from_ts       : {first_ts}")
+    print(f"   to_ts         : {last_to_process_ts}")
     print()
 
     # ---- 5. Indicators ----
@@ -264,13 +287,7 @@ def main():
     print(f"  ✅ computed")
     print()
 
-    # ---- 6. Strategy signal ----
-    sig = evaluate_signal(indicators, idx)
-    print(f"📊 Signal: {sig['signal']}")
-    print(f"  reason : {sig.get('reason', '')}")
-    print()
-
-    # ---- 7. Kill Switch + engine config ----
+    # ---- 6. Kill switch (once per run) ----
     engine_config = _build_engine_config_with_kill_switch(
         specs, state, state_dir, repo_root=os.getcwd(),
     )
@@ -281,74 +298,78 @@ def main():
     print(f"   reason : {ks_reason}")
     print()
 
-    # ---- 8. paper_engine ----
-    print("⚙️  Processing through paper_engine...")
-    print(f"  leverage     : {engine_config.get('leverage')}")
-    print(f"  leverage_cap : {engine_config.get('leverage_cap')}")
-    try:
-        state, events = process_candle(
-            state,
-            klines,
-            indicators,
-            idx,
-            specs,
-            engine_config,
-            signal=sig,
-        )
-    except Exception as e:
-        print(f"❌ paper_engine failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    # ---- 7. Process each new candle in order ----
+    print(f"⚙️  Processing {len(to_process)} candle(s)...")
+    total_events_generated = 0
 
-    print(f"  events generated: {len(events)}")
-    for ev in events:
-        print(f"    [{ev.get('type')}] "
-              f"side={ev.get('side')} price={ev.get('price')} "
-              f"reason={ev.get('reason')} stage={ev.get('stage')}")
+    for n, idx in enumerate(to_process, start=1):
+        candle_ts = int(klines[idx][0])
+        sig = evaluate_signal(indicators, idx)
+        signal_label = sig.get("signal", "NO_TRADE")
+
+        try:
+            state, events = process_candle(
+                state, klines, indicators, idx, specs, engine_config,
+                signal=sig,
+            )
+        except Exception as e:
+            print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} "
+                  f"signal={signal_label} → ERROR: "
+                  f"{type(e).__name__}: {e}")
+            print()
+            print("❌ paper_engine failed mid-catchup")
+            print("   Last successful state was saved before this failure.")
+            sys.exit(1)
+
+        # events را append کن
+        if events:
+            n_app, n_sk = append_events(state_dir, events)
+            total_events_generated += n_app
+        else:
+            n_app, n_sk = 0, 0
+
+        # state را به‌روز کن
+        state["last_processed_candle_ts"] = candle_ts
+        state["symbol"] = symbol
+        state["contract_multiplier"] = specs["contract_multiplier"]
+        state["last_close_price"] = float(klines[idx][4])
+        state["catchup_lag_candles"] = lag
+
+        try:
+            save_state(state_dir, state)
+        except Exception as e:
+            print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} "
+                  f"signal={signal_label} → SAVE ERROR: {e}")
+            sys.exit(1)
+
+        print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} "
+              f"signal={signal_label} events={len(events)}")
+
     print()
 
-    # ---- 9. Append events ----
-    if events:
-        n_app, n_sk = append_events(state_dir, events)
-        print(f"📝 Events appended: {n_app}, skipped: {n_sk}")
-    else:
-        print(f"📝 No events to append")
-    print()
-
-    # ---- 10. Ensure last_processed_candle_ts ----
-    if state.get("last_processed_candle_ts") != new_candle_ts:
-        state["last_processed_candle_ts"] = new_candle_ts
-
-    state["symbol"] = symbol
-    state["contract_multiplier"] = specs["contract_multiplier"]
-    state["last_close_price"] = float(klines[idx][4])
-
-    try:
-        save_state(state_dir, state)
-    except Exception as e:
-        print(f"❌ save_state failed: {e}")
-        sys.exit(1)
-    print(f"✅ State saved")
-    print()
-
-    # ---- 11. Summary ----
-    total_events = events_count(state_dir)
+    # ---- 8. Summary ----
+    total_events_count = events_count(state_dir)
 
     print("=" * 70)
     print("📌 PAPER RUN SUMMARY")
     print("=" * 70)
-    print(f"  candle_ts          : {new_candle_ts}")
-    print(f"  signal             : {sig['signal']}")
-    print(f"  kill_switch_active : {ks_active}")
-    print(f"  events_generated   : {len(events)}")
-    print(f"  total_events       : {total_events}")
+    print(f"  candles_processed  : {len(to_process)}")
+    print(f"  first_candle_ts    : {first_ts}")
+    print(f"  last_candle_ts     : {last_to_process_ts}")
+    print(f"  catchup_lag        : {lag}")
+    print(f"  total_new_detected : {total_new}")
+    print(f"  events_generated   : {total_events_generated}")
+    print(f"  total_events       : {total_events_count}")
     print(f"  equity             : {state['equity']}")
     print(f"  peak_equity        : {state['peak_equity']}")
     print(f"  has_position       : {state['position'] is not None}")
     print(f"  daily_loss         : {state['daily_loss']}")
     print(f"  weekly_loss        : {state['weekly_loss']}")
     print(f"  circuit_breaker    : {state['circuit_breaker_active']}")
+    if lag > 0:
+        print()
+        print(f"  ⚠️  catchup lag of {lag} candles remains")
+        print(f"     (will be processed on next run)")
     print("=" * 70)
     print("✅ PAPER RUN COMPLETED")
 
