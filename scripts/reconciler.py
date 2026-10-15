@@ -8,22 +8,33 @@ reconciler.py — Public Dry-Run Reconciliation.
 هیچ API خصوصی صدا زده نمی‌شود.
 
 قراردادها:
-  - now_ms فقط از data_feed می‌آید (نه time.time())
   - status ∈ {"OK", "WARNING", "ERROR"}
   - خروجی dict، deterministic
   - اگر last_processed_candle_ts غایب/None باشد، صریح گزارش می‌شود
 
+تفکیک توابع:
+  - reconcile_with_data(state, klines, interval, now_ms) → dict
+      pure: no HTTP, no disk I/O. 5 checks:
+        hash_match, klines_sufficient, last_candle_closed,
+        last_processed_vs_latest, no_missing_candles
+  - reconcile_public(state_dir, symbol, interval) → dict
+      wrapper: state read + klines fetch + merge با pure checks
+
 سیاست strict در Reconciler:
   - Reconciler باید state با hash متفاوت را هم بخواند تا بتواند
-    mismatch را تشخیص بدهد و به‌صورت check گزارش کند.
-  - سیاست fail-closed (strict=True) در run_paper اعمال می‌شود،
-    نه در reconciler.
-  - به همین دلیل در این فایل صریحاً strict=False استفاده می‌شود.
+    mismatch را تشخیص بدهد.
+  - سیاست fail-closed (strict=True) در run_paper اعمال می‌شود.
+
+سیاست زمان:
+  - now_ms در reconcile_with_data اجباری است (deterministic).
+  - در reconcile_public از time.time() استفاده می‌شود، نه فرمول
+    مشتق‌شده از کندل آخر (که می‌تواند کندل باز را بسته تلقی کند).
 
 Spec: docs/step9a_paper_persistence.md
 """
 
 import os
+import time
 
 from data_feed import fetch_klines, INTERVAL_MS
 from paper_state_manager import load_state, state_exists
@@ -35,7 +46,7 @@ from compute_hash import compute_strategy_hash
 # ============================================================
 
 MIN_KLINES = 250
-GAP_WARNING_THRESHOLD = 2  # کندل‌های ازدست‌رفته ≥ 2 → WARNING
+GAP_WARNING_THRESHOLD = 2
 
 STATUS_OK = "OK"
 STATUS_WARNING = "WARNING"
@@ -56,11 +67,6 @@ def _result(status: str, checks: list, summary: str) -> dict:
 
 def _check(name: str, ok: bool, detail: str,
            level: str = "error") -> dict:
-    """
-    یک check را می‌سازد.
-    level: "error" (اگر !ok → ERROR) یا "warning"
-           (اگر !ok → WARNING)
-    """
     return {
         "name": name,
         "ok": ok,
@@ -70,10 +76,6 @@ def _check(name: str, ok: bool, detail: str,
 
 
 def _aggregate_status(checks: list) -> str:
-    """
-    بالاترین سطح خطا را برمی‌گرداند.
-    ERROR > WARNING > OK
-    """
     has_error = any(not c["ok"] and c["level"] == "error" for c in checks)
     has_warning = any(not c["ok"] and c["level"] == "warning" for c in checks)
     if has_error:
@@ -83,8 +85,16 @@ def _aggregate_status(checks: list) -> str:
     return STATUS_OK
 
 
+def _summarize(checks: list) -> str:
+    n_error = sum(1 for c in checks
+                  if not c["ok"] and c["level"] == "error")
+    n_warn = sum(1 for c in checks
+                 if not c["ok"] and c["level"] == "warning")
+    return f"{len(checks)} checks: {n_error} error, {n_warn} warning"
+
+
 # ============================================================
-# Individual checks
+# Individual checks (pure)
 # ============================================================
 
 def _check_state_exists(state_dir: str) -> dict:
@@ -99,9 +109,7 @@ def _check_state_loads(state_dir: str) -> tuple:
     """
     بارگذاری state با strict=False.
 
-    Reconciler وظیفه‌اش تشخیص است، نه fail-closed. باید بتواند
-    state با hash متفاوت را بخواند تا خودش mismatch را به‌عنوان
-    check گزارش کند (نه اینکه با استثنا متوقف شود).
+    Reconciler وظیفه‌اش تشخیص است، نه fail-closed.
     """
     try:
         state = load_state(state_dir, strict=False)
@@ -143,10 +151,6 @@ def _check_last_candle_closed(klines: list, interval: str,
 
 def _check_last_processed_vs_latest(klines: list,
                                      state: dict) -> dict:
-    """
-    مقایسه last_processed_candle_ts با آخرین کندل.
-    اگر None/غایب باشد → WARNING صریح.
-    """
     if not klines:
         return _check(
             "last_processed_vs_latest", False,
@@ -185,10 +189,6 @@ def _check_last_processed_vs_latest(klines: list,
 
 def _check_missing_candles(klines: list, state: dict,
                             interval: str) -> dict:
-    """
-    تعداد کندل‌های ازدست‌رفته بین last_processed_candle_ts
-    و آخرین کندل موجود.
-    """
     if not klines or interval not in INTERVAL_MS:
         return _check(
             "no_missing_candles", False,
@@ -233,9 +233,6 @@ def _check_missing_candles(klines: list, state: dict,
 
 
 def _check_hash_match(state: dict) -> dict:
-    """
-    مقایسه strategy_hash در state با hash فعلی.
-    """
     expected = compute_strategy_hash()
     actual = state.get("strategy_hash")
     if actual is None:
@@ -251,22 +248,66 @@ def _check_hash_match(state: dict) -> dict:
 
 
 # ============================================================
-# Public API
+# Pure API — reconcile_with_data
+# ============================================================
+
+def reconcile_with_data(state: dict, klines: list,
+                        interval: str, now_ms: int) -> dict:
+    """
+    Reconciliation با داده‌ی از قبل دریافت‌شده.
+
+    Pure function: بدون HTTP، بدون disk I/O.
+    مقادیر state و klines را دست‌نخورده باقی می‌گذارد.
+
+    Args:
+        state     : dict (هر hash — بررسی hash_match در همین تابع)
+        klines    : list of candles (اعتبارسنجی‌شده توسط data_feed)
+        interval  : e.g. "1h"
+        now_ms    : timestamp فعلی (اجباری؛ برای deterministic بودن)
+
+    Returns:
+        {"status": "OK"|"WARNING"|"ERROR",
+         "checks": [{"name","ok","level","detail"}, ...],
+         "summary": str}
+
+    Note:
+        این تابع تصمیم «ادامه یا توقف» نمی‌گیرد. run_paper.main
+        بر اساس status تصمیم می‌گیرد.
+    """
+    checks = []
+    checks.append(_check_hash_match(state))
+    checks.append(_check_klines(klines))
+    checks.append(_check_last_candle_closed(klines, interval, now_ms))
+    checks.append(_check_last_processed_vs_latest(klines, state))
+    checks.append(_check_missing_candles(klines, state, interval))
+
+    status = _aggregate_status(checks)
+    return _result(status, checks, _summarize(checks))
+
+
+# ============================================================
+# Public API — reconcile_public
 # ============================================================
 
 def reconcile_public(state_dir: str, symbol: str = "BTC-SWAP-USDT",
                      interval: str = "1h") -> dict:
     """
-    بررسی سلامت داده‌ی عمومی و سازگاری state.
+    بررسی کامل: state + klines + checks.
 
     این تابع فقط می‌خواند. هیچ تغییری ایجاد نمی‌کند.
 
+    ترتیب checkهای خروجی (حفظ‌شده از نسخه‌ی قبلی):
+      1. state_exists
+      2. state_loads
+      3. hash_match
+      4. klines_fetched
+      5. klines_sufficient
+      6. last_candle_closed
+      7. last_processed_vs_latest
+      8. no_missing_candles
+
     Returns:
-        {
-          "status": "OK" | "WARNING" | "ERROR",
-          "checks": [{"name", "ok", "level", "detail"}, ...],
-          "summary": str,
-        }
+        {"status", "checks", "summary"}
     """
     checks = []
 
@@ -277,7 +318,7 @@ def reconcile_public(state_dir: str, symbol: str = "BTC-SWAP-USDT",
         return _result(STATUS_ERROR, checks,
                        "state.json missing → ERROR")
 
-    # ---- 2. State loads (strict=False) ----
+    # ---- 2. State loads ----
     chk_load, state = _check_state_loads(state_dir)
     checks.append(chk_load)
     if not chk_load["ok"]:
@@ -301,32 +342,24 @@ def reconcile_public(state_dir: str, symbol: str = "BTC-SWAP-USDT",
     checks.append(_check("klines_fetched", True,
                          f"received {len(klines)} klines"))
 
-    # ---- 5. Klines sufficient ----
+    # ---- 5. Klines sufficient (single check) ----
     checks.append(_check_klines(klines))
 
     if not klines:
         return _result(_aggregate_status(checks), checks,
                        "no klines → cannot proceed")
 
-    # ---- 6. Last candle closed ----
-    now_ms = int(klines[-1][0]) + INTERVAL_MS.get(interval, 0) * 2
-    checks.append(_check_last_candle_closed(klines, interval, now_ms))
-
-    # ---- 7. last_processed vs latest ----
-    checks.append(_check_last_processed_vs_latest(klines, state))
-
-    # ---- 8. Missing candles ----
-    checks.append(_check_missing_candles(klines, state, interval))
+    # ---- 6-8. Pure checks (skip hash_match and klines_sufficient) ----
+    now_ms = int(time.time() * 1000)
+    inner = reconcile_with_data(state, klines, interval, now_ms)
+    for c in inner["checks"]:
+        if c["name"] in ("hash_match", "klines_sufficient"):
+            continue  # قبلاً اضافه شده‌اند
+        checks.append(c)
 
     # ---- Aggregate ----
     status = _aggregate_status(checks)
-    n_error = sum(1 for c in checks
-                  if not c["ok"] and c["level"] == "error")
-    n_warn = sum(1 for c in checks
-                 if not c["ok"] and c["level"] == "warning")
-    summary = f"{len(checks)} checks: {n_error} error, {n_warn} warning"
-
-    return _result(status, checks, summary)
+    return _result(status, checks, _summarize(checks))
 
 
 # ============================================================
