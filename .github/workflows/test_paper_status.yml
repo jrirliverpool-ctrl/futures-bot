@@ -1,10 +1,10 @@
-name: Test Paper Status
+name: Test Paper Status and Reconcile
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  paper_status:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -15,5 +15,15 @@ jobs:
       - run: pip install requests
       - name: Run paper_status tests
         run: python tests/test_paper_status.py
+
+  reconcile_with_data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
       - name: Run reconcile_with_data tests
         run: python tests/test_reconcile_with_data.py
