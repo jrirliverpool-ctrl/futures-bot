@@ -13,4 +13,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests
-      - run: python tests/test_paper_status.py
+      - name: Run paper_status tests
+        run: python tests/test_paper_status.py
+      - name: Run reconcile_with_data tests
+        run: python tests/test_reconcile_with_data.py
