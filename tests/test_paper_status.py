@@ -16,7 +16,9 @@ run_status مقادیر مجاز:
   aborted           — hash mismatch یا kill switch یا مشابه
   failed            — خطای فنی
 
-⚠️ این تست‌ها پیش از پیاده‌سازی شکست می‌خورند.
+v2.3 (سازگاری با main()->int):
+  _run_main ابتدا خروجی main() را به‌عنوان int می‌گیرد؛
+  اگر SystemExit رخ داد (سازگاری عقب‌رو)، code را از آن می‌گیرد.
 """
 
 import io
@@ -98,6 +100,12 @@ def _setup_state_dir(td, hash_override=None, last_processed=None):
 
 
 def _run_main(state_dir, klines):
+    """
+    اجرای rp.main() با mockهای لازم.
+
+    v2.3: main() حالا int برمی‌گرداند (نه SystemExit).
+    برای سازگاری عقب‌رو، SystemExit را هم می‌گیریم.
+    """
     env = {
         "STATE_DIR": state_dir,
         "SYMBOL": "BTC-SWAP-USDT",
@@ -115,7 +123,8 @@ def _run_main(state_dir, klines):
                                          return_value=(False, None)))
         with redirect_stdout(buf):
             try:
-                rp.main()
+                result = rp.main()
+                exit_code = result if isinstance(result, int) else None
             except SystemExit as e:
                 exit_code = e.code
     return exit_code, buf.getvalue()
@@ -255,7 +264,7 @@ def test_insufficient_klines_writes_insufficient_data():
 def test_reconciler_status_can_be_null_on_early_exit():
     """
     در hash mismatch، reconciler اجرا نمی‌شود، پس status باید
-    null یا "not_run" باشد.
+    null باشد.
     """
     with tempfile.TemporaryDirectory() as td:
         klines = _make_candles(300)
@@ -339,7 +348,7 @@ if __name__ == "__main__":
         test_write_creates_parent_dir,
         test_write_does_not_leave_tempfiles_on_success,
         test_write_is_atomic_on_replace_failure,
-        # 3. Integration (8)
+        # 3. Integration (9)
         test_successful_run_writes_status,
         test_hash_mismatch_writes_aborted_status,
         test_no_new_candle_writes_no_op_status,
