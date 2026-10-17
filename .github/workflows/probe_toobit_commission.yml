@@ -1,0 +1,32 @@
+name: Probe Toobit Commission
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Run commission probe
+        env:
+          TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
+          TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
+        run: |
+          mkdir -p reports
+          python scripts/probe_toobit_commission.py \
+            --symbol BTC-SWAP-USDT \
+            --out reports/probe_toobit_commission.json
+      - name: Upload commission probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-toobit-commission
+          path: reports/probe_toobit_commission.json
+          if-no-files-found: warn
+          retention-days: 30
