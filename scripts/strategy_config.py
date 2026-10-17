@@ -5,10 +5,13 @@ strategy_config.py — Single Source of Truth برای پارامترهای Apex
   - افزودن leverage_per_trade (V1 clarification)
   - get_engine_config اکنون leverage و leverage_cap را پاس می‌دهد
 
-تغییرات 1.0.1 (policy v2.2.3):
+v1.0.1 (policy v2.2.3):
   - get_engine_config اکنون be_trigger_at_r را نیز پاس می‌دهد.
-    (پیش از این، مقادیر در STRATEGY_CONFIG بود ولی engine آن را
-    نمی‌خواند و مقدار 1R را hard-code می‌کرد.)
+
+v1.0.1 (B1):
+  - get_fee_config() اضافه شد — نرخ‌های کارمزد Toobit.
+    ⚠️ این تابع بخشی از STRATEGY_CONFIG نیست. hash استراتژی
+    تغییر نمی‌کند.
 
 تغییر هر پارامتر در این فایل → strategy_hash عوض می‌شود.
 Spec: docs/strategy_v1.md
@@ -16,33 +19,23 @@ Spec: docs/strategy_v1.md
 
 STRATEGY_CONFIG = {
     "version": "1.0.1",
-
-    # --- Timeframe ---
     "timeframe": "1h",
-
-    # --- Indicator Parameters ---
     "ema_fast_period": 50,
     "ema_slow_period": 200,
     "donchian_period": 20,
     "atr_period": 14,
-
-    # --- Trade Management ---
     "sl_atr_mult": 1.5,
     "tp1_atr_mult": 2.0,
     "be_trigger_at_r": 1.0,
     "be_sl_offset_atr": 0.1,
     "trailing_atr_mult": 1.5,
     "time_exit_candles": 48,
-
-    # --- Risk Management ---
     "risk_per_trade": 0.01,
-    "max_leverage": 3,              # hard cap
-    "leverage_per_trade": 3,        # actual leverage used per trade
+    "max_leverage": 3,
+    "leverage_per_trade": 3,
     "daily_loss_limit": 0.03,
     "weekly_loss_limit": 0.07,
     "total_dd_limit": 0.15,
-
-    # --- Execution ---
     "cooldown_candles": 2,
     "slippage_pct": 0.0005,
 }
@@ -92,7 +85,7 @@ def get_engine_config() -> dict:
         "sl_atr_mult": STRATEGY_CONFIG["sl_atr_mult"],
         "tp1_atr_mult": STRATEGY_CONFIG["tp1_atr_mult"],
         "trailing_atr_mult": STRATEGY_CONFIG["trailing_atr_mult"],
-        "be_trigger_at_r": STRATEGY_CONFIG["be_trigger_at_r"],   # ← NEW
+        "be_trigger_at_r": STRATEGY_CONFIG["be_trigger_at_r"],
         "be_sl_offset_atr": STRATEGY_CONFIG["be_sl_offset_atr"],
         "time_exit_candles": STRATEGY_CONFIG["time_exit_candles"],
         "cooldown_candles": STRATEGY_CONFIG["cooldown_candles"],
@@ -109,3 +102,29 @@ def get_timeframe_interval_ms() -> int:
     if tf not in INTERVAL_MS_MAP:
         raise ValueError(f"Unknown timeframe: {tf}")
     return INTERVAL_MS_MAP[tf]
+
+
+def get_fee_config() -> dict:
+    """
+    نرخ‌های کارمزد صرافی (Toobit) برای B1.
+
+    ⚠️ این تابع بخشی از STRATEGY_CONFIG نیست. hash استراتژی
+    تغییر نمی‌کند.
+
+    منبع: probe_toobit_commission.py — 2026-10-18
+    نرخ‌های واقعی حساب apextest2 روی BTC-SWAP-USDT.
+
+    قرارداد محاسبه:
+      - open_taker_fee × entry_notional = commission ورود
+      - close_taker_fee × tp1_notional = commission TP1 (partial)
+      - close_taker_fee × final_notional = commission خروج نهایی
+
+    مقادیر به صورت fraction از notional هستند (0.0005 = 0.05%).
+    """
+    return {
+        "open_taker_fee": 0.0005,
+        "close_taker_fee": 0.0005,
+        "open_maker_fee": 0.0002,
+        "close_maker_fee": 0.0002,
+        "source": "toobit-probe-2026-10-18",
+    }
