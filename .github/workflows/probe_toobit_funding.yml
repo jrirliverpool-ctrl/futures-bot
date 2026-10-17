@@ -1,0 +1,31 @@
+name: Probe Toobit Funding
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Run funding probe
+        run: |
+          mkdir -p reports
+          python scripts/probe_toobit_funding.py \
+            --symbol BTC-SWAP-USDT \
+            --limit 100 \
+            --max-pages 5 \
+            --out reports/probe_toobit_funding.json
+      - name: Upload funding probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-toobit-funding
+          path: reports/probe_toobit_funding.json
+          if-no-files-found: warn
+          retention-days: 30
