@@ -1,35 +1,10 @@
 """
 probe_toobit_commission.py — دریافت نرخ کارمزد واقعی از Toobit.
 
-هدف (محدود و صریح):
-  - تأیید endpoint GET /api/v1/futures/commissionRate
-  - دریافت ۴ فیلد کارمزد: openMakerFee, openTakerFee,
-    closeMakerFee, closeTakerFee
-  - محاسبه‌ی round-trip taker fee (برای Paper با market order)
-  - ثبت پاسخ خام برای بازبینی
-
-آنچه این probe اثبات نمی‌کند:
-  - نرخ واقعی برای حجم معاملات بزرگ‌تر (VIP tier)
-  - نرخ واقعی برای Maker orders (چون Paper فقط Taker دارد)
-  - نرخ funding (این جدا بررسی شد)
-
-هیچ سفارشی ارسال نمی‌شود. هیچ تغییری در state، events،
-یا کد تولیدی ایجاد نمی‌شود.
-فقط GET به endpoint خصوصی با همان API Key که برای Balance
-و Positions استفاده شد.
-
-⚠️ توجه درباره‌ی مجوز کلید:
-این probe از همان TOOBIT_API_KEY پروژه استفاده می‌کند که
-طبق بررسی‌های قبلی مجوز Read + Trade دارد (Withdrawals غیرفعال).
-برای اصل حداقل دسترسی (least-privilege)، بهتر است کلید
-اختصاصی Read-only استفاده شود. اگر موجود نیست، پیش از اجرا
-مجوزهای کلید فعلی را در داشبورد Toobit آگاهانه بررسی کنید.
-پرچم `api_key_is_dedicated_readonly` در گزارش ثبت می‌شود.
-
-الزامات محیط:
-  - TOOBIT_API_KEY و TOOBIT_API_SECRET در GitHub Secrets
-
-اگر HTTP خطا داد یا فیلدها کامل/معتبر نبودند → exit 1.
+v1.2 — اصلاح نسبت به v1.1:
+  _check_logical_error حالا پاسخ‌های list را هم می‌پذیرد.
+  endpoint /futures/balance یک list از dict‌ها برمی‌گرداند،
+  نه dict. در نسخه‌ی قبلی، این به‌اشتباه «logical error» تلقی می‌شد.
 """
 
 import argparse
@@ -61,20 +36,14 @@ REQUIRED_FEE_FIELDS = (
     "closeTakerFee",
 )
 
-# سقف معقول برای نرخ کارمزد — ۱٪ = 0.01
-# اگر مقدار بزرگ‌تر بود، احتمالاً واحد (scale) اشتباه است (مثلاً basis points)
 MAX_PLAUSIBLE_FEE_RATE = 0.01
 
 
 # ============================================================
-# Sanitization — critical for security
+# Sanitization
 # ============================================================
 
 def _sanitize_url(url: str) -> str:
-    """
-    حذف signature از URL قبل از ثبت/چاپ.
-    API key در هدر است، ولی signature در URL — باید redact شود.
-    """
     if "signature=" not in url:
         return url
     parts = url.split("&signature=")
@@ -82,23 +51,6 @@ def _sanitize_url(url: str) -> str:
 
 
 def _safe_error_from_exception(e: Exception) -> str:
-    """
-    متن خطای امن از exception.
-
-    ⚠️ برای requests exceptions، هرگز str(e) را برنگردان —
-    ممکن است URL امضاشده را در متن داشته باشد.
-    فقط نوع exception ثبت می‌شود.
-    """
-    if isinstance(e, (
-        requests.exceptions.RequestException,
-        requests.exceptions.Timeout,
-        requests.exceptions.ConnectionError,
-        requests.exceptions.HTTPError,
-        requests.exceptions.TooManyRedirects,
-        requests.exceptions.URLRequired,
-    )):
-        return type(e).__name__
-    # برای exceptions غیر-requests (signing، JSON، ...) — type name کافی است
     return f"{type(e).__name__}"
 
 
@@ -118,15 +70,6 @@ def _private_get(api_key: str, api_secret: str,
                  endpoint: str, params: dict = None,
                  recv_window: int = DEFAULT_RECV_WINDOW,
                  timeout: int = DEFAULT_TIMEOUT):
-    """
-    GET امضاشده به endpoint خصوصی Toobit.
-
-    Returns: dict با فیلدهای:
-      http_status      : int یا None
-      raw_request_url  : URL با signature=REDACTED
-      response_json    : dict یا None
-      error            : str یا None (هرگز شامل signature)
-    """
     result = {
         "http_status": None,
         "raw_request_url": None,
@@ -157,7 +100,6 @@ def _private_get(api_key: str, api_secret: str,
     try:
         r = requests.get(url, headers=headers, timeout=timeout)
     except Exception as e:
-        # ⚠️ فقط type name — str(e) ممکن است URL داشته باشد
         result["error"] = _safe_error_from_exception(e)
         return result
 
@@ -182,14 +124,20 @@ def _private_get(api_key: str, api_secret: str,
 
 def _check_logical_error(response_json):
     """
-    بعضی APIها 200 برمی‌گردانند ولی در JSON، code/msg/error دارند.
+    بررسی خطای منطقی در پاسخ JSON.
+
+    v1.2: پاسخ list هم داده است (مثلاً /futures/balance).
+    پاسخ dict بررسی می‌شود برای code/success/error.
 
     Returns: (has_error: bool, desc: str یا None)
     """
-    if not isinstance(response_json, dict):
-        return True, f"response not dict: {type(response_json).__name__}"
+    # list = داده است، نه پیام خطا
+    if isinstance(response_json, list):
+        return False, None
 
-    # code: 0 یا 200 = موفق
+    if not isinstance(response_json, dict):
+        return True, f"response neither dict nor list: {type(response_json).__name__}"
+
     code = response_json.get("code")
     if code is not None:
         try:
@@ -204,7 +152,6 @@ def _check_logical_error(response_json):
             )
             return True, f"logical_error code={code}, msg={msg}"
 
-    # success: false → خطا
     if response_json.get("success") is False:
         msg = (
             response_json.get("msg")
@@ -213,7 +160,6 @@ def _check_logical_error(response_json):
         )
         return True, f"success=false, msg={msg}"
 
-    # error: non-empty → خطا
     err = response_json.get("error")
     if err:
         return True, f"error={err}"
@@ -226,15 +172,6 @@ def _check_logical_error(response_json):
 # ============================================================
 
 def _parse_fee_strict(value):
-    """
-    Parse fee as non-negative finite float.
-
-    Returns: float یا None اگر:
-      - None / bool
-      - غیرعددی
-      - NaN یا Infinity
-      - منفی
-    """
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -249,16 +186,6 @@ def _parse_fee_strict(value):
 
 
 def _extract_fees(response_json):
-    """
-    استخراج ۴ فیلد کارمزد از پاسخ.
-
-    Toobit ممکن است پاسخ را به یکی از این اشکال برگرداند:
-      {"openMakerFee": "0.0002", ...}
-      {"data": {"openMakerFee": ...}}
-      {"code": 0, "msg": "", "data": {"openMakerFee": ...}}
-
-    Returns: (found_raw: dict, missing_fields: list)
-    """
     candidates = [response_json]
     if isinstance(response_json, dict) and "data" in response_json:
         candidates.append(response_json["data"])
@@ -276,11 +203,6 @@ def _extract_fees(response_json):
 
 
 def _validate_fees(found_raw):
-    """
-    Strict numeric validation.
-
-    Returns: (validated_fees: dict, invalid_fields: list)
-    """
     validated = {}
     invalid = []
     for field in REQUIRED_FEE_FIELDS:
@@ -295,11 +217,6 @@ def _validate_fees(found_raw):
 
 
 def _compute_round_trip_taker(validated_fees):
-    """
-    round-trip taker fee = openTakerFee + closeTakerFee.
-    این یک نسبت (fraction) است، نه مقدار USD.
-    مقدار USD = notional × این نسبت.
-    """
     open_taker = validated_fees.get("openTakerFee")
     close_taker = validated_fees.get("closeTakerFee")
     if open_taker is None or close_taker is None:
@@ -308,13 +225,7 @@ def _compute_round_trip_taker(validated_fees):
 
 
 def _sanity_checks(validated_fees):
-    """
-    بررسی‌های sanity روی مقادیر معتبرشده.
-
-    Returns: dict of checks (هر value True/False/None).
-    """
     checks = {}
-
     om = validated_fees.get("openMakerFee")
     ot = validated_fees.get("openTakerFee")
     cm = validated_fees.get("closeMakerFee")
@@ -325,7 +236,6 @@ def _sanity_checks(validated_fees):
     if cm is not None and ct is not None:
         checks["close_taker_ge_maker"] = ct >= cm
 
-    # همه در بازه‌ی [0, MAX_PLAUSIBLE_FEE_RATE)
     all_plausible = True
     for v in (om, ot, cm, ct):
         if v is None:
@@ -352,8 +262,6 @@ def main(argv=None):
     p.add_argument("--out", default=None)
     p.add_argument(
         "--api-key-is-dedicated-readonly", action="store_true",
-        help="اگر کلید اختصاصی Read-only استفاده می‌شود، این را بگذارید. "
-             "در گزارش ثبت می‌شود.",
     )
     args = p.parse_args(argv)
 
@@ -365,7 +273,7 @@ def main(argv=None):
         return 1
 
     print("=" * 72)
-    print("🔍 PROBE TOOBIT COMMISSION")
+    print("🔍 PROBE TOOBIT COMMISSION (v1.2)")
     print("=" * 72)
     print(f"  endpoint    : {BASE_URL}{COMMISSION_PATH}")
     print(f"  symbol      : {args.symbol}")
@@ -401,8 +309,6 @@ def main(argv=None):
     if not preflight_ok:
         print()
         print("  ❌ Auth preflight failed — aborting before commission call")
-        print("     (این یعنی کلید/secret/header یا دسترسی مشکل دارد،")
-        print("      نه endpoint کارمزد)")
         return 1
     print()
 
@@ -417,7 +323,7 @@ def main(argv=None):
     endpoint_http_ok = (
         rec["error"] is None
         and rec["http_status"] == 200
-        and isinstance(rec["response_json"], dict)
+        and rec["response_json"] is not None
     )
 
     logical_error = None
@@ -488,7 +394,6 @@ def main(argv=None):
 
     print("=" * 72)
 
-    # --- Report ---
     exit_code = 0 if (endpoint_ok and fields_complete) else 1
 
     if args.out:
@@ -497,7 +402,7 @@ def main(argv=None):
             path.parent.mkdir(parents=True, exist_ok=True)
 
             report = {
-                "probe_version": "v1.1",
+                "probe_version": "v1.2",
                 "endpoint": f"{BASE_URL}{COMMISSION_PATH}",
                 "raw_request_url": rec["raw_request_url"],
                 "symbol": args.symbol,
@@ -505,7 +410,6 @@ def main(argv=None):
                 "timeout": args.timeout,
                 "fetched_at_iso": datetime.now(timezone.utc).isoformat(),
 
-                # Auth context
                 "api_key_is_dedicated_readonly":
                     args.api_key_is_dedicated_readonly,
                 "api_key_permissions_note": (
@@ -515,7 +419,6 @@ def main(argv=None):
                     "dashboard before relying on this probe's isolation."
                 ),
 
-                # Response status
                 "http_status": rec["http_status"],
                 "endpoint_ok": endpoint_ok,
                 "logical_error": logical_error,
@@ -523,12 +426,10 @@ def main(argv=None):
                 "missing_fields": fees_missing,
                 "invalid_fields": fees_invalid,
 
-                # Pre-flight context
                 "preflight_ok": preflight_ok,
                 "preflight_http_status": preflight["http_status"],
                 "preflight_logical_error": preflight_logical_error,
 
-                # Fee data
                 "fees_raw": fees_found_raw,
                 "fees_validated": fees_validated,
                 "round_trip_taker_rate": round_trip_taker,
@@ -540,14 +441,11 @@ def main(argv=None):
                     "All fee fields are rates (fraction of notional). "
                     "Actual USD cost = notional × rate. "
                     "For a full round-trip with equal open/close notional, "
-                    "total fee fraction = openTakerFee + closeTakerFee. "
-                    "Not to be confused with a fixed USD amount."
+                    "total fee fraction = openTakerFee + closeTakerFee."
                 ),
 
-                # Sanity
                 "sanity_checks": checks,
 
-                # Raw
                 "raw_response": rec["response_json"],
                 "error": rec["error"],
             }
