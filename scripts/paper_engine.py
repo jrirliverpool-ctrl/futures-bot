@@ -1,24 +1,16 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
 
-Responsibilities:
-  - Execute pending signal at next candle OPEN
-  - Position sizing using real symbol specs
-  - SL / BE / TP1 / trailing / time exit
-  - Daily / weekly / total drawdown circuit breakers
-  - Candle-based cooldown
-  - Conservative SL-first ambiguity
-  - Deterministic event logging
-  - Stage B leverage validation (fail-closed)
-  - Kill switch at signal acceptance (A) and entry execution (B)
-  - ATR fail-safe: fallback به atr_at_entry، یا ValueError صریح
-  - BE trigger از config (به‌جای 1R hard-coded)
-
-Non-responsibilities:
-  - Signal generation (comes from outside)
-  - Indicator calculation
-  - Live order submission
-  - Reading KILL file (that's run_paper's job via kill_switch module)
+v2.4 (B1 — Commission):
+  - در ENTRY: commission_usd = notional × open_taker_fee، کسر از equity
+  - در TP1_HIT: commission_usd = notional × close_taker_fee، کسر از equity
+  - در EXIT: commission_usd = notional × close_taker_fee
+  - total_commission_usd در EXIT = entry + tp1 + final
+  - trade_net_pnl_usd = pnl_gross − total_commission_usd
+  - daily_loss/weekly_loss روی net PnL (شامل همه‌ی commission)
+  - DEFAULT_CONFIG با open_taker_fee=0 و close_taker_fee=0
+    (برای backward compat تست‌های قدیمی — در run_paper و run_backtest
+     از get_fee_config() پر می‌شود)
 
 Pure Python. No pandas/numpy.
 """
@@ -225,6 +217,12 @@ def execute_pending_entry(state, candle, specs, config):
         state["pending_entry"] = None
         return state, events
 
+    # ---- Commission entry (B1) ----
+    multiplier = specs["contract_multiplier"]
+    entry_notional = qty * entry_price * multiplier
+    entry_commission = entry_notional * config.get("open_taker_fee", 0.0)
+    state["equity"] -= entry_commission
+
     state["position"] = {
         "side": side,
         "entry_price": entry_price,
@@ -244,6 +242,8 @@ def execute_pending_entry(state, candle, specs, config):
         "candles_since_entry": 0,
         "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
+        # B1: commission accumulator (داخلی — validate_state این را چک نمی‌کند)
+        "commission_paid_usd": entry_commission,
     }
     state["pending_entry"] = None
 
@@ -254,6 +254,8 @@ def execute_pending_entry(state, candle, specs, config):
         "size": qty,
         "sl": sl,
         "tp1": tp1,
+        "notional_usd": entry_notional,
+        "commission_usd": entry_commission,
         "timestamp": ts,
     })
     return state, events
@@ -277,9 +279,7 @@ def manage_position_on_candle(pos, candle, atr_current, config):
     p = copy.deepcopy(pos)
     events = []
 
-    # --------------------------------------------------------
-    # 1. SL FIRST (conservative)
-    # --------------------------------------------------------
+    # SL FIRST
     sl_hit = (
         (side == "LONG" and l <= p["current_sl"]) or
         (side == "SHORT" and h >= p["current_sl"])
@@ -303,17 +303,13 @@ def manage_position_on_candle(pos, candle, atr_current, config):
         })
         return p, events, True
 
-    # --------------------------------------------------------
-    # 2. Update excursion
-    # --------------------------------------------------------
+    # Update excursion
     if side == "LONG":
         p["highest_high_since_entry"] = max(p["highest_high_since_entry"], h)
     else:
         p["lowest_low_since_entry"] = min(p["lowest_low_since_entry"], l)
 
-    # --------------------------------------------------------
-    # 3. BE — آستانه از config خوانده می‌شود (نه 1R hard-coded)
-    # --------------------------------------------------------
+    # BE
     if not p["be_moved"]:
         risk_distance = abs(p["entry_price"] - p["initial_sl"])
         r_mult = config["be_trigger_at_r"]
@@ -342,9 +338,7 @@ def manage_position_on_candle(pos, candle, atr_current, config):
                 "timestamp": ts,
             })
 
-    # --------------------------------------------------------
-    # 4. TP1 = 50% realized
-    # --------------------------------------------------------
+    # TP1 = 50% realized (B1: with commission)
     if not p["tp1_hit"] and tp1_hit_this_candle:
         tp1_size = p["size"] * 0.5
         dir_sign = 1 if side == "LONG" else -1
@@ -352,10 +346,19 @@ def manage_position_on_candle(pos, candle, atr_current, config):
             tp1_size * (p["initial_tp1"] - p["entry_price"])
             * config["contract_multiplier_for_pnl"] * dir_sign
         )
+
+        mult = config["contract_multiplier_for_pnl"]
+        tp1_notional = tp1_size * p["initial_tp1"] * mult
+        tp1_commission = tp1_notional * config.get("close_taker_fee", 0.0)
+
         p["tp1_hit"] = True
         p["tp1_size"] = tp1_size
         p["remaining_size"] = p["size"] - tp1_size
         p["realized_pnl"] += pnl_tp1
+        p["commission_paid_usd"] = (
+            p.get("commission_paid_usd", 0.0) + tp1_commission
+        )
+
         events.append({
             "type": "TP1_HIT",
             "price": p["initial_tp1"],
@@ -363,12 +366,13 @@ def manage_position_on_candle(pos, candle, atr_current, config):
             "size": tp1_size,
             "remaining_size": p["remaining_size"],
             "pnl_usd": pnl_tp1,
+            "notional_usd": tp1_notional,
+            "commission_usd": tp1_commission,
+            "net_pnl_usd": pnl_tp1 - tp1_commission,
             "timestamp": ts,
         })
 
-    # --------------------------------------------------------
-    # 5. Trailing
-    # --------------------------------------------------------
+    # Trailing
     if p["tp1_hit"]:
         p["trailing_active"] = True
         trailing_distance = config["trailing_atr_mult"] * atr_current
@@ -379,9 +383,7 @@ def manage_position_on_candle(pos, candle, atr_current, config):
             new_sl = p["lowest_low_since_entry"] + trailing_distance
             p["current_sl"] = min(p["current_sl"], new_sl)
 
-    # --------------------------------------------------------
-    # 6. Time Exit
-    # --------------------------------------------------------
+    # Time Exit
     p["candles_since_entry"] += 1
     if p["candles_since_entry"] >= config["time_exit_candles"]:
         events.append({
@@ -398,10 +400,21 @@ def manage_position_on_candle(pos, candle, atr_current, config):
 
 
 # ============================================================
-# Close Position
+# Close Position (B1 — تغییر امضا)
 # ============================================================
 
 def close_position(state, pos, exit_price, specs, config):
+    """
+    بستن پوزیشن با کمیسیون خروج.
+
+    Returns:
+        dict با فیلدهای:
+          pnl_gross         : TP1 gross + remaining gross (قبل از هزینه)
+          final_commission  : commission خروج روی remaining size
+          total_commission  : commission_paid_usd (entry+tp1) + final
+          exit_price_adj    : قیمت خروج پس از slippage
+          pnl_net           : pnl_gross − total_commission
+    """
     side = pos["side"]
     entry = pos["entry_price"]
     remaining = pos["remaining_size"]
@@ -415,17 +428,32 @@ def close_position(state, pos, exit_price, specs, config):
     pnl_remaining = (
         remaining * (exit_price_adj - entry) * multiplier * dir_sign
     )
-    pnl = pos.get("realized_pnl", 0.0) + pnl_remaining
+    pnl_gross = pos.get("realized_pnl", 0.0) + pnl_remaining
 
-    state["equity"] += pnl
+    final_notional = remaining * exit_price_adj * multiplier
+    final_commission = final_notional * config.get("close_taker_fee", 0.0)
 
-    if pnl < 0:
-        loss = abs(pnl)
+    prior_commissions = pos.get("commission_paid_usd", 0.0)
+    total_comm = prior_commissions + final_commission
+
+    pnl_net = pnl_gross - total_comm
+
+    state["equity"] += pnl_net
+
+    if pnl_net < 0:
+        loss = abs(pnl_net)
         state["daily_loss"] = state.get("daily_loss", 0.0) + loss
         state["weekly_loss"] = state.get("weekly_loss", 0.0) + loss
 
     update_peak_equity(state)
-    return pnl, exit_price_adj
+
+    return {
+        "pnl_gross": pnl_gross,
+        "final_commission": final_commission,
+        "total_commission": total_comm,
+        "exit_price_adj": exit_price_adj,
+        "pnl_net": pnl_net,
+    }
 
 
 # ============================================================
@@ -452,13 +480,23 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
         )
         events.extend(pos_events)
 
+        # B1: TP1 commission — کسر از equity
+        for ev in pos_events:
+            if ev["type"] == "TP1_HIT" and "commission_usd" in ev:
+                state["equity"] -= ev["commission_usd"]
+
         if exited:
             exit_event = next(e for e in pos_events if e["type"] == "EXIT")
-            pnl, exit_price_adj = close_position(
+            result = close_position(
                 state, pos_after, exit_event["price"], specs, config,
             )
-            exit_event["pnl_usd"] = pnl
-            exit_event["exit_price_adj"] = exit_price_adj
+
+            exit_event["pnl_usd"] = result["pnl_gross"]
+            exit_event["pnl_gross"] = result["pnl_gross"]
+            exit_event["commission_usd"] = result["final_commission"]
+            exit_event["total_commission_usd"] = result["total_commission"]
+            exit_event["trade_net_pnl_usd"] = result["pnl_net"]
+            exit_event["exit_price_adj"] = result["exit_price_adj"]
             exit_event["entry_price"] = pos_after["entry_price"]
             state["position"] = None
             position_closed = True
@@ -466,6 +504,7 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
         else:
             state["position"] = pos_after
 
+    # Circuit breakers
     if not state.get("circuit_breaker_active", False):
         if state["daily_loss"] >= state["initial_equity"] * config["daily_loss_limit"]:
             state["circuit_breaker_active"] = True
@@ -564,7 +603,7 @@ DEFAULT_CONFIG = {
     "risk_per_trade": 0.01,
     "sl_atr_mult": 1.5,
     "tp1_atr_mult": 2.0,
-    "be_trigger_at_r": 1.0,          # ← NEW: مقدار پیش‌فرض سازگار با رفتار قبلی
+    "be_trigger_at_r": 1.0,
     "trailing_atr_mult": 1.5,
     "be_sl_offset_atr": 0.1,
     "time_exit_candles": 48,
@@ -573,6 +612,8 @@ DEFAULT_CONFIG = {
     "weekly_loss_limit": 0.07,
     "total_dd_limit": 0.15,
     "slippage_pct": 0.0005,
+    "open_taker_fee": 0.0,      # B1: پیش‌فرض صفر برای backward compat تست‌ها
+    "close_taker_fee": 0.0,     # B1: در run_paper/run_backtest پر می‌شود
     "interval_ms": 3_600_000,
     "kill_switch_active": False,
     "kill_switch_reason": None,
