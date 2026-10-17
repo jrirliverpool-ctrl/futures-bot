@@ -109,7 +109,9 @@ def test_get_engine_config_keys():
         "risk_per_trade",
         "leverage", "leverage_cap",
         "sl_atr_mult", "tp1_atr_mult",
-        "trailing_atr_mult", "be_sl_offset_atr", "time_exit_candles",
+        "trailing_atr_mult", "be_sl_offset_atr",
+        "be_trigger_at_r",                    # ← NEW
+        "time_exit_candles",
         "cooldown_candles", "daily_loss_limit", "weekly_loss_limit",
         "total_dd_limit", "slippage_pct", "interval_ms",
     }
