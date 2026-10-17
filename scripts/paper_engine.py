@@ -9,8 +9,12 @@ v2.4 (B1 — Commission):
   - trade_net_pnl_usd = pnl_gross − total_commission_usd
   - daily_loss/weekly_loss روی net PnL (شامل همه‌ی commission)
   - DEFAULT_CONFIG با open_taker_fee=0 و close_taker_fee=0
-    (برای backward compat تست‌های قدیمی — در run_paper و run_backtest
-     از get_fee_config() پر می‌شود)
+    (برای backward compat — در run_paper/run_backtest پر می‌شود)
+
+v2.4.1 (fix):
+  - close_position: equity فقط با final_commission کاهش می‌یابد
+    (entry_comm و tp1_comm قبلاً در زمان رخداد کسر شده‌اند).
+    daily_loss/weekly_loss همچنان روی pnl_net کامل کار می‌کند.
 
 Pure Python. No pandas/numpy.
 """
@@ -242,7 +246,7 @@ def execute_pending_entry(state, candle, specs, config):
         "candles_since_entry": 0,
         "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
-        # B1: commission accumulator (داخلی — validate_state این را چک نمی‌کند)
+        # B1: commission accumulator
         "commission_paid_usd": entry_commission,
     }
     state["pending_entry"] = None
@@ -400,20 +404,24 @@ def manage_position_on_candle(pos, candle, atr_current, config):
 
 
 # ============================================================
-# Close Position (B1 — تغییر امضا)
+# Close Position (B1 — با اصلاح حسابداری)
 # ============================================================
 
 def close_position(state, pos, exit_price, specs, config):
     """
     بستن پوزیشن با کمیسیون خروج.
 
+    حسابداری:
+      - در entry، entry_commission از equity کسر شده
+      - در TP1، tp1_commission از equity کسر شده
+      - در این تابع، فقط final_commission از equity کسر می‌شود
+        (بقیه قبلاً کسر شده‌اند)
+      - daily_loss/weekly_loss روی pnl_net (شامل همه‌ی commission) اعمال می‌شود
+        تا محدودیت زیان، زیان واقعی خالص را ببیند
+
     Returns:
-        dict با فیلدهای:
-          pnl_gross         : TP1 gross + remaining gross (قبل از هزینه)
-          final_commission  : commission خروج روی remaining size
-          total_commission  : commission_paid_usd (entry+tp1) + final
-          exit_price_adj    : قیمت خروج پس از slippage
-          pnl_net           : pnl_gross − total_commission
+        dict با pnl_gross, final_commission, total_commission,
+        exit_price_adj, pnl_net
     """
     side = pos["side"]
     entry = pos["entry_price"]
@@ -438,8 +446,12 @@ def close_position(state, pos, exit_price, specs, config):
 
     pnl_net = pnl_gross - total_comm
 
-    state["equity"] += pnl_net
+    # ← اصلاح: فقط final_commission از equity کم می‌شود
+    #    (entry_comm و tp1_comm قبلاً کسر شده‌اند)
+    pnl_for_equity = pnl_gross - final_commission
+    state["equity"] += pnl_for_equity
 
+    # daily_loss/weekly_loss روی pnl_net کامل (شامل همه‌ی commission)
     if pnl_net < 0:
         loss = abs(pnl_net)
         state["daily_loss"] = state.get("daily_loss", 0.0) + loss
@@ -612,8 +624,8 @@ DEFAULT_CONFIG = {
     "weekly_loss_limit": 0.07,
     "total_dd_limit": 0.15,
     "slippage_pct": 0.0005,
-    "open_taker_fee": 0.0,      # B1: پیش‌فرض صفر برای backward compat تست‌ها
-    "close_taker_fee": 0.0,     # B1: در run_paper/run_backtest پر می‌شود
+    "open_taker_fee": 0.0,
+    "close_taker_fee": 0.0,
     "interval_ms": 3_600_000,
     "kill_switch_active": False,
     "kill_switch_reason": None,
