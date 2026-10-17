@@ -12,7 +12,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
       - name: Run paper_status tests
         run: python tests/test_paper_status.py
 
@@ -24,7 +30,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
       - name: Run reconcile_with_data tests
         run: python tests/test_reconcile_with_data.py
 
@@ -36,7 +48,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
       - name: Run state hash strict tests
         run: python tests/test_state_hash_strict.py
 
@@ -48,6 +66,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
       - name: Run strategy hash contract tests
         run: python tests/test_strategy_hash_contract.py
