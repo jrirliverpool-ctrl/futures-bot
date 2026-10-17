@@ -1,46 +1,9 @@
 """
 backtest.py — Historical backtest engine برای ApexQuant V1.
 
-مسئولیت‌ها:
-  - اجرای Paper Engine روی داده تاریخی
-  - تولید signals از استراتژی برای هر کندل
-  - ثبت equity curve (هم realized و هم mark-to-market)
-  - محاسبه metrics عملکرد
-
-غیرمسئولیت‌ها:
-  - تصمیم‌گیری استراتژی (strategy.py)
-  - مدیریت پوزیشن (paper_engine.py)
-  - ذخیره state (state_manager.py)
-
-قراردادها
-══════════════════════════════════════════════════════════════
-
-1. Realized Equity:
-     state["equity"] = initial + Σ(pnl_usd of closed trades)
-     فقط با close_position تغییر می‌کند.
-     برای position sizing و risk استفاده می‌شود.
-
-2. Mark-to-Market (MTM) Equity:
-     mtm(i) = state["equity"]
-            + pos.realized_pnl   (از TP1 که هنوز به equity اضافه نشده)
-            + unrealized_pnl     (remaining_size × (close - entry) × mult × dir)
-     برای equity curve و max drawdown استفاده می‌شود.
-     اگر پوزیشن بازی وجود نداشته باشد: mtm == realized.
-
-3. Exit Events vs Trades:
-     هر EXIT event = بستن یک پوزیشن = یک trade.
-     TP1_HIT یک event جداست و در شمارش trade لحاظ نمی‌شود.
-     pnl_usd در EXIT، مجموع TP1 PnL + PnL باقی‌مانده است.
-
-4. Fee/Commission:
-     فعلاً فقط Slippage لحاظ می‌شود.
-     Commission مستقل در نسخه‌های بعدی اضافه خواهد شد.
-
-5. start_index:
-     برای OOS/Walk-forward بعدی. indicators روی کل داده محاسبه می‌شوند
-     (backward-only، بدون look-ahead) ولی paper_engine فقط از start_index اجرا می‌شود.
-
-Spec: docs/strategy_v1.md
+v2.1 (B1 — Commission):
+  - run_backtest از get_fee_config() استفاده می‌کند (fail-loud)
+  - compute_metrics فیلد commission_cost_usd اضافه شد
 """
 
 import json
@@ -51,31 +14,13 @@ from paper_engine import process_candle
 from strategy_config import (
     get_indicator_params,
     get_engine_config,
+    get_fee_config,
 )
 from compute_hash import get_strategy_metadata
 from state_manager import default_state
 
 
-# ============================================================
-# Equity Helpers
-# ============================================================
-
-def compute_mtm_equity(state: dict, close_price: float, specs: dict) -> float:
-    """
-    Mark-to-market equity در پایان یک کندل.
-
-    mtm = state["equity"]              (realized closed trades)
-        + pos.realized_pnl             (TP1 partial، در انتظار close_position)
-        + unrealized_pnl               (remaining_size vs close)
-
-    Args:
-        state: state بعد از process_candle (position ممکن است None باشد)
-        close_price: قیمت بسته شدن کندل جاری
-        specs: symbol specs (contract_multiplier لازم است)
-
-    Returns:
-        float: MTM equity
-    """
+def compute_mtm_equity(state, close_price, specs):
     realized = state["equity"]
     pos = state.get("position")
     if pos is None:
@@ -93,22 +38,7 @@ def compute_mtm_equity(state: dict, close_price: float, specs: dict) -> float:
     return realized + tp1_realized + unrealized
 
 
-# ============================================================
-# Signal Generation
-# ============================================================
-
-def generate_signals(klines: list) -> tuple:
-    """
-    تولید indicators + signals برای همه‌ی کندل‌ها.
-
-    Returns:
-        (indicators, signals) — هر دو به طول len(klines)
-
-    Note:
-        indicators روی کل داده محاسبه می‌شوند (backward-only).
-        signals[i] از evaluate_signal(indicators, i) می‌آید.
-        indices 0 و warmup → NO_TRADE.
-    """
+def generate_signals(klines):
     if not klines:
         raise ValueError("klines is empty")
 
@@ -129,54 +59,24 @@ def generate_signals(klines: list) -> tuple:
     return indicators, signals
 
 
-# ============================================================
-# Core Backtest
-# ============================================================
-
-def run_backtest(
-    klines: list,
-    specs: dict,
-    initial_equity: float = 1000.0,
-    symbol: str = "UNKNOWN",
-    start_index: int = 0,
-) -> dict:
-    """
-    اجرای کامل backtest روی داده تاریخی.
-
-    Args:
-        klines: لیست کندل‌های خام [ts_ms, o, h, l, c, v, ...]
-        specs: symbol specs (contract_multiplier, min_qty, ...)
-        initial_equity: سرمایه اولیه
-        symbol: نام نماد (فقط برای لاگ)
-        start_index: از کدام کندل شروع شود
-
-    Returns:
-        dict با کلیدهای:
-          - symbol, candle_count, start_index
-          - initial_equity
-          - final_state (state نهایی paper_engine)
-          - events (لیست کامل event ها)
-          - equity_curve (mark-to-market در پایان هر کندل)
-          - realized_equity_curve (state["equity"] در پایان هر کندل)
-          - metrics (dict)
-          - strategy_metadata (version, hash)
-    """
+def run_backtest(klines, specs, initial_equity=1000.0,
+                 symbol="UNKNOWN", start_index=0):
     if not klines:
         raise ValueError("klines is empty")
     if initial_equity <= 0:
         raise ValueError("initial_equity must be > 0")
 
-    # 1. Indicators + Signals
     indicators, signals = generate_signals(klines)
-
-    # 2. Initial state (با strategy metadata)
     state = default_state(initial_equity)
 
-    # 3. Engine config از strategy_config + injection
     engine_config = get_engine_config()
     engine_config["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
 
-    # 4. Loop
+    # B1: fail-loud — اگر get_fee_config fail شد، exception بالا می‌رود
+    fee_cfg = get_fee_config()
+    engine_config["open_taker_fee"] = fee_cfg["open_taker_fee"]
+    engine_config["close_taker_fee"] = fee_cfg["close_taker_fee"]
+
     mtm_curve = []
     realized_curve = []
     all_events = []
@@ -194,13 +94,11 @@ def run_backtest(
             seq += 1
         all_events.extend(events)
 
-        # محاسبه MTM با close کندل جاری
         close_price = float(klines[i][4])
         mtm = compute_mtm_equity(state, close_price, specs)
         mtm_curve.append(mtm)
         realized_curve.append(state["equity"])
 
-    # 5. Metrics (از MTM curve)
     metrics = compute_metrics(
         mtm_curve, all_events, initial_equity,
         realized_final=state["equity"],
@@ -220,30 +118,8 @@ def run_backtest(
     }
 
 
-# ============================================================
-# Metrics
-# ============================================================
-
-def compute_metrics(
-    equity_curve: list,
-    events: list,
-    initial_equity: float,
-    realized_final: float = None,
-) -> dict:
-    """
-    محاسبه metrics عملکرد از MTM equity curve و events.
-
-    تمام metrics deterministic و بدون وابستگی خارجی.
-
-    Args:
-        equity_curve: MTM curve
-        events: لیست event ها
-        initial_equity: equity اولیه
-        realized_final: state["equity"] نهایی (برای cross-check)
-
-    Returns:
-        dict metrics
-    """
+def compute_metrics(equity_curve, events, initial_equity,
+                    realized_final=None):
     if initial_equity <= 0:
         raise ValueError("initial_equity must be > 0")
 
@@ -253,7 +129,6 @@ def compute_metrics(
 
     net_return_pct = (mtm_final - initial_equity) / initial_equity * 100.0
 
-    # --- Max drawdown از MTM curve ---
     peak = initial_equity
     max_dd = 0.0
     for eq in equity_curve:
@@ -265,9 +140,6 @@ def compute_metrics(
                 max_dd = dd
     max_dd_pct = max_dd * 100.0
 
-    # --- Trade stats (فقط EXIT events) ---
-    # نکته: TP1_HIT نوع جداگانه‌ای دارد و این‌جا شمرده نمی‌شود.
-    # هر EXIT = یک trade بسته‌شده.
     exit_events = [e for e in events if e.get("type") == "EXIT"]
     trade_pnls = [
         float(e.get("pnl_usd", 0.0) or 0.0) for e in exit_events
@@ -292,21 +164,17 @@ def compute_metrics(
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     expectancy = sum(trade_pnls) / total_trades if total_trades > 0 else 0.0
 
-    # --- Exit reason distribution ---
     exit_reasons = {}
     for e in exit_events:
         r = e.get("reason", "UNKNOWN")
         exit_reasons[r] = exit_reasons.get(r, 0) + 1
 
-    # --- Long / Short counts ---
     entry_events = [e for e in events if e.get("type") == "ENTRY"]
     long_count = sum(1 for e in entry_events if e.get("side") == "LONG")
     short_count = sum(1 for e in entry_events if e.get("side") == "SHORT")
 
-    # --- Ambiguous exits ---
     ambiguous_count = sum(1 for e in exit_events if e.get("ambiguous"))
 
-    # --- Per-trade Sharpe-like metric (نه Sharpe استاندارد) ---
     if len(trade_pnls) >= 2:
         mean_pnl = sum(trade_pnls) / len(trade_pnls)
         variance = sum(
@@ -317,7 +185,6 @@ def compute_metrics(
     else:
         sharpe_like_per_trade = 0.0
 
-    # --- Simple Calmar-like metric (نه Calmar سالانه استاندارد) ---
     if max_dd_pct > 0:
         calmar_like_simple = net_return_pct / max_dd_pct
     else:
@@ -325,20 +192,24 @@ def compute_metrics(
             float("inf") if net_return_pct > 0 else 0.0
         )
 
-    # --- Event counts ---
     event_counts = {}
     for e in events:
         t = e.get("type", "UNKNOWN")
         event_counts[t] = event_counts.get(t, 0) + 1
 
+    # B1: commission_cost_usd
+    commission_cost_usd = sum(
+        float(e.get("commission_usd", 0.0) or 0.0)
+        for e in events
+        if e.get("type") in ("ENTRY", "TP1_HIT", "EXIT")
+    )
+
     return {
-        # Equity
         "initial_equity": float(initial_equity),
         "final_equity_mtm": float(mtm_final),
         "final_equity_realized": float(realized_final),
         "net_return_pct": float(net_return_pct),
         "max_drawdown_pct": float(max_dd_pct),
-        # Trade stats
         "total_trades": total_trades,
         "wins": len(wins),
         "losses": len(losses),
@@ -349,38 +220,31 @@ def compute_metrics(
         "avg_win": float(avg_win),
         "avg_loss": float(avg_loss),
         "expectancy": float(expectancy),
-        # Risk-adjusted (نام‌های دقیق‌تر)
         "sharpe_like_per_trade": float(sharpe_like_per_trade),
         "calmar_like_simple": float(calmar_like_simple),
-        # Composition
         "long_count": long_count,
         "short_count": short_count,
         "ambiguous_exit_count": ambiguous_count,
         "exit_reason_distribution": exit_reasons,
         "event_counts": event_counts,
         "total_events": len(events),
+        "commission_cost_usd": float(commission_cost_usd),
     }
 
 
-# ============================================================
-# Reporting
-# ============================================================
-
-def format_metrics(metrics: dict) -> str:
-    """فرمت‌بندی خوانا metrics برای چاپ."""
+def format_metrics(metrics):
     lines = []
     lines.append("=" * 60)
     lines.append("📊 BACKTEST METRICS")
     lines.append("=" * 60)
-
     lines.append("💰 Equity")
     lines.append(f"  initial              : {metrics['initial_equity']:.2f}")
     lines.append(f"  final (realized)     : {metrics['final_equity_realized']:.2f}")
     lines.append(f"  final (mark-to-mkt)  : {metrics['final_equity_mtm']:.2f}")
     lines.append(f"  net return (mtm)     : {metrics['net_return_pct']:+.2f}%")
     lines.append(f"  max drawdown (mtm)   : {metrics['max_drawdown_pct']:.2f}%")
+    lines.append(f"  commission cost      : {metrics.get('commission_cost_usd', 0):.4f}")
     lines.append("")
-
     lines.append("📈 Trades")
     lines.append(f"  total                : {metrics['total_trades']}")
     lines.append(
@@ -396,7 +260,6 @@ def format_metrics(metrics: dict) -> str:
     lines.append(f"  avg loss             : {metrics['avg_loss']:.2f}")
     lines.append(f"  expectancy           : {metrics['expectancy']:.4f}")
     lines.append("")
-
     lines.append("🎯 Risk-adjusted")
     lines.append(
         f"  sharpe_like_per_trade: {metrics['sharpe_like_per_trade']:.4f}"
@@ -405,28 +268,23 @@ def format_metrics(metrics: dict) -> str:
     calmar_str = f"{calmar:.2f}" if calmar != float("inf") else "inf"
     lines.append(f"  calmar_like_simple   : {calmar_str}")
     lines.append("")
-
     lines.append("📋 Composition")
     lines.append(f"  long entries         : {metrics['long_count']}")
     lines.append(f"  short entries        : {metrics['short_count']}")
     lines.append(f"  ambiguous exits      : {metrics['ambiguous_exit_count']}")
     lines.append("")
-
     lines.append("🚪 Exit reasons")
     for r, c in sorted(metrics["exit_reason_distribution"].items()):
         lines.append(f"  {r:15s}: {c}")
     lines.append("")
-
     lines.append("🔔 Event counts")
     for t, c in sorted(metrics["event_counts"].items()):
         lines.append(f"  {t:20s}: {c}")
-
     lines.append("=" * 60)
     return "\n".join(lines)
 
 
-def result_to_json(result: dict) -> str:
-    """سریال‌سازی نتیجه برای ذخیره."""
+def result_to_json(result):
     out = {
         "symbol": result["symbol"],
         "candle_count": result["candle_count"],
@@ -439,12 +297,7 @@ def result_to_json(result: dict) -> str:
     return json.dumps(out, indent=2, sort_keys=True, default=str)
 
 
-# ============================================================
-# CLI (local use only)
-# ============================================================
-
 def _cli_main():
-    """اجرای محلی با داده واقعی Toobit. در CI استفاده نمی‌شود."""
     import sys
     from data_feed import fetch_closed_klines
     from symbol_specs import get_symbol_specs
