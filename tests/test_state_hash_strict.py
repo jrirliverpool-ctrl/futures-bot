@@ -16,10 +16,10 @@ v2.3 (سازگاری با main()->int):
   — چون در پایتون isinstance(True, int) == True است).
   اگر SystemExit رخ داد (سازگاری عقب‌رو)، code را از آن می‌گیرد.
 
-BACKLOG (گام جداگانه):
-  تست موفق همچنان از الگوی `in (0, None)` استفاده می‌کند که
-  اجازه می‌دهد main() که None برمی‌گرداند هم «موفق» تلقی شود.
-  پس از تثبیت قرارداد، این الگو باید به `== 0` تغییر کند.
+v2.4:
+  تست موفق حالا سخت‌گیرانه است: exit_code باید دقیقاً 0 باشد،
+  نه None. این تضمین می‌کند main() که مقدار برنمی‌گرداند،
+  به‌عنوان موفق پذیرفته نشود.
 """
 
 import inspect
@@ -135,11 +135,6 @@ def _run_main(state_dir, klines):
     اجرای rp.main() با mockهای لازم.
 
     v2.3: main() حالا int برمی‌گرداند (نه SystemExit).
-
-    قواعد تشخیص exit code:
-      - اگر main() مقدار int *واقعی* برگرداند → همان مقدار
-      - اگر bool برگرداند → رد می‌شود (type() is int، نه isinstance)
-      - اگر SystemExit انداخت → e.code
     """
     env = {
         "STATE_DIR": state_dir,
@@ -160,8 +155,7 @@ def _run_main(state_dir, klines):
             try:
                 result = rp.main()
                 # type() is int — نه isinstance — چون isinstance(True, int)
-                # در پایتون True است و bool نباید به‌عنوان exit code
-                # پذیرفته شود.
+                # در پایتون True است.
                 exit_code = result if type(result) is int else None
             except SystemExit as e:
                 exit_code = e.code
@@ -297,11 +291,8 @@ def test_run_paper_proceeds_on_matching_hash():
         )
         exit_code, stdout = _run_main(state_dir, klines)
 
-        # BACKLOG: این assertion پس از تثبیت قرارداد باید به `== 0`
-        # تغییر کند؛ فعلاً `in (0, None)` باقی می‌ماند چون گام
-        # جداگانه‌ای است.
-        assert exit_code in (0, None), (
-            f"matching-hash run should succeed, got exit_code={exit_code}\n"
+        assert exit_code == 0, (
+            f"matching-hash run must exit 0, got exit_code={exit_code}\n"
             f"stdout tail: {stdout[-500:]!r}"
         )
         with open(os.path.join(state_dir, "state.json")) as f:
