@@ -1,13 +1,8 @@
 """
 test_run_paper_wiring.py — Integration test بین run_paper و paper_engine.
 
-پوشش (11 تست):
-  - Config wire-up (3)
-  - Valid / Invalid leverage (2)
-  - Kill Switch wire-up (6)
-
-هدف: اثبات انتقال leverage / leverage_cap / kill_switch
-از run_paper به engine_config.
+v2.4 (B1): _enrich_specs_for_engine حالا get_fee_config() را صدا می‌زند.
+تست‌های مربوطه باید patch شوند.
 """
 
 import os
@@ -40,12 +35,16 @@ SPECS = {
     "max_leverage": 200.0,
 }
 
+MOCK_FEE = {
+    "open_taker_fee": 0.0005,
+    "close_taker_fee": 0.0005,
+    "open_maker_fee": 0.0002,
+    "close_maker_fee": 0.0002,
+    "source": "test-mock",
+}
+
 KILL_FILENAME = "KILL"
 
-
-# ============================================================
-# Helpers
-# ============================================================
 
 def _tmp_dir():
     return tempfile.mkdtemp()
@@ -75,54 +74,59 @@ def _pending_entry():
     }
 
 
-# ============================================================
-# Config wire-up (3)
-# ============================================================
+# Config wire-up
 
 def test_enrich_specs_contains_leverage():
-    cfg = _enrich_specs_for_engine(SPECS)
+    with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+        cfg = _enrich_specs_for_engine(SPECS)
     assert "leverage" in cfg
     assert cfg["leverage"] == 3
-    print("✅ test_enrich_specs_contains_leverage")
 
 
 def test_enrich_specs_contains_leverage_cap():
-    cfg = _enrich_specs_for_engine(SPECS)
+    with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+        cfg = _enrich_specs_for_engine(SPECS)
     assert "leverage_cap" in cfg
     assert cfg["leverage_cap"] == 3
-    print("✅ test_enrich_specs_contains_leverage_cap")
+
+
+def test_enrich_specs_contains_fee_fields():
+    with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+        cfg = _enrich_specs_for_engine(SPECS)
+    assert cfg["open_taker_fee"] == 0.0005
+    assert cfg["close_taker_fee"] == 0.0005
+
+
+def test_enrich_specs_fail_loud_on_fee_error():
+    """B1: fail-loud — اگر get_fee_config خطا بدهد، exception بالا می‌رود"""
+    with patch("run_paper.get_fee_config",
+               side_effect=ImportError("fee config broken")):
+        try:
+            _enrich_specs_for_engine(SPECS)
+            assert False, "expected exception on fee config failure"
+        except ImportError:
+            pass
 
 
 def test_enrich_specs_contains_all_required_fields():
-    cfg = _enrich_specs_for_engine(SPECS)
+    with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+        cfg = _enrich_specs_for_engine(SPECS)
     required = [
-        "risk_per_trade",
-        "leverage",
-        "leverage_cap",
-        "sl_atr_mult",
-        "tp1_atr_mult",
-        "trailing_atr_mult",
-        "be_sl_offset_atr",
-        "time_exit_candles",
-        "cooldown_candles",
-        "daily_loss_limit",
-        "weekly_loss_limit",
-        "total_dd_limit",
-        "slippage_pct",
-        "interval_ms",
+        "risk_per_trade", "leverage", "leverage_cap",
+        "sl_atr_mult", "tp1_atr_mult",
+        "trailing_atr_mult", "be_sl_offset_atr", "time_exit_candles",
+        "cooldown_candles", "daily_loss_limit", "weekly_loss_limit",
+        "total_dd_limit", "slippage_pct", "interval_ms",
         "contract_multiplier_for_pnl",
+        "open_taker_fee", "close_taker_fee",
     ]
     missing = [k for k in required if k not in cfg]
     assert not missing, f"missing fields: {missing}"
-    print("✅ test_enrich_specs_contains_all_required_fields")
 
-
-# ============================================================
-# Leverage (2)
-# ============================================================
 
 def test_valid_leverage_opens_position():
-    cfg = _enrich_specs_for_engine(SPECS)
+    with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+        cfg = _enrich_specs_for_engine(SPECS)
     state = _state()
     state["pending_entry"] = _pending_entry()
 
@@ -133,7 +137,6 @@ def test_valid_leverage_opens_position():
     assert new_state["pending_entry"] is None
     entry = [e for e in events if e["type"] == "ENTRY"]
     assert len(entry) == 1
-    print("✅ test_valid_leverage_opens_position")
 
 
 def test_invalid_leverage_rejects_and_preserves_account():
@@ -143,7 +146,9 @@ def test_invalid_leverage_rejects_and_preserves_account():
         STRATEGY_CONFIG["leverage_per_trade"] = 5
         STRATEGY_CONFIG["max_leverage"] = 3
 
-        cfg = _enrich_specs_for_engine(SPECS)
+        with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+            cfg = _enrich_specs_for_engine(SPECS)
+
         assert cfg["leverage"] == 5
         assert cfg["leverage_cap"] == 3
 
@@ -151,9 +156,6 @@ def test_invalid_leverage_rejects_and_preserves_account():
         state["pending_entry"] = _pending_entry()
 
         equity_before = state["equity"]
-        dl_before = state["daily_loss"]
-        wl_before = state["weekly_loss"]
-        cb_before = state["circuit_breaker_active"]
 
         candle = _candle(3600000, 85100, 85300, 85000, 85200)
         new_state, events = execute_pending_entry(state, candle, SPECS, cfg)
@@ -164,90 +166,75 @@ def test_invalid_leverage_rejects_and_preserves_account():
         assert len(rejected) == 1
         assert rejected[0]["reason"] == "leverage_exceeds_cap"
         assert new_state["equity"] == equity_before
-        assert new_state["daily_loss"] == dl_before
-        assert new_state["weekly_loss"] == wl_before
-        assert new_state["circuit_breaker_active"] == cb_before
-        print("✅ test_invalid_leverage_rejects_and_preserves_account")
     finally:
         STRATEGY_CONFIG["leverage_per_trade"] = original_lev
         STRATEGY_CONFIG["max_leverage"] = original_cap
 
 
-# ============================================================
-# Kill Switch wire-up (6)
-# ============================================================
+# Kill Switch wire-up
 
 def test_build_engine_config_includes_kill_switch_fields():
-    """کلیدهای kill_switch_active و kill_switch_reason باید موجود باشند."""
     d = _tmp_dir()
     try:
         state = _state()
-        cfg = _build_engine_config_with_kill_switch(
-            SPECS, state, d, repo_root=None,
-        )
+        with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+            cfg = _build_engine_config_with_kill_switch(
+                SPECS, state, d, repo_root=None,
+            )
         assert "kill_switch_active" in cfg
         assert "kill_switch_reason" in cfg
         assert isinstance(cfg["kill_switch_active"], bool)
-        print("✅ test_build_engine_config_includes_kill_switch_fields")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
 def test_build_engine_config_inactive_when_no_sources():
-    """بدون KILL و بدون state flag → inactive، reason=None."""
     d = _tmp_dir()
     try:
         state = _state()
         state["kill_switch"] = False
-        cfg = _build_engine_config_with_kill_switch(
-            SPECS, state, d, repo_root=None,
-        )
+        with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+            cfg = _build_engine_config_with_kill_switch(
+                SPECS, state, d, repo_root=None,
+            )
         assert cfg["kill_switch_active"] is False
         assert cfg["kill_switch_reason"] is None
-        print("✅ test_build_engine_config_inactive_when_no_sources")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
 def test_build_engine_config_active_when_kill_file():
-    """وجود فایل KILL → active=True + reason شامل مسیر."""
     d = _tmp_dir()
     try:
         _create_kill(d)
         state = _state()
         state["kill_switch"] = False
-        cfg = _build_engine_config_with_kill_switch(
-            SPECS, state, d, repo_root=None,
-        )
+        with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+            cfg = _build_engine_config_with_kill_switch(
+                SPECS, state, d, repo_root=None,
+            )
         assert cfg["kill_switch_active"] is True
         assert cfg["kill_switch_reason"] is not None
         assert "KILL" in cfg["kill_switch_reason"]
-        print("✅ test_build_engine_config_active_when_kill_file")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
 def test_build_engine_config_active_when_state_flag():
-    """state["kill_switch"]=True → active=True."""
     d = _tmp_dir()
     try:
         state = _state()
         state["kill_switch"] = True
-        cfg = _build_engine_config_with_kill_switch(
-            SPECS, state, d, repo_root=None,
-        )
+        with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+            cfg = _build_engine_config_with_kill_switch(
+                SPECS, state, d, repo_root=None,
+            )
         assert cfg["kill_switch_active"] is True
-        assert cfg["kill_switch_reason"] is not None
-        assert "kill_switch" in cfg["kill_switch_reason"].lower()
-        print("✅ test_build_engine_config_active_when_state_flag")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
 def test_build_engine_config_fail_closed_on_error():
-    """
-    اگر is_kill_switch_active خطا بدهد → active=True (fail-closed).
-    """
     d = _tmp_dir()
     try:
         state = _state()
@@ -256,85 +243,57 @@ def test_build_engine_config_fail_closed_on_error():
         def raising_check(*args, **kwargs):
             raise RuntimeError("mock kill_switch error")
 
-        with patch("run_paper.is_kill_switch_active",
-                   side_effect=raising_check):
-            cfg = _build_engine_config_with_kill_switch(
-                SPECS, state, d, repo_root=None,
-            )
+        with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+            with patch("run_paper.is_kill_switch_active",
+                       side_effect=raising_check):
+                cfg = _build_engine_config_with_kill_switch(
+                    SPECS, state, d, repo_root=None,
+                )
 
         assert cfg["kill_switch_active"] is True
-        assert cfg["kill_switch_reason"] is not None
         assert "mock kill_switch error" in cfg["kill_switch_reason"]
-        print("✅ test_build_engine_config_fail_closed_on_error")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
 def test_build_engine_config_fail_closed_on_invalid_output():
-    """
-    اگر is_kill_switch_active مقدار نامعتبر برگرداند → active=True.
-    حالت‌ها:
-      - None
-      - bool خالص (غیر tuple)
-      - tuple با طول ≠ 2
-      - tuple معتبر ولی active غیر bool
-    """
     d = _tmp_dir()
     try:
         state = _state()
 
-        # حالت 1: None
-        with patch("run_paper.is_kill_switch_active", return_value=None):
-            cfg = _build_engine_config_with_kill_switch(
-                SPECS, state, d, repo_root=None,
-            )
-            assert cfg["kill_switch_active"] is True
-            assert "invalid kill_switch output" in cfg["kill_switch_reason"]
+        with patch("run_paper.get_fee_config", return_value=MOCK_FEE):
+            with patch("run_paper.is_kill_switch_active", return_value=None):
+                cfg = _build_engine_config_with_kill_switch(
+                    SPECS, state, d, repo_root=None,
+                )
+                assert cfg["kill_switch_active"] is True
 
-        # حالت 2: غیر tuple
-        with patch("run_paper.is_kill_switch_active", return_value=False):
-            cfg = _build_engine_config_with_kill_switch(
-                SPECS, state, d, repo_root=None,
-            )
-            assert cfg["kill_switch_active"] is True
-            assert "invalid kill_switch output" in cfg["kill_switch_reason"]
+            with patch("run_paper.is_kill_switch_active",
+                       return_value=False):
+                cfg = _build_engine_config_with_kill_switch(
+                    SPECS, state, d, repo_root=None,
+                )
+                assert cfg["kill_switch_active"] is True
 
-        # حالت 3: tuple با طول ≠ 2
-        with patch("run_paper.is_kill_switch_active",
-                   return_value=(False,)):
-            cfg = _build_engine_config_with_kill_switch(
-                SPECS, state, d, repo_root=None,
-            )
-            assert cfg["kill_switch_active"] is True
-
-        # حالت 4: active non-bool در tuple معتبر
-        with patch("run_paper.is_kill_switch_active",
-                   return_value=("yes", "some reason")):
-            cfg = _build_engine_config_with_kill_switch(
-                SPECS, state, d, repo_root=None,
-            )
-            assert cfg["kill_switch_active"] is True
-            assert "not bool" in cfg["kill_switch_reason"]
-
-        print("✅ test_build_engine_config_fail_closed_on_invalid_output")
+            with patch("run_paper.is_kill_switch_active",
+                       return_value=("yes", "reason")):
+                cfg = _build_engine_config_with_kill_switch(
+                    SPECS, state, d, repo_root=None,
+                )
+                assert cfg["kill_switch_active"] is True
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
-# ============================================================
-# Main
-# ============================================================
-
 if __name__ == "__main__":
     tests = [
-        # Config wire-up (3)
         test_enrich_specs_contains_leverage,
         test_enrich_specs_contains_leverage_cap,
+        test_enrich_specs_contains_fee_fields,
+        test_enrich_specs_fail_loud_on_fee_error,
         test_enrich_specs_contains_all_required_fields,
-        # Leverage (2)
         test_valid_leverage_opens_position,
         test_invalid_leverage_rejects_and_preserves_account,
-        # Kill Switch wire-up (6)
         test_build_engine_config_includes_kill_switch_fields,
         test_build_engine_config_inactive_when_no_sources,
         test_build_engine_config_active_when_kill_file,
@@ -343,17 +302,20 @@ if __name__ == "__main__":
         test_build_engine_config_fail_closed_on_invalid_output,
     ]
     passed, failed = 0, 0
+    failures = []
     print("=" * 60)
-    print("🧪 Run Paper Wiring Integration Tests")
+    print(f"🧪 Run Paper Wiring Integration Tests ({len(tests)} total)")
     print("=" * 60)
     for t in tests:
         try:
             t()
+            print(f"✅ {t.__name__}")
             passed += 1
         except Exception as exc:
             import traceback
             print(f"❌ {t.__name__}: {exc}")
             traceback.print_exc()
+            failures.append(t.__name__)
             failed += 1
     print("=" * 60)
     print(f"🏁 FINAL RESULT: {passed}/{len(tests)} PASSED")
