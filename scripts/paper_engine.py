@@ -1,6 +1,12 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
 
+v2.5 (B2 — Funding):
+  - منطق تسویه Funding (B2) اضافه شد.
+  - cashflow = -s * N * r (s=1 for LONG, -1 for SHORT)
+  - N = remaining_size * close_price * contract_multiplier
+  - last_funding_ts مانع از تسویه دوباره در یک زمان می‌شود.
+
 v2.4 (B1 — Commission):
   - در ENTRY: commission_usd = notional × open_taker_fee، کسر از equity
   - در TP1_HIT: commission_usd = notional × close_taker_fee، کسر از equity
@@ -9,12 +15,6 @@ v2.4 (B1 — Commission):
   - trade_net_pnl_usd = pnl_gross − total_commission_usd
   - daily_loss/weekly_loss روی net PnL (شامل همه‌ی commission)
   - DEFAULT_CONFIG با open_taker_fee=0 و close_taker_fee=0
-    (برای backward compat — در run_paper/run_backtest پر می‌شود)
-
-v2.4.1 (fix):
-  - close_position: equity فقط با final_commission کاهش می‌یابد
-    (entry_comm و tp1_comm قبلاً در زمان رخداد کسر شده‌اند).
-    daily_loss/weekly_loss همچنان روی pnl_net کامل کار می‌کند.
 
 Pure Python. No pandas/numpy.
 """
@@ -408,21 +408,6 @@ def manage_position_on_candle(pos, candle, atr_current, config):
 # ============================================================
 
 def close_position(state, pos, exit_price, specs, config):
-    """
-    بستن پوزیشن با کمیسیون خروج.
-
-    حسابداری:
-      - در entry، entry_commission از equity کسر شده
-      - در TP1، tp1_commission از equity کسر شده
-      - در این تابع، فقط final_commission از equity کسر می‌شود
-        (بقیه قبلاً کسر شده‌اند)
-      - daily_loss/weekly_loss روی pnl_net (شامل همه‌ی commission) اعمال می‌شود
-        تا محدودیت زیان، زیان واقعی خالص را ببیند
-
-    Returns:
-        dict با pnl_gross, final_commission, total_commission,
-        exit_price_adj, pnl_net
-    """
     side = pos["side"]
     entry = pos["entry_price"]
     remaining = pos["remaining_size"]
@@ -446,12 +431,9 @@ def close_position(state, pos, exit_price, specs, config):
 
     pnl_net = pnl_gross - total_comm
 
-    # ← اصلاح: فقط final_commission از equity کم می‌شود
-    #    (entry_comm و tp1_comm قبلاً کسر شده‌اند)
     pnl_for_equity = pnl_gross - final_commission
     state["equity"] += pnl_for_equity
 
-    # daily_loss/weekly_loss روی pnl_net کامل (شامل همه‌ی commission)
     if pnl_net < 0:
         loss = abs(pnl_net)
         state["daily_loss"] = state.get("daily_loss", 0.0) + loss
@@ -466,6 +448,51 @@ def close_position(state, pos, exit_price, specs, config):
         "exit_price_adj": exit_price_adj,
         "pnl_net": pnl_net,
     }
+
+
+# ============================================================
+# Funding (B2)
+# ============================================================
+
+def apply_funding_if_due(state, candle, specs, config, events):
+    """
+    منطق تسویه Funding بر اساس قرارداد B2.
+    اگر پوزیشن باز باشد و زمان تسویه فرا رسیده باشد:
+      cashflow = -s * N * r
+    """
+    current_ts = int(candle[0])
+    pos = state.get("position")
+    if not pos or pos.get("remaining_size", 0) <= 0:
+        return
+
+    # 8 ساعت = 28_800_000 میلی‌ثانیه
+    if current_ts % 28_800_000 != 0:
+        return
+
+    funding_rates = config.get("funding_rates", {})
+    if current_ts not in funding_rates:
+        raise ValueError(f"Missing funding rate for timestamp {current_ts}")
+
+    if state.get("last_funding_ts") == current_ts:
+        return  # Idempotency
+
+    rate = funding_rates[current_ts]
+    size = pos["remaining_size"]
+    close_price = float(candle[4])
+    mult = specs["contract_multiplier"]
+
+    notional = size * close_price * mult
+    s = 1 if pos["side"] == "LONG" else -1
+    cashflow = -s * notional * rate
+
+    state["equity"] += cashflow
+    state["last_funding_ts"] = current_ts
+
+    events.append({
+        "type": "FUNDING",
+        "cashflow_usd": cashflow,
+        "timestamp": current_ts,
+    })
 
 
 # ============================================================
@@ -486,6 +513,9 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
 
     position_closed = False
     if state.get("position") is not None:
+        # ⬇️ B2: اعمال Funding قبل از مدیریت پوزیشن (SL/TP)
+        apply_funding_if_due(state, candle, specs, config, events)
+
         atr_current = indicators["atr"][i]
         pos_after, pos_events, exited = manage_position_on_candle(
             state["position"], candle, atr_current, config,
@@ -629,6 +659,7 @@ DEFAULT_CONFIG = {
     "interval_ms": 3_600_000,
     "kill_switch_active": False,
     "kill_switch_reason": None,
+    "funding_rates": {},  # B2
 }
 
 DEFAULT_STATE = {
@@ -645,4 +676,5 @@ DEFAULT_STATE = {
     "loss_day_key": None,
     "loss_week_key": None,
     "circuit_breaker_active": False,
+    "last_funding_ts": None,  # B2
 }
