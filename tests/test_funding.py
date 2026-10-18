@@ -1,6 +1,17 @@
 """
 test_funding.py — Pre-implementation tests for B2 (Funding).
+
+قرارداد B2:
+  - Funding cashflow = -s * N * r
+  - s = 1 for LONG, -1 for SHORT
+  - N = remaining_size * price * contract_multiplier
+  - r = settleRate (can be + or -)
+  - Idempotency: state["last_funding_ts"] prevents double-counting.
+  - Funding rates are provided via config["funding_rates"] = {ts_ms: rate}
+
+⚠️ این تست‌ها پیش از پیاده‌سازی شکست می‌خورند.
 """
+
 import os
 import sys
 import copy
@@ -12,6 +23,7 @@ sys.path.insert(
 
 from paper_engine import process_candle, DEFAULT_CONFIG, DEFAULT_STATE
 
+
 SPECS = {
     "contract_multiplier": 0.001,
     "min_qty": 0.0001,
@@ -22,12 +34,16 @@ SPECS = {
     "max_leverage": 200.0,
 }
 
-TS_08 = 1_700_006_400_000
-TS_09 = TS_08 + 3_600_000
+# زمان‌های تسویه (08:00 UTC)
+TS_08 = 1_700_006_400_000  # یک timestamp فرضی
+TS_09 = TS_08 + 3_600_000  # یک ساعت بعد
+
 
 def _candle(ts, price=100.0):
-    # قیمت باز و بسته برابر است تا PnL صفر شود
-    return [ts, str(price), str(price+1), str(price-1), str(price), "1000"]
+    # ✅ اصلاح: قیمت‌های OHLC برابر شدند تا نوسان قیمت باعث فعال شدن
+    # ناخواسته SL/TP/Trailing و تغییر موجودی نشود. تست فقط Funding را می‌سنجد.
+    return [ts, str(price), str(price), str(price), str(price), "1000"]
+
 
 def _make_state(side="LONG", size=10.0, entry=100.0, last_funding_ts=None):
     state = copy.deepcopy(DEFAULT_STATE)
@@ -56,6 +72,7 @@ def _make_state(side="LONG", size=10.0, entry=100.0, last_funding_ts=None):
         }
     return state
 
+
 def _cfg(funding_rates=None):
     cfg = dict(DEFAULT_CONFIG)
     cfg["contract_multiplier_for_pnl"] = SPECS["contract_multiplier"]
@@ -63,116 +80,172 @@ def _cfg(funding_rates=None):
     return cfg
 
 
+# 1. نرخ مثبت، پوزیشن LONG (باید پرداخت کند)
 def test_funding_positive_long():
     state = _make_state("LONG", size=10.0)
+    # N = 10 * 100 * 0.001 = 1.0 USDT
+    # r = +0.01 (1%)
+    # Expected deduction = 1.0 * 0.01 = 0.01
     cfg = _cfg({TS_08: 0.01})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
+
     assert abs(new_state["equity"] - (1000.0 - 0.01)) < 1e-9, f"Expected equity 999.99, got {new_state['equity']}"
     f_events = [e for e in events if e["type"] == "FUNDING"]
-    assert len(f_events) == 1
-    assert abs(f_events[0]["cashflow_usd"] - (-0.01)) < 1e-9
+    assert len(f_events) == 1, f"Expected 1 FUNDING event, got {len(f_events)}"
+    assert abs(f_events[0]["cashflow_usd"] - (-0.01)) < 1e-9, f"Expected cashflow -0.01, got {f_events[0]['cashflow_usd']}"
 
 
+# 2. نرخ مثبت، پوزیشن SHORT (باید دریافت کند)
 def test_funding_positive_short():
     state = _make_state("SHORT", size=10.0)
     cfg = _cfg({TS_08: 0.01})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
+
     assert abs(new_state["equity"] - (1000.0 + 0.01)) < 1e-9, f"Expected equity 1000.01, got {new_state['equity']}"
+    f_events = [e for e in events if e["type"] == "FUNDING"]
+    assert len(f_events) == 1, f"Expected 1 FUNDING event, got {len(f_events)}"
+    assert abs(f_events[0]["cashflow_usd"] - 0.01) < 1e-9, f"Expected cashflow 0.01, got {f_events[0]['cashflow_usd']}"
 
 
+# 3. نرخ منفی، پوزیشن LONG (باید دریافت کند)
 def test_funding_negative_long():
     state = _make_state("LONG", size=10.0)
     cfg = _cfg({TS_08: -0.01})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
+
     assert abs(new_state["equity"] - (1000.0 + 0.01)) < 1e-9, f"Expected equity 1000.01, got {new_state['equity']}"
+    f_events = [e for e in events if e["type"] == "FUNDING"]
+    assert abs(f_events[0]["cashflow_usd"] - 0.01) < 1e-9, f"Expected cashflow 0.01, got {f_events[0]['cashflow_usd']}"
 
 
+# 4. نرخ منفی، پوزیشن SHORT (باید پرداخت کند)
 def test_funding_negative_short():
     state = _make_state("SHORT", size=10.0)
     cfg = _cfg({TS_08: -0.01})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
+
     assert abs(new_state["equity"] - (1000.0 - 0.01)) < 1e-9, f"Expected equity 999.99, got {new_state['equity']}"
+    f_events = [e for e in events if e["type"] == "FUNDING"]
+    assert abs(f_events[0]["cashflow_usd"] - (-0.01)) < 1e-9, f"Expected cashflow -0.01, got {f_events[0]['cashflow_usd']}"
 
 
+# 5. نرخ صفر
 def test_funding_zero_rate():
     state = _make_state("LONG", size=10.0)
     cfg = _cfg({TS_08: 0.0})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     new_state, _ = process_candle(state, klines, indicators, 0, SPECS, cfg)
+
     assert abs(new_state["equity"] - 1000.0) < 1e-9, f"Expected equity 1000.0, got {new_state['equity']}"
 
 
+# 6. بدون پوزیشن
 def test_funding_no_position():
     state = _make_state(side=None)
     cfg = _cfg({TS_08: 0.01})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
-    assert abs(new_state["equity"] - 1000.0) < 1e-9
-    assert len([e for e in events if e["type"] == "FUNDING"]) == 0
+
+    assert abs(new_state["equity"] - 1000.0) < 1e-9, f"Expected equity 1000.0, got {new_state['equity']}"
+    assert len([e for e in events if e["type"] == "FUNDING"]) == 0, "Expected no FUNDING events"
 
 
+# 7. پوزیشن بسته شده (نباید اعمال شود)
 def test_funding_position_closed():
     state = _make_state("LONG", size=10.0)
+    # SL را طوری تنظیم می‌کنیم که کندل آن را بزند
     state["position"]["current_sl"] = 95.0
     cfg = _cfg({TS_08: 0.01})
+    # ✅ توجه: این تست کندل اختصاصی خودش را دارد و از _candle استفاده نمی‌کند
+    # چون هدف این تست شبیه‌سازی یک کندل نزولی است که SL را فعال کند.
     klines = [[TS_08, "100", "101", "90", "95", "1000"]]
     indicators = {"atr": [1.0]}
+
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
-    assert new_state["position"] is None, "Position should be closed"
+
+    # پوزیشن باید بسته شده باشد
+    assert new_state["position"] is None, "Position should be closed (None)"
+    # و هیچ funding اعمال نشده باشد (چون موقعیت قبل از تسویه بسته شده)
     assert len([e for e in events if e["type"] == "FUNDING"]) == 0, "Expected no FUNDING events after closure"
 
 
+# 8. تغییر ارزش اسمی با تغییر قیمت
 def test_funding_dynamic_notional():
     state = _make_state("LONG", size=10.0, entry=100.0)
+    # N در لحظه تسویه = 10 * 110 * 0.001 = 1.1 USDT
+    # r = +0.01 → پرداخت = 0.011
     cfg = _cfg({TS_08: 0.01})
     klines = [_candle(TS_08, price=110.0)]
     indicators = {"atr": [1.0]}
+
     new_state, _ = process_candle(state, klines, indicators, 0, SPECS, cfg)
+
     assert abs(new_state["equity"] - (1000.0 - 0.011)) < 1e-9, f"Expected equity 999.989, got {new_state['equity']}"
 
 
+# 9. تکرارناپذیری (اجرای مجدد همان timestamp)
 def test_funding_idempotency():
     state = _make_state("LONG", size=10.0)
     cfg = _cfg({TS_08: 0.01})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     state, _ = process_candle(state, klines, indicators, 0, SPECS, cfg)
-    assert abs(state["equity"] - 999.99) < 1e-9
-    assert state.get("last_funding_ts") == TS_08
+    # equity الان 999.99 است
+    assert abs(state["equity"] - 999.99) < 1e-9, f"Step 1: Expected equity 999.99, got {state['equity']}"
+    assert state.get("last_funding_ts") == TS_08, f"Expected last_funding_ts to be {TS_08}, got {state.get('last_funding_ts')}"
+
+    # اجرای مجدد همان کندل
     new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
-    assert abs(new_state["equity"] - 999.99) < 1e-9
-    assert len([e for e in events if e["type"] == "FUNDING"]) == 0
+
+    # نباید دوباره کسر شود
+    assert abs(new_state["equity"] - 999.99) < 1e-9, f"Step 2: Expected equity 999.99, got {new_state['equity']}"
+    assert len([e for e in events if e["type"] == "FUNDING"]) == 0, "Expected no FUNDING events on duplicate call"
 
 
+# 10. نبود نرخ تاریخی (باید خطا بدهد، نه فرض صفر)
 def test_funding_missing_rate_fails_loud():
     state = _make_state("LONG", size=10.0)
-    cfg = _cfg({})
+    cfg = _cfg({})  # دیکشنری خالی، انتظار می‌رود خطا بدهد
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+
     try:
         process_candle(state, klines, indicators, 0, SPECS, cfg)
         assert False, "Expected exception due to missing funding rate"
     except Exception as e:
-        assert "funding" in str(e).lower() or "rate" in str(e).lower()
+        # بررسی می‌کنیم که خطای مربوط به Funding باشد
+        assert "funding" in str(e).lower() or "rate" in str(e).lower(), f"Expected funding rate error, got {str(e)}"
 
 
 if __name__ == "__main__":
     tests = [
-        test_funding_positive_long, test_funding_positive_short,
-        test_funding_negative_long, test_funding_negative_short,
-        test_funding_zero_rate, test_funding_no_position,
-        test_funding_position_closed, test_funding_dynamic_notional,
-        test_funding_idempotency, test_funding_missing_rate_fails_loud,
+        test_funding_positive_long,
+        test_funding_positive_short,
+        test_funding_negative_long,
+        test_funding_negative_short,
+        test_funding_zero_rate,
+        test_funding_no_position,
+        test_funding_position_closed,
+        test_funding_dynamic_notional,
+        test_funding_idempotency,
+        test_funding_missing_rate_fails_loud,
     ]
     passed, failed = 0, 0
     print("=" * 60)
