@@ -1,31 +1,10 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-
-v2.5 (B2 — Funding):
-  - منطق تسویه Funding (B2) اضافه شد.
-  - cashflow = -s * N * r (s=1 for LONG, -1 for SHORT)
-  - N = remaining_size * close_price * contract_multiplier
-  - last_funding_ts مانع از تسویه دوباره در یک زمان می‌شود.
-
-v2.4 (B1 — Commission):
-  - در ENTRY: commission_usd = notional × open_taker_fee، کسر از equity
-  - در TP1_HIT: commission_usd = notional × close_taker_fee، کسر از equity
-  - در EXIT: commission_usd = notional × close_taker_fee
-  - total_commission_usd در EXIT = entry + tp1 + final
-  - trade_net_pnl_usd = pnl_gross − total_commission_usd
-  - daily_loss/weekly_loss روی net PnL (شامل همه‌ی commission)
-  - DEFAULT_CONFIG با open_taker_fee=0 و close_taker_fee=0
-
-Pure Python. No pandas/numpy.
 """
 
 import copy
 from decimal import Decimal, ROUND_DOWN
 
-
-# ============================================================
-# Helpers
-# ============================================================
 
 def floor_to_step(value: float, step: float) -> float:
     if step <= 0:
@@ -122,10 +101,6 @@ def calculate_position_size(equity, entry_price, stop_loss, specs,
     return qty
 
 
-# ============================================================
-# Calendar / Risk Helpers
-# ============================================================
-
 def _day_key(ts_ms):
     return ts_ms // 86_400_000
 
@@ -158,10 +133,6 @@ def current_total_drawdown(state):
         return 0.0
     return max(0.0, (peak - state["equity"]) / peak)
 
-
-# ============================================================
-# Entry
-# ============================================================
 
 def execute_pending_entry(state, candle, specs, config):
     events = []
@@ -221,7 +192,6 @@ def execute_pending_entry(state, candle, specs, config):
         state["pending_entry"] = None
         return state, events
 
-    # ---- Commission entry (B1) ----
     multiplier = specs["contract_multiplier"]
     entry_notional = qty * entry_price * multiplier
     entry_commission = entry_notional * config.get("open_taker_fee", 0.0)
@@ -246,7 +216,6 @@ def execute_pending_entry(state, candle, specs, config):
         "candles_since_entry": 0,
         "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
-        # B1: commission accumulator
         "commission_paid_usd": entry_commission,
     }
     state["pending_entry"] = None
@@ -265,10 +234,6 @@ def execute_pending_entry(state, candle, specs, config):
     return state, events
 
 
-# ============================================================
-# Position Management
-# ============================================================
-
 def manage_position_on_candle(pos, candle, atr_current, config):
     side = pos["side"]
     h = float(candle[2])
@@ -283,7 +248,6 @@ def manage_position_on_candle(pos, candle, atr_current, config):
     p = copy.deepcopy(pos)
     events = []
 
-    # SL FIRST
     sl_hit = (
         (side == "LONG" and l <= p["current_sl"]) or
         (side == "SHORT" and h >= p["current_sl"])
@@ -307,13 +271,11 @@ def manage_position_on_candle(pos, candle, atr_current, config):
         })
         return p, events, True
 
-    # Update excursion
     if side == "LONG":
         p["highest_high_since_entry"] = max(p["highest_high_since_entry"], h)
     else:
         p["lowest_low_since_entry"] = min(p["lowest_low_since_entry"], l)
 
-    # BE
     if not p["be_moved"]:
         risk_distance = abs(p["entry_price"] - p["initial_sl"])
         r_mult = config["be_trigger_at_r"]
@@ -342,7 +304,6 @@ def manage_position_on_candle(pos, candle, atr_current, config):
                 "timestamp": ts,
             })
 
-    # TP1 = 50% realized (B1: with commission)
     if not p["tp1_hit"] and tp1_hit_this_candle:
         tp1_size = p["size"] * 0.5
         dir_sign = 1 if side == "LONG" else -1
@@ -376,7 +337,6 @@ def manage_position_on_candle(pos, candle, atr_current, config):
             "timestamp": ts,
         })
 
-    # Trailing
     if p["tp1_hit"]:
         p["trailing_active"] = True
         trailing_distance = config["trailing_atr_mult"] * atr_current
@@ -387,7 +347,6 @@ def manage_position_on_candle(pos, candle, atr_current, config):
             new_sl = p["lowest_low_since_entry"] + trailing_distance
             p["current_sl"] = min(p["current_sl"], new_sl)
 
-    # Time Exit
     p["candles_since_entry"] += 1
     if p["candles_since_entry"] >= config["time_exit_candles"]:
         events.append({
@@ -402,10 +361,6 @@ def manage_position_on_candle(pos, candle, atr_current, config):
 
     return p, events, False
 
-
-# ============================================================
-# Close Position (B1 — با اصلاح حسابداری)
-# ============================================================
 
 def close_position(state, pos, exit_price, specs, config):
     side = pos["side"]
@@ -450,23 +405,17 @@ def close_position(state, pos, exit_price, specs, config):
     }
 
 
-# ============================================================
-# Funding (B2)
-# ============================================================
-
 def apply_funding_if_due(state, candle, specs, config, events):
-    """
-    منطق تسویه Funding بر اساس قرارداد B2.
-    اگر پوزیشن باز باشد و زمان تسویه فرا رسیده باشد:
-      cashflow = -s * N * r
-    """
     current_ts = int(candle[0])
     pos = state.get("position")
+    
     if not pos or pos.get("remaining_size", 0) <= 0:
         return
 
-    # 8 ساعت = 28_800_000 میلی‌ثانیه
     if current_ts % 28_800_000 != 0:
+        return
+
+    if "funding_rates" not in config:
         return
 
     funding_rates = config.get("funding_rates", {})
@@ -474,7 +423,7 @@ def apply_funding_if_due(state, candle, specs, config, events):
         raise ValueError(f"Missing funding rate for timestamp {current_ts}")
 
     if state.get("last_funding_ts") == current_ts:
-        return  # Idempotency
+        return
 
     rate = funding_rates[current_ts]
     size = pos["remaining_size"]
@@ -495,10 +444,6 @@ def apply_funding_if_due(state, candle, specs, config, events):
     })
 
 
-# ============================================================
-# Main Candle Processor
-# ============================================================
-
 def process_candle(state, klines, indicators, i, specs, config, signal=None):
     state = copy.deepcopy(state)
     events = []
@@ -513,16 +458,16 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
 
     position_closed = False
     if state.get("position") is not None:
-        # ⬇️ B2: اعمال Funding قبل از مدیریت پوزیشن (SL/TP)
-        apply_funding_if_due(state, candle, specs, config, events)
-
         atr_current = indicators["atr"][i]
         pos_after, pos_events, exited = manage_position_on_candle(
             state["position"], candle, atr_current, config,
         )
+
+        if not exited:
+            apply_funding_if_due(state, candle, specs, config, events)
+
         events.extend(pos_events)
 
-        # B1: TP1 commission — کسر از equity
         for ev in pos_events:
             if ev["type"] == "TP1_HIT" and "commission_usd" in ev:
                 state["equity"] -= ev["commission_usd"]
@@ -546,7 +491,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
         else:
             state["position"] = pos_after
 
-    # Circuit breakers
     if not state.get("circuit_breaker_active", False):
         if state["daily_loss"] >= state["initial_equity"] * config["daily_loss_limit"]:
             state["circuit_breaker_active"] = True
@@ -618,10 +562,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None):
     return state, events
 
 
-# ============================================================
-# Run Engine
-# ============================================================
-
 def run_engine(klines, indicators, signals, initial_state, specs, config, start_index=0):
     state = copy.deepcopy(initial_state)
     all_events = []
@@ -636,10 +576,6 @@ def run_engine(klines, indicators, signals, initial_state, specs, config, start_
         all_events.extend(events)
     return state, all_events
 
-
-# ============================================================
-# Defaults
-# ============================================================
 
 DEFAULT_CONFIG = {
     "risk_per_trade": 0.01,
@@ -659,7 +595,6 @@ DEFAULT_CONFIG = {
     "interval_ms": 3_600_000,
     "kill_switch_active": False,
     "kill_switch_reason": None,
-    "funding_rates": {},  # B2
 }
 
 DEFAULT_STATE = {
@@ -676,5 +611,5 @@ DEFAULT_STATE = {
     "loss_day_key": None,
     "loss_week_key": None,
     "circuit_breaker_active": False,
-    "last_funding_ts": None,  # B2
+    "last_funding_ts": None,
 }
