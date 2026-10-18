@@ -1,0 +1,88 @@
+name: Run All Project Tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  core-and-probes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python tests/test_data_feed.py
+      - run: python tests/test_binance_feed.py
+      - run: python tests/test_indicators.py
+      - run: python tests/test_probe_history.py
+      - run: python tests/test_probe_known_gaps.py
+
+  strategy-and-hash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python tests/test_strategy.py
+      - run: python tests/test_strategy_config.py
+      - run: python tests/test_compute_hash.py
+      - run: python tests/test_hash_regression.py
+      - run: python tests/test_strategy_hash_contract.py
+      - run: python tests/test_state_hash_strict.py
+
+  paper-and-commission:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python tests/test_paper_engine.py
+      - run: python tests/test_commission.py
+      - run: python tests/test_run_paper_wiring.py
+      - run: python tests/test_paper_catchup.py
+      - run: python tests/test_paper_state_manager.py
+
+  execution-and-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python tests/test_signal_to_order.py
+      - run: python tests/test_order_executor.py
+      - run: python tests/test_execution_chain.py
+      - run: python tests/test_kill_switch.py
+      - run: python tests/test_state_manager.py
+
+  backtest-and-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python tests/test_backtest.py
+      - run: python tests/test_chain_integration.py
+      - run: python tests/test_strategy_to_execution.py
+      - run: python tests/test_performance.py
+
+  reconciler-and-status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python tests/test_reconciler.py
+      - run: python tests/test_reconcile_with_data.py
+      - run: python tests/test_paper_status.py
+      - run: python tests/test_nan_validation.py
