@@ -14,12 +14,6 @@ test_reconciler.py — Unit tests for reconciler.py.
   - gap دقیقاً 1 کندل → OK (boundary)
   - read-only guarantee
   - deterministic (کل output)
-
-قراردادها که تست بر پایه‌ی آن‌ها ساخته شده:
-  - GAP_WARNING_THRESHOLD = 2 (missing >= 2 → WARNING)
-  - missing = (delta // interval_ms) - 1
-  - state["strategy_hash"] توسط default_state() ست می‌شود
-  - now_ms در reconciler نسبی است (نه time.time())
 """
 
 import os
@@ -67,10 +61,6 @@ def _fake_klines(n, start_ts=BASE_TS, interval_ms=INTERVAL_MS):
 
 
 def _valid_state(lpct):
-    """
-    state معتبر.
-    default_state() خودش strategy_hash را با compute_strategy_hash() ست می‌کند.
-    """
     s = default_state(1000.0)
     s["symbol"] = "BTC-SWAP-USDT"
     s["last_processed_candle_ts"] = lpct
@@ -112,8 +102,6 @@ def test_state_missing_returns_error():
         assert chk is not None
         assert chk["ok"] is False
         assert chk["level"] == "error"
-
-        # چون state نیست، فقط همین یک check اجرا می‌شود
         assert len(result["checks"]) == 1
         print("✅ test_state_missing_returns_error")
     finally:
@@ -172,10 +160,6 @@ def test_hash_mismatch_returns_error():
 # ============================================================
 
 def test_hash_valid_explicit():
-    """
-    صراحت: مطمئن شو state["strategy_hash"] دقیقاً
-    compute_strategy_hash() است.
-    """
     state = _valid_state(BASE_TS)
     assert state["strategy_hash"] == compute_strategy_hash(), (
         f"state hash not aligned with project hash. "
@@ -191,12 +175,10 @@ def test_hash_valid_explicit():
 def test_valid_state_returns_ok():
     d = _tmp_dir()
     try:
-        # gap=0: lpct = last_candle_ts
         klines = _fake_klines(MIN_KLINES)
         lpct = klines[-1][0]
         state = _valid_state(lpct)
 
-        # صراحت: hash درست است
         assert state["strategy_hash"] == compute_strategy_hash()
 
         save_state(d, state)
@@ -234,7 +216,6 @@ def test_last_processed_none_returns_warning():
         assert chk["ok"] is False
         assert chk["level"] == "warning"
 
-        # هیچ خطای واقعی نباید باشد
         errs = _errors(result)
         assert errs == [], f"unexpected errors: {errs}"
         print("✅ test_last_processed_none_returns_warning")
@@ -250,7 +231,6 @@ def test_last_processed_future_returns_error():
     d = _tmp_dir()
     try:
         klines = _fake_klines(MIN_KLINES)
-        # مقدار نسبی، بدون hardcode
         future_lpct = klines[-1][0] + 1000 * INTERVAL_MS
         save_state(d, _valid_state(future_lpct))
 
@@ -275,7 +255,6 @@ def test_last_processed_future_returns_error():
 def test_insufficient_klines_triggers_warning_only():
     d = _tmp_dir()
     try:
-        # MIN_KLINES - 1 → دقیقاً یکی کمتر از آستانه
         n = MIN_KLINES - 1
         klines = _fake_klines(n)
         save_state(d, _valid_state(klines[-1][0]))
@@ -302,17 +281,6 @@ def test_insufficient_klines_triggers_warning_only():
 # ============================================================
 
 def test_gap_of_2_triggers_warning():
-    """
-    قرارداد واقعی reconciler:
-      missing = (delta // interval_ms) - 1
-      if missing >= GAP_WARNING_THRESHOLD(2): WARNING
-
-    طراحی:
-      lpct = T0
-      last_candle_ts = T0 + 3*interval
-      delta = 3*interval
-      missing = 3 - 1 = 2  →  WARNING
-    """
     d = _tmp_dir()
     try:
         lpct = BASE_TS
@@ -320,10 +288,7 @@ def test_gap_of_2_triggers_warning():
         first_ts = last_candle_ts - (MIN_KLINES - 1) * INTERVAL_MS
         klines = _fake_klines(MIN_KLINES, start_ts=first_ts)
 
-        # sanity
-        assert klines[-1][0] == last_candle_ts, (
-            f"setup error: last={klines[-1][0]} expected={last_candle_ts}"
-        )
+        assert klines[-1][0] == last_candle_ts
 
         save_state(d, _valid_state(lpct))
 
@@ -349,12 +314,6 @@ def test_gap_of_2_triggers_warning():
 # ============================================================
 
 def test_gap_of_1_does_not_trigger_warning():
-    """
-    lpct = T0
-    last_candle_ts = T0 + 2*interval
-    delta = 2*interval
-    missing = 2 - 1 = 1  < GAP_WARNING_THRESHOLD(2)  →  OK
-    """
     d = _tmp_dir()
     try:
         lpct = BASE_TS
@@ -382,7 +341,6 @@ def test_gap_of_1_does_not_trigger_warning():
 # ============================================================
 
 def test_read_only_guarantee():
-    """reconciler نباید state.json یا events.jsonl را تغییر دهد."""
     d = _tmp_dir()
     try:
         klines = _fake_klines(MIN_KLINES)
@@ -415,26 +373,28 @@ def test_read_only_guarantee():
 
 
 # ============================================================
-# 12. Deterministic — کل output
+# 12. Deterministic — کل output (✅ اصلاح نهایی)
 # ============================================================
 
 def test_deterministic_full_output():
     """
     همان ورودی → همان خروجی کامل.
-    چون reconciler از time.time() استفاده نمی‌کند و
-    now_ms نسبی از klines محاسبه می‌شود، detail strings
-    هم باید یکسان باشند.
+    برای جلوگیری از خطای اختلاف ۱ میلی‌ثانیه‌ای time.time()،
+    زمان سیستم را در طول این تست Freeze (قفل) می‌کنیم.
     """
     d = _tmp_dir()
     try:
         klines = _fake_klines(MIN_KLINES)
         save_state(d, _valid_state(klines[-1][0]))
 
-        with patch("reconciler.fetch_klines", return_value=klines):
+        # ✅ زمان سیستم را قفل می‌کنیم تا هر دو اجرا دقیقاً یک زمان را ببینند
+        FIXED_TIME = 1792361817115
+        with patch("reconciler.fetch_klines", return_value=klines), \
+             patch("time.time", return_value=FIXED_TIME / 1000.0):
+            
             r1 = reconcile_public(d, "BTC-SWAP-USDT", "1h")
             r2 = reconcile_public(d, "BTC-SWAP-USDT", "1h")
 
-        # کل output باید یکسان باشد
         assert r1 == r2, (
             f"outputs differ:\n r1={r1}\n r2={r2}"
         )
