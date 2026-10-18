@@ -1,0 +1,27 @@
+name: Catchup and NaN Tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  paper_catchup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Run catchup tests
+        run: python tests/test_paper_catchup.py
+
+  nan_validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Run nan validation tests
+        run: python tests/test_nan_validation.py
