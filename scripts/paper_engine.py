@@ -1,5 +1,9 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
+
+v2.5.3 (B2 — Final Funding Fix):
+  - منطق Funding به صورت دقیق پیاده‌سازی شد.
+  - ترتیب اجرای Funding و مدیریت پوزیشن اصلاح شد.
 """
 
 import copy
