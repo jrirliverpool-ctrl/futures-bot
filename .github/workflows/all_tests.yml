@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  core-and-probes:
+  core-data-probes:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +43,7 @@ jobs:
       - run: pip install requests
       - run: python tests/test_paper_engine.py
       - run: python tests/test_commission.py
+      - run: python tests/test_funding.py
       - run: python tests/test_run_paper_wiring.py
       - run: python tests/test_paper_catchup.py
       - run: python tests/test_paper_state_manager.py
