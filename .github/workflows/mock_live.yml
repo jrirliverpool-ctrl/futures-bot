@@ -2,8 +2,8 @@ name: ApexQuant Mock Live Runner
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '0 * * * *'
+  schedule:
+    - cron: '0 * * * *' # ✅ اجرای خودکار در دقیقه 0 هر ساعت (UTC)
 
 permissions:
   contents: write
@@ -46,18 +46,18 @@ jobs:
         run: python scripts/run_mock_live.py
 
       - name: Commit State Updates
-        if: always() # ✅ اجرا حتی در صورت شکست (برای ذخیره وضعیت failed در paper_status.json)
+        if: always() # اجرا حتی در صورت شکست موتور برای ذخیره وضعیت failed
         run: |
           set -e
           
           git config user.name "ApexQuant Bot"
           git config user.email "bot@apexquant.local"
 
-          # اضافه کردن تمام تغییرات در پوشه
+          # اضافه کردن تمام تغییرات در پوشه (شامل paper_status.json)
           git add -f -A -- paper_state_dir/
           
           if ! git diff --staged --quiet; then
-            git commit -m "chore: update mock live state [skip ci]"
+            git commit -m "chore: auto-update mock live state [skip ci]"
             git pull --rebase origin main
             git push origin HEAD:main
           else
