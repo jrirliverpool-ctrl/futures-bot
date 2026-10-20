@@ -1,0 +1,67 @@
+name: ApexQuant Mock Live Runner
+
+on:
+  # ⚠️ در گام اول، فقط اجرای دستی را فعال می‌کنیم
+  # پس از موفقیت تست‌های دستی، خط cron را از کامنت خارج کنید.
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '0 * * * *'
+
+permissions:
+  contents: write
+
+# ✅ جلوگیری از اجرای همزمان (Race Condition)
+concurrency:
+  group: apexquant-mock-live
+  cancel-in-progress: false
+
+jobs:
+  run-mock-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # جلوگیری از معلق ماندن ورک‌فلو
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest
+          # اگر فایل requirements.txt دارید، خط زیر را از کامنت خارج کنید
+          # pip install -r requirements.txt
+
+      - name: Run Mock Live Engine
+        env:
+          STATE_DIR: ./paper_state_dir
+          SYMBOL: BTC-SWAP-USDT
+          INTERVAL: 1h
+        run: python scripts/run_mock_live.py
+
+      - name: Commit State Updates
+        # ✅ فقط در صورت موفقیت اسکریپت، وضعیت را ذخیره کن
+        if: success()
+        run: |
+          git config user.name "ApexQuant Bot"
+          git config user.email "bot@apexquant.local"
+
+          # اضافه کردن فایل‌های وضعیت (بدون استفاده از -f برای جلوگیری از کامیت ناخواسته)
+          git add paper_state_dir/state.json
+          
+          # اگر فایل رویدادها وجود دارد، آن را هم اضافه کن
+          if [ -f paper_state_dir/events.jsonl ]; then
+            git add paper_state_dir/events.jsonl
+          fi
+
+          # اگر تغییری وجود داشت، کامیت و پوش کن
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update mock live state [skip ci]"
+            git push
+          else
+            echo "No state changes to commit."
+          fi
