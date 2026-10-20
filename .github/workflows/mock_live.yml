@@ -1,7 +1,6 @@
 name: ApexQuant Mock Live Runner
 
 on:
-  # ⚠️ در گام اول، فقط اجرای دستی را فعال می‌کنیم
   workflow_dispatch:
   # schedule:
   #   - cron: '0 * * * *'
@@ -21,6 +20,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # برای انجام صحیح rebase
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,10 +43,12 @@ jobs:
       - name: Commit State Updates
         if: success()
         run: |
+          set -e  # ✅ توقف در صورت بروز هر خطایی
+          
           git config user.name "ApexQuant Bot"
           git config user.email "bot@apexquant.local"
 
-          # ✅ اصلاح: استفاده از -f برای عبور از .gitignore
+          test -f paper_state_dir/state.json
           git add -f paper_state_dir/state.json
           
           if [ -f paper_state_dir/events.jsonl ]; then
@@ -54,9 +57,9 @@ jobs:
 
           if ! git diff --staged --quiet; then
             git commit -m "chore: update mock live state [skip ci]"
-            # ✅ کشیدن تغییرات احتمالی دیگران قبل از پوش (جلوگیری از تداخل)
-            git pull --rebase origin main || true
-            git push
+            # ✅ کشیدن تغییرات و rebase، بدون نادیده گرفتن خطا
+            git pull --rebase origin main
+            git push origin HEAD:main
           else
             echo "No state changes to commit."
           fi
