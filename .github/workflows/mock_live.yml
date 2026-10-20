@@ -2,7 +2,6 @@ name: ApexQuant Mock Live Runner
 
 on:
   # ⚠️ در گام اول، فقط اجرای دستی را فعال می‌کنیم
-  # پس از موفقیت تست‌های دستی، خط cron را از کامنت خارج کنید.
   workflow_dispatch:
   # schedule:
   #   - cron: '0 * * * *'
@@ -10,7 +9,6 @@ on:
 permissions:
   contents: write
 
-# ✅ جلوگیری از اجرای همزمان (Race Condition)
 concurrency:
   group: apexquant-mock-live
   cancel-in-progress: false
@@ -18,7 +16,7 @@ concurrency:
 jobs:
   run-mock-live:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # جلوگیری از معلق ماندن ورک‌فلو
+    timeout-minutes: 10
 
     steps:
       - name: Checkout Code
@@ -33,8 +31,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install requests pytest
-          # اگر فایل requirements.txt دارید، خط زیر را از کامنت خارج کنید
-          # pip install -r requirements.txt
 
       - name: Run Mock Live Engine
         env:
@@ -44,23 +40,22 @@ jobs:
         run: python scripts/run_mock_live.py
 
       - name: Commit State Updates
-        # ✅ فقط در صورت موفقیت اسکریپت، وضعیت را ذخیره کن
         if: success()
         run: |
           git config user.name "ApexQuant Bot"
           git config user.email "bot@apexquant.local"
 
-          # اضافه کردن فایل‌های وضعیت (بدون استفاده از -f برای جلوگیری از کامیت ناخواسته)
-          git add paper_state_dir/state.json
+          # ✅ اصلاح: استفاده از -f برای عبور از .gitignore
+          git add -f paper_state_dir/state.json
           
-          # اگر فایل رویدادها وجود دارد، آن را هم اضافه کن
           if [ -f paper_state_dir/events.jsonl ]; then
-            git add paper_state_dir/events.jsonl
+            git add -f paper_state_dir/events.jsonl
           fi
 
-          # اگر تغییری وجود داشت، کامیت و پوش کن
           if ! git diff --staged --quiet; then
             git commit -m "chore: update mock live state [skip ci]"
+            # ✅ کشیدن تغییرات احتمالی دیگران قبل از پوش (جلوگیری از تداخل)
+            git pull --rebase origin main || true
             git push
           else
             echo "No state changes to commit."
