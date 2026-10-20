@@ -1,5 +1,5 @@
 """
-toobit_client.py — Secure API Client for Toobit Futures.
+toobit_client.py — Secure API Client for Toobit Futures (Supports Demo/Live).
 """
 import time
 import hmac
@@ -44,14 +44,10 @@ class ToobitClient:
             else:
                 response = self.session.post(url, data=params, timeout=10)
                 
-            # اعتبارسنجی کد HTTP
             if response.status_code != 200:
                 return {"error": f"HTTP {response.status_code}", "status": "NETWORK_ERROR"}
             
             data = response.json()
-            
-            # اعتبارسنجی ساختار پاسخ (فرض بر اساس استاندارد صرافی‌ها)
-            # اگر کد خطای تجاری وجود داشت، آن را برگردان
             if data.get("code") != 200 and data.get("code") != 0 and "code" in data:
                 return {"error": data.get("msg", "Unknown API Error"), "status": "API_ERROR", "raw": data}
                 
@@ -79,6 +75,3 @@ class ToobitClient:
             params["newClientOrderId"] = client_order_id
             
         return self._request("POST", "/api/v1/futures/order", params)
-        
-    def get_order_status(self, symbol: str, client_order_id: str):
-        return self._request("GET", "/api/v1/futures/order", {"symbol": symbol, "origClientOrderId": client_order_id})
