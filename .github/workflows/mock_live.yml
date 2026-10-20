@@ -16,12 +16,14 @@ jobs:
   run-mock-live:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # ✅ ۱. محدودیت شاخه: فقط در main اجرا می‌شود
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # برای انجام صحیح rebase
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,6 +35,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pytest
 
+      # ✅ ۲. اجرای تست‌های ایمنی قبل از موتور
+      - name: Run Safety Tests
+        run: |
+          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py
+
       - name: Run Mock Live Engine
         env:
           STATE_DIR: ./paper_state_dir
@@ -43,21 +50,24 @@ jobs:
       - name: Commit State Updates
         if: success()
         run: |
-          set -e  # ✅ توقف در صورت بروز هر خطایی
+          set -e
           
           git config user.name "ApexQuant Bot"
           git config user.email "bot@apexquant.local"
 
+          # بررسی وجود فایل
           test -f paper_state_dir/state.json
+          
+          # اضافه کردن فایل‌ها به صورت اجباری (چون در gitignore هستند)
           git add -f paper_state_dir/state.json
           
           if [ -f paper_state_dir/events.jsonl ]; then
             git add -f paper_state_dir/events.jsonl
           fi
 
+          # اگر تغییری وجود دارد، کامیت و پوش کن
           if ! git diff --staged --quiet; then
             git commit -m "chore: update mock live state [skip ci]"
-            # ✅ کشیدن تغییرات و rebase، بدون نادیده گرفتن خطا
             git pull --rebase origin main
             git push origin HEAD:main
           else
