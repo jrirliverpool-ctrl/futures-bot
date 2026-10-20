@@ -1,5 +1,6 @@
 """
 execution_manager.py — Safe Execution Layer.
+Modes: PAPER, MOCK_LIVE, TOOBIT_DEMO, LIVE.
 """
 import uuid
 import logging
@@ -18,11 +19,12 @@ class ExecutionManager:
         if config is None:
             config = DEFAULT_CONFIG
 
-        # ✅ اگر سفارش نامشخصی وجود دارد، هیچ سفارش جدیدی ارسال نکن
+        # ✅ ۱. توقف کامل در صورت وجود سفارش با وضعیت نامشخص
         if state.get("order_status") == "UNKNOWN":
+            self.logger.critical("HALT: Ambiguous order exists. Manual intervention required.")
             return Decision(accepted=False, reason="ambiguous_order_halt", gate="safety", order=None)
 
-        # ✅ ۱. بررسی Kill Switch با در نظر گرفتن EXIT
+        # ✅ ۲. بررسی Kill Switch (با اجازه خروج اضطراری)
         ks_state = state.get("kill_switch", False) or state.get("circuit_breaker_active", False)
         ks_config = config.get("kill_switch_active", False)
         
@@ -32,24 +34,26 @@ class ExecutionManager:
             else:
                 return Decision(accepted=False, reason="kill_switch_active", gate="safety", order=None)
 
-        # ✅ ۲. اعتبارسنجی با order_executor
+        # ✅ ۳. اعتبارسنجی با order_executor
         decision = evaluate(req, specs, state, config, ref_price)
         if not decision.accepted:
             self.logger.warning(f"Order Rejected: {decision.gate} - {decision.reason}")
             return decision
 
-        # ✅ ۳. مدیریت شناسه سفارش
+        # ✅ ۴. مدیریت شناسه سفارش
         client_order_id = state.get("pending_order_id")
         if not client_order_id:
             client_order_id = f"apex_{uuid.uuid4().hex[:12]}"
             state["pending_order_id"] = client_order_id
 
+        # ✅ ۵. اجرا بر اساس حالت
         if self.mode == "PAPER":
             self.logger.info(f"[PAPER] Simulated: {req.intent} {req.side} {req.qty} {req.symbol}")
             state["pending_order_id"] = None 
             return decision
 
         elif self.mode == "MOCK_LIVE":
+            # هیچ تماس شبکه‌ای انجام نمی‌شود
             self.logger.info(f"[MOCK_LIVE] Would send: {req.intent} {req.side} {req.qty} {req.symbol} | ID: {client_order_id}")
             state["pending_order_id"] = None
             return decision
@@ -59,8 +63,6 @@ class ExecutionManager:
                 raise ValueError("Client is required for TOOBIT_DEMO mode.")
             
             self.logger.warning(f"[DEMO] Sending: {req.intent} {req.side} {req.qty} {req.symbol} | ID: {client_order_id}")
-            
-            # در حالت دمو، اگر سفارش ورود باشد، پارامترهای اضافی ارسال می‌شوند
             response = self.client.place_order(
                 symbol=req.symbol, side=req.side, order_type=req.order_type,
                 quantity=req.qty, price=req.price, client_order_id=client_order_id
@@ -68,7 +70,7 @@ class ExecutionManager:
             
             if response.get("status") == "NETWORK_ERROR":
                 self.logger.critical(f"Network Error! Order {client_order_id} is UNKNOWN.")
-                state["order_status"] = "UNKNOWN"
+                state["order_status"] = "UNKNOWN" # مسدود کردن سفارشات بعدی
                 return Decision(accepted=False, reason="network_error_unknown", gate="exchange", order=None)
             
             if response.get("status") == "API_ERROR":
@@ -88,9 +90,15 @@ class ExecutionManager:
             if not self.client:
                 raise ValueError("Client is required for LIVE mode.")
 
+            # ✅ ۶. همگام‌سازی سخت‌گیرانه با صرافی
             exchange_pos = self.client.get_position(req.symbol)
-            if "error" in exchange_pos or exchange_pos is None:
-                self.logger.error(f"Sync failed: {exchange_pos}")
+            
+            if not exchange_pos or not isinstance(exchange_pos, dict):
+                self.logger.error(f"Sync failed: Invalid response type ({type(exchange_pos)})")
+                return Decision(accepted=False, reason="state_sync_failed", gate="safety", order=None)
+                
+            if "error" in exchange_pos:
+                self.logger.error(f"Sync failed: {exchange_pos['error']}")
                 return Decision(accepted=False, reason="state_sync_failed", gate="safety", order=None)
 
             self.logger.warning(f"[LIVE] SENDING: {req.intent} {req.side} {req.qty} {req.symbol} | ID: {client_order_id}")
@@ -101,7 +109,7 @@ class ExecutionManager:
             
             if response.get("status") == "NETWORK_ERROR":
                 self.logger.critical(f"Network Error! Order {client_order_id} is UNKNOWN.")
-                state["order_status"] = "UNKNOWN"
+                state["order_status"] = "UNKNOWN" # مسدود کردن سفارشات بعدی
                 return Decision(accepted=False, reason="network_error_unknown", gate="exchange", order=None)
                 
             if response.get("status") == "API_ERROR":
