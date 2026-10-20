@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v1.1 - با مکانیزم Rollback برای حفظ ناسازگاری وضعیت.
+v1.3 - Validate-Before-Commit + Pending Entry Isolation.
 """
 
 import json
@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 import time
-import copy  # ✅ اضافه شد برای Snapshot
+import copy
 from datetime import datetime, timezone
 
 from paper_state_manager import (
@@ -34,6 +34,7 @@ from order_executor import OrderRequest
 
 MAX_CATCHUP_CANDLES = 100
 PAPER_STATUS_SCHEMA = "1.0.0"
+
 
 class _RunComplete(Exception):
     def __init__(self, exit_code, run_status, error_message=None):
@@ -67,7 +68,6 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=Non
     cfg = _enrich_specs_for_engine(specs)
     ks_active = True
     ks_reason = "fail-closed: kill_switch check did not complete"
-
     try:
         result = is_kill_switch_active(state_dir, state=state, repo_root=repo_root)
         if not isinstance(result, tuple) or len(result) != 2:
@@ -87,7 +87,6 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=Non
     except Exception as e:
         ks_active = True
         ks_reason = f"fail-closed: kill_switch raised {type(e).__name__}: {e}"
-
     cfg["kill_switch_active"] = ks_active
     cfg["kill_switch_reason"] = ks_reason
     return cfg
@@ -124,25 +123,25 @@ def main() -> int:
     interval = os.environ.get("INTERVAL", "1h")
     start_iso = datetime.now(timezone.utc).isoformat()
 
+    # ✅ مقادیر پیش‌فرض برای جلوگیری از خطا در finally
     exit_code = 0
     run_status = "failed"
     error_message = None
-    reconciler_status = None
-    reconciler_summary = None
-    last_processed = None
     candles_processed = 0
-    catchup_lag = 0
     total_new = 0
     equity = None
     peak_equity = None
     has_position = None
+    last_processed = None
+    reconciler_status = None
+    reconciler_summary = None
+    catchup_lag = 0
 
-    # ✅ ایجاد ExecutionManager در حالت MOCK_LIVE
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (NO REAL ORDERS)")
+        print("🛡️  MOCK LIVE TRADING RUN (VALIDATE-BEFORE-COMMIT)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -218,15 +217,17 @@ def main() -> int:
             sig = evaluate_signal(indicators, idx)
             signal_label = sig.get("signal", "NO_TRADE")
 
-            # ✅ ۱. گرفتن Snapshot از وضعیت قبل از پردازش
-            prev_state = copy.deepcopy(state)
+            # ✅ ۱. شبیه‌سازی روی یک کپی
+            simulated_state = copy.deepcopy(state)
+            
+            try:
+                simulated_state, events = process_candle(
+                    simulated_state, klines, indicators, idx, specs, engine_config, signal=sig,
+                )
+            except Exception as e:
+                print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
+                raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
 
-            # ✅ ۲. اجرای موتور Paper
-            state, events = process_candle(
-                state, klines, indicators, idx, specs, engine_config, signal=sig,
-            )
-
-            # ✅ ۳. بررسی رویدادهای ENTRY و اعتبارسنجی با ExecutionManager
             entry_events = [e for e in events if e["type"] == "ENTRY"]
             execution_rejected = False
 
@@ -238,42 +239,46 @@ def main() -> int:
                     order_type="MARKET",
                     qty=ev["size"],
                     price=None,
-                    leverage=engine_config.get("leverage", 1),
+                    leverage=1, # ✅ اهرم محافظه‌کارانه
                     intent="ENTRY"
                 )
                 
-                # شناسه یکتا بر اساس زمان کندل (برای جلوگیری از تکرار در صورت کرش)
-                state["pending_order_id"] = f"apex_{symbol}_{candle_ts}_{ev['side']}"
-
-                decision = em.execute(req, specs, state, engine_config, ref_price=ev["price"])
+                # ✅ ۲. برای جلوگیری از گیت duplicate اشتباه، pending_entry را در state اصلی پاک می‌کنیم
+                validation_state = copy.deepcopy(state)
+                validation_state["pending_entry"] = None
+                
+                decision = em.execute(req, specs, validation_state, engine_config, ref_price=ev["price"])
                 
                 if not decision.accepted:
                     print(f"    ⛔ [MOCK_LIVE] Entry REJECTED: {decision.reason}")
                     execution_rejected = True
-            
-            # ✅ ۴. اگر ExecutionManager رد کرد، وضعیت را Rollback می‌کنیم
+                else:
+                    print(f"    🛡️ [MOCK_LIVE] Entry ACCEPTED. Size: {req.qty}")
+
+            # ✅ ۳. تصمیم‌گیری نهایی
             if execution_rejected:
-                state = prev_state
-                # زمان پردازش را آپدیت می‌کنیم تا از حلقه بی‌نهایت جلوگیری شود
+                # وضعیت اصلی را دست نمی‌زنیم، فقط زمان پردازش را جلو می‌بریم
                 state["last_processed_candle_ts"] = candle_ts
                 state["catchup_lag_candles"] = catchup_lag
-                # هیچ رویدادی برای این کندل ثبت نمی‌کنیم (چون معامله‌ای انجام نشد)
-                events = [e for e in events if e["type"] != "ENTRY"]
             else:
-                if events:
-                    append_events(state_dir, events)
-                    total_events_generated += len(events)
-                
+                # وضعیت شبیه‌سازی‌شده را جایگزین می‌کنیم
+                state = simulated_state
                 state["last_processed_candle_ts"] = candle_ts
                 state["symbol"] = symbol
                 state["contract_multiplier"] = specs["contract_multiplier"]
                 state["last_close_price"] = float(klines[idx][4])
                 state["catchup_lag_candles"] = catchup_lag
-                
-                try:
-                    save_state(state_dir, state)
-                except Exception as e:
-                    raise _RunComplete(1, "failed", f"save_state at idx={idx}: {type(e).__name__}: {e}")
+
+            # ✅ ۴. ذخیره State (قبل از ثبت Events)
+            try:
+                save_state(state_dir, state)
+            except Exception as e:
+                raise _RunComplete(1, "failed", f"save_state at idx={idx}: {type(e).__name__}: {e}")
+
+            # ✅ ۵. ثبت Events (فقط اگر State ذخیره شده باشد و سفارش رد نشده باشد)
+            if not execution_rejected and events:
+                append_events(state_dir, events)
+                total_events_generated += len(events)
 
             candles_processed += 1
             print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} signal={signal_label} events={len(events)}")
