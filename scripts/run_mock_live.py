@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v1.8 - Full Lifecycle Callback + Idempotent Journaling.
+v2.0 - Standard Idempotent Journaling + Correct ref_price.
 """
 
 import json
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from paper_state_manager import (
     init_state, load_state, save_state, state_exists,
-    append_events, events_count,
+    append_events, events_count,  # ✅ استفاده از تابع استاندارد
 )
 from data_feed import fetch_closed_klines
 from symbol_specs import get_symbol_specs
@@ -70,9 +70,9 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=Non
         else:
             active_val, reason_val = result
             if not isinstance(active_val, bool):
-                ks_active = True; ks_reason = f"fail-closed: kill_switch active flag not bool (got {type(active_val).__name__})"
+                ks_active = True; ks_reason = f"fail-closed: kill_switch active flag not bool"
             elif active_val:
-                ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active (no reason provided)"
+                ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active"
             else:
                 ks_active = False; ks_reason = None
     except Exception as e:
@@ -104,29 +104,6 @@ def _write_paper_status_atomic(state_dir, status):
         raise
 
 
-def _append_events_idempotent(state_dir, events):
-    """
-    ✅ v1.8: Idempotent Journaling با شناسه یکتا
-    """
-    if not events: return 0
-    events_path = os.path.join(state_dir, "events.jsonl")
-    existing_ids = set()
-    
-    if os.path.exists(events_path):
-        with open(events_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    try: existing_ids.add(json.loads(line)["event_id"])
-                    except: pass
-
-    new_events = [e for e in events if e.get("event_id") not in existing_ids]
-    if new_events:
-        with open(events_path, "a", encoding="utf-8") as f:
-            for e in new_events:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
-    return len(new_events)
-
-
 def main() -> int:
     state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
     symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
@@ -141,35 +118,45 @@ def main() -> int:
 
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
-    # ✅ Callback یکپارچه برای ENTRY, EXIT, TP1_HIT
+    # ✅ Callback اصلاح‌شده
     def execution_callback(pending_info):
+        intent = pending_info["intent"]
+        
+        # ✅ اصلاح ref_price بر اساس نوع درخواست
+        if intent == "ENTRY":
+            ref_price = pending_info.get("price", 0.0) # در paper_engine جدید، price همان entry_price است
+        else:
+            ref_price = pending_info.get("price", 0.0) # برای EXIT و TP1_HIT
+
         req = OrderRequest(
-            symbol=symbol,
-            side=pending_info["side"],
-            order_type="MARKET",
-            qty=pending_info["qty"],
-            price=None,
-            leverage=pending_info.get("leverage", 1),
-            intent=pending_info["intent"]
+            symbol=symbol, side=pending_info["side"], order_type="MARKET",
+            qty=pending_info["qty"], price=None, leverage=pending_info.get("leverage", 1),
+            intent=intent
         )
         
-        # ✅ برای جلوگیری از گیت duplicate، یک کپی از state می‌سازیم که pending_entry آن None باشد
-        # چون در این لحظه، در حال اجرای همان pending_entry هستیم.
         validation_state = copy.deepcopy(state)
-        validation_state["pending_entry"] = None
         
-        decision = em.execute(req, specs, validation_state, engine_config, ref_price=pending_info.get("entry_price", 0.0))
+        # ✅ فقط برای ENTRY و با بررسی دقیق سیگنال، pending_entry را پاک می‌کنیم
+        if intent == "ENTRY":
+            if validation_state.get("pending_entry"):
+                if validation_state["pending_entry"].get("signal_candle_ts") == pending_info.get("signal_candle_ts"):
+                    validation_state["pending_entry"] = None
+                else:
+                    print(f"    ⛔ [MOCK_LIVE] {intent} REJECTED: Stale pending_entry.")
+                    return False
+                
+        decision = em.execute(req, specs, validation_state, engine_config, ref_price=ref_price)
         
         if decision.accepted:
-            print(f"    🛡️ [MOCK_LIVE] {pending_info['intent']} ACCEPTED. Size: {req.qty}")
+            print(f"    🛡️ [MOCK_LIVE] {intent} ACCEPTED. Size: {req.qty}")
             return True
         else:
-            print(f"    ⛔ [MOCK_LIVE] {pending_info['intent']} REJECTED: {decision.reason}")
+            print(f"    ⛔ [MOCK_LIVE] {intent} REJECTED: {decision.reason}")
             return False
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (FULL LIFECYCLE)")
+        print("🛡️  MOCK LIVE TRADING RUN (ATOMIC)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -236,6 +223,7 @@ def main() -> int:
             raise _RunComplete(1, "aborted", f"reconciler: {reconciler_summary}")
 
         engine_config = _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=os.getcwd())
+        strategy_hash = compute_strategy_hash()
 
         print(f"⚙️  Processing {len(to_process)} candle(s)...")
         total_events_generated = 0
@@ -254,14 +242,15 @@ def main() -> int:
                 print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
                 raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
 
-            # ✅ ثبت اتمیک و Idempotent
+            # ✅ ثبت اتمیک: ابتدا Events استاندارد، سپس State
             if events:
                 try:
-                    # ۱. ذخیره State
+                    # ۱. ثبت Events با تابع استاندارد (ایدمپوتنت با fingerprint)
+                    appended, skipped = append_events(state_dir, events, strategy_hash=strategy_hash)
+                    total_events_generated += appended
+                    
+                    # ۲. ذخیره State
                     save_state(state_dir, state)
-                    # ۲. ثبت رویدادها با چک کردن شناسه یکتا
-                    added_count = _append_events_idempotent(state_dir, events)
-                    total_events_generated += added_count
                 except Exception as e:
                     raise _RunComplete(1, "failed", f"save failed at idx={idx}: {type(e).__name__}: {e}")
             else:
