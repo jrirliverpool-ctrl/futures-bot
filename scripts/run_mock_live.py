@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v1.3 - Validate-Before-Commit + Pending Entry Isolation.
+v1.8 - Full Lifecycle Callback + Idempotent Journaling.
 """
 
 import json
@@ -27,10 +27,8 @@ from compute_hash import compute_strategy_hash
 from kill_switch import is_kill_switch_active
 from reconciler import reconcile_with_data
 
-# ✅ Importهای لایه اجرا
 from execution_manager import ExecutionManager
 from order_executor import OrderRequest
-
 
 MAX_CATCHUP_CANDLES = 100
 PAPER_STATUS_SCHEMA = "1.0.0"
@@ -47,11 +45,8 @@ class _RunComplete(Exception):
 def _build_indicators(klines):
     p = get_indicator_params()
     return compute_all(
-        klines,
-        ema_fast_p=p["ema_fast_p"],
-        ema_slow_p=p["ema_slow_p"],
-        donchian_p=p["donchian_p"],
-        atr_p=p["atr_p"],
+        klines, ema_fast_p=p["ema_fast_p"], ema_slow_p=p["ema_slow_p"],
+        donchian_p=p["donchian_p"], atr_p=p["atr_p"],
     )
 
 
@@ -71,32 +66,25 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=Non
     try:
         result = is_kill_switch_active(state_dir, state=state, repo_root=repo_root)
         if not isinstance(result, tuple) or len(result) != 2:
-            ks_active = True
-            ks_reason = "fail-closed: invalid kill_switch output"
+            ks_active = True; ks_reason = "fail-closed: invalid kill_switch output"
         else:
             active_val, reason_val = result
             if not isinstance(active_val, bool):
-                ks_active = True
-                ks_reason = f"fail-closed: kill_switch active flag not bool (got {type(active_val).__name__})"
+                ks_active = True; ks_reason = f"fail-closed: kill_switch active flag not bool (got {type(active_val).__name__})"
             elif active_val:
-                ks_active = True
-                ks_reason = reason_val if reason_val is not None else "kill_switch active (no reason provided)"
+                ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active (no reason provided)"
             else:
-                ks_active = False
-                ks_reason = None
+                ks_active = False; ks_reason = None
     except Exception as e:
-        ks_active = True
-        ks_reason = f"fail-closed: kill_switch raised {type(e).__name__}: {e}"
+        ks_active = True; ks_reason = f"fail-closed: kill_switch raised {type(e).__name__}: {e}"
     cfg["kill_switch_active"] = ks_active
     cfg["kill_switch_reason"] = ks_reason
     return cfg
 
 
 def _find_new_candles(klines, last_processed_ts):
-    if not klines:
-        return []
-    if last_processed_ts is None:
-        return list(range(len(klines)))
+    if not klines: return []
+    if last_processed_ts is None: return list(range(len(klines)))
     return [i for i, c in enumerate(klines) if int(c[0]) > last_processed_ts]
 
 
@@ -107,8 +95,7 @@ def _write_paper_status_atomic(state_dir, status):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(status, f, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
-            f.flush()
-            os.fsync(f.fileno())
+            f.flush(); os.fsync(f.fileno())
         os.replace(tmp_path, target)
     except Exception:
         if os.path.exists(tmp_path):
@@ -117,31 +104,72 @@ def _write_paper_status_atomic(state_dir, status):
         raise
 
 
+def _append_events_idempotent(state_dir, events):
+    """
+    ✅ v1.8: Idempotent Journaling با شناسه یکتا
+    """
+    if not events: return 0
+    events_path = os.path.join(state_dir, "events.jsonl")
+    existing_ids = set()
+    
+    if os.path.exists(events_path):
+        with open(events_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try: existing_ids.add(json.loads(line)["event_id"])
+                    except: pass
+
+    new_events = [e for e in events if e.get("event_id") not in existing_ids]
+    if new_events:
+        with open(events_path, "a", encoding="utf-8") as f:
+            for e in new_events:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    return len(new_events)
+
+
 def main() -> int:
     state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
     symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
     interval = os.environ.get("INTERVAL", "1h")
     start_iso = datetime.now(timezone.utc).isoformat()
 
-    # ✅ مقادیر پیش‌فرض برای جلوگیری از خطا در finally
-    exit_code = 0
-    run_status = "failed"
-    error_message = None
-    candles_processed = 0
-    total_new = 0
-    equity = None
-    peak_equity = None
-    has_position = None
-    last_processed = None
-    reconciler_status = None
-    reconciler_summary = None
+    exit_code = 0; run_status = "failed"; error_message = None
+    candles_processed = 0; total_new = 0
+    equity = None; peak_equity = None; has_position = None
+    last_processed = None; reconciler_status = None; reconciler_summary = None
     catchup_lag = 0
 
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
+    # ✅ Callback یکپارچه برای ENTRY, EXIT, TP1_HIT
+    def execution_callback(pending_info):
+        req = OrderRequest(
+            symbol=symbol,
+            side=pending_info["side"],
+            order_type="MARKET",
+            qty=pending_info["qty"],
+            price=None,
+            leverage=pending_info.get("leverage", 1),
+            intent=pending_info["intent"]
+        )
+        
+        # ✅ برای جلوگیری از گیت duplicate، یک کپی از state می‌سازیم که pending_entry آن None باشد
+        # چون در این لحظه، در حال اجرای همان pending_entry هستیم.
+        validation_state = copy.deepcopy(state)
+        validation_state["pending_entry"] = None
+        
+        decision = em.execute(req, specs, validation_state, engine_config, ref_price=pending_info.get("entry_price", 0.0))
+        
+        if decision.accepted:
+            print(f"    🛡️ [MOCK_LIVE] {pending_info['intent']} ACCEPTED. Size: {req.qty}")
+            return True
+        else:
+            print(f"    ⛔ [MOCK_LIVE] {pending_info['intent']} REJECTED: {decision.reason}")
+            return False
+
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (VALIDATE-BEFORE-COMMIT)")
+        print("🛡️  MOCK LIVE TRADING RUN (FULL LIFECYCLE)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -217,68 +245,30 @@ def main() -> int:
             sig = evaluate_signal(indicators, idx)
             signal_label = sig.get("signal", "NO_TRADE")
 
-            # ✅ ۱. شبیه‌سازی روی یک کپی
-            simulated_state = copy.deepcopy(state)
-            
             try:
-                simulated_state, events = process_candle(
-                    simulated_state, klines, indicators, idx, specs, engine_config, signal=sig,
+                state, events = process_candle(
+                    state, klines, indicators, idx, specs, engine_config, 
+                    signal=sig, execution_callback=execution_callback, exit_callback=execution_callback
                 )
             except Exception as e:
                 print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
                 raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
 
-            entry_events = [e for e in events if e["type"] == "ENTRY"]
-            execution_rejected = False
-
-            if entry_events:
-                ev = entry_events[0]
-                req = OrderRequest(
-                    symbol=symbol,
-                    side=ev["side"],
-                    order_type="MARKET",
-                    qty=ev["size"],
-                    price=None,
-                    leverage=1, # ✅ اهرم محافظه‌کارانه
-                    intent="ENTRY"
-                )
-                
-                # ✅ ۲. برای جلوگیری از گیت duplicate اشتباه، pending_entry را در state اصلی پاک می‌کنیم
-                validation_state = copy.deepcopy(state)
-                validation_state["pending_entry"] = None
-                
-                decision = em.execute(req, specs, validation_state, engine_config, ref_price=ev["price"])
-                
-                if not decision.accepted:
-                    print(f"    ⛔ [MOCK_LIVE] Entry REJECTED: {decision.reason}")
-                    execution_rejected = True
-                else:
-                    print(f"    🛡️ [MOCK_LIVE] Entry ACCEPTED. Size: {req.qty}")
-
-            # ✅ ۳. تصمیم‌گیری نهایی
-            if execution_rejected:
-                # وضعیت اصلی را دست نمی‌زنیم، فقط زمان پردازش را جلو می‌بریم
-                state["last_processed_candle_ts"] = candle_ts
-                state["catchup_lag_candles"] = catchup_lag
+            # ✅ ثبت اتمیک و Idempotent
+            if events:
+                try:
+                    # ۱. ذخیره State
+                    save_state(state_dir, state)
+                    # ۲. ثبت رویدادها با چک کردن شناسه یکتا
+                    added_count = _append_events_idempotent(state_dir, events)
+                    total_events_generated += added_count
+                except Exception as e:
+                    raise _RunComplete(1, "failed", f"save failed at idx={idx}: {type(e).__name__}: {e}")
             else:
-                # وضعیت شبیه‌سازی‌شده را جایگزین می‌کنیم
-                state = simulated_state
-                state["last_processed_candle_ts"] = candle_ts
-                state["symbol"] = symbol
-                state["contract_multiplier"] = specs["contract_multiplier"]
-                state["last_close_price"] = float(klines[idx][4])
-                state["catchup_lag_candles"] = catchup_lag
-
-            # ✅ ۴. ذخیره State (قبل از ثبت Events)
-            try:
-                save_state(state_dir, state)
-            except Exception as e:
-                raise _RunComplete(1, "failed", f"save_state at idx={idx}: {type(e).__name__}: {e}")
-
-            # ✅ ۵. ثبت Events (فقط اگر State ذخیره شده باشد و سفارش رد نشده باشد)
-            if not execution_rejected and events:
-                append_events(state_dir, events)
-                total_events_generated += len(events)
+                try:
+                    save_state(state_dir, state)
+                except Exception as e:
+                    raise _RunComplete(1, "failed", f"save_state at idx={idx}: {type(e).__name__}: {e}")
 
             candles_processed += 1
             print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} signal={signal_label} events={len(events)}")
@@ -304,34 +294,24 @@ def main() -> int:
         exit_code = 0
 
     except _RunComplete as rc:
-        exit_code = rc.exit_code
-        run_status = rc.run_status
-        error_message = rc.error_message
+        exit_code = rc.exit_code; run_status = rc.run_status; error_message = rc.error_message
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
         print(f"❌ FATAL: {error_message}")
-        run_status = "failed"
-        exit_code = 1
+        run_status = "failed"; exit_code = 1
     finally:
         status = {
             "schema_version": PAPER_STATUS_SCHEMA,
             "run_started_at_iso": start_iso,
             "run_finished_at_iso": datetime.now(timezone.utc).isoformat(),
-            "run_status": run_status,
-            "run_exit_code": exit_code,
+            "run_status": run_status, "run_exit_code": exit_code,
             "strategy_hash": compute_strategy_hash(),
-            "state_dir": state_dir,
-            "symbol": symbol,
-            "interval": interval,
-            "reconciler_status": reconciler_status,
-            "reconciler_summary": reconciler_summary,
+            "state_dir": state_dir, "symbol": symbol, "interval": interval,
+            "reconciler_status": reconciler_status, "reconciler_summary": reconciler_summary,
             "last_processed_candle_ts": last_processed,
             "candles_processed_this_run": candles_processed,
-            "catchup_lag": catchup_lag,
-            "total_new_detected": total_new,
-            "equity": equity,
-            "peak_equity": peak_equity,
-            "has_position": has_position,
+            "catchup_lag": catchup_lag, "total_new_detected": total_new,
+            "equity": equity, "peak_equity": peak_equity, "has_position": has_position,
             "error_message": error_message,
         }
         try:
@@ -339,8 +319,7 @@ def main() -> int:
             print(f"\n📝 paper_status.json written (run_status={run_status})")
         except Exception as we:
             print(f"\n❌ failed to write paper_status.json: {type(we).__name__}: {we}")
-            if exit_code == 0:
-                exit_code = 1
+            if exit_code == 0: exit_code = 1
 
     return exit_code
 
