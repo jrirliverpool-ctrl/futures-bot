@@ -1,10 +1,8 @@
 """
-test_execution_manager.py — Strict safety tests using pytest.
-Run with: pytest -q tests/test_execution_manager.py
+test_execution_manager.py — Strict safety tests.
 """
 import os
 import sys
-import json
 from unittest.mock import patch
 import pytest
 
@@ -39,7 +37,7 @@ class FakeToobitClient:
 
     def get_position(self, symbol):
         if self.invalid_sync_response:
-            return None  # پاسخ نامعتبر
+            return None
         if self.fail_sync:
             return {"error": "Timeout"}
         return {"position": None}
@@ -112,14 +110,13 @@ def test_live_network_error_during_send():
     assert decision.accepted is False
     assert decision.reason == "network_error_unknown"
     assert state["pending_order_id"] is not None
-    # ✅ تایید اینکه وضعیت مبهم ثبت شده است
     assert state["order_status"] == "UNKNOWN"
 
 
 def test_ambiguous_state_blocks_next_order():
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
     state = _empty_state()
-    state["order_status"] = "UNKNOWN" # شبیه‌سازی وضعیت مبهم
+    state["order_status"] = "UNKNOWN"
     
     req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
     decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
@@ -130,24 +127,22 @@ def test_ambiguous_state_blocks_next_order():
 
 @patch.dict(os.environ, {"APEXQUANT_ENV": "PRODUCTION"})
 def test_persistent_order_id_on_restart():
+    import json
     client = FakeToobitClient(fail_network_send=True)
     em = ExecutionManager(mode="LIVE", client=client)
     req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
     state = _empty_state()
     
-    # اجرای اول (خطای شبکه)
     em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
     first_id = state["pending_order_id"]
     
-    # ✅ شبیه‌سازی ری‌استارت: ذخیره در فایل و بازیابی
     serialized_state = json.dumps(state)
     restored_state = json.loads(serialized_state)
     
     assert restored_state["pending_order_id"] == first_id
     
-    # حالا اگر سیستم دوباره اجرا شود، شناسه باید حفظ شده باشد
     client.fail_network_send = False
-    state["order_status"] = None # آزادسازی برای تست
+    state["order_status"] = None
     em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
     
     assert len(client.place_ids) == 2
@@ -158,7 +153,7 @@ def test_persistent_order_id_on_restart():
 def test_mock_live_rollback_on_rejection():
     client = FakeToobitClient()
     em = ExecutionManager(mode="MOCK_LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 999, "ENTRY") # لوریج غیرمجاز
+    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 999, "ENTRY")
     state = _empty_state()
     decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
     assert decision.accepted is False
@@ -180,7 +175,11 @@ def test_kill_switch_blocks_entry():
 def test_kill_switch_allows_exit():
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
     state = _empty_state()
+    # ✅ اصلاح: اضافه کردن پوزیشن معتبر برای اینکه خروج بتواند انجام شود
+    state["position"] = {"side": "SHORT", "entry_price": 50000.0, "remaining_size": 1.0}
     state["kill_switch"] = True
+    
     req = OrderRequest("BTC-SWAP-USDT", "SHORT", "MARKET", 0.1, None, 1, "EXIT")
     decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
+    
     assert decision.accepted is True
