@@ -3,7 +3,7 @@ name: ApexQuant Mock Live Runner
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *' # ✅ اجرای خودکار در دقیقه 0 هر ساعت (UTC)
+    - cron: '0 * * * *' # اجرای خودکار در دقیقه 0 هر ساعت (UTC)
 
 permissions:
   contents: write
@@ -36,7 +36,8 @@ jobs:
 
       - name: Run Safety Tests
         run: |
-          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py
+          # ✅ اضافه شدن تست جدید TP1 Exit
+          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py tests/test_tp1_exit.py
 
       - name: Run Mock Live Engine
         env:
@@ -46,7 +47,7 @@ jobs:
         run: python scripts/run_mock_live.py
 
       - name: Commit State Updates
-        if: always() # اجرا حتی در صورت شکست موتور برای ذخیره وضعیت failed
+        if: always() # اجرا حتی در صورت شکست برای ذخیره وضعیت failed
         run: |
           set -e
           
