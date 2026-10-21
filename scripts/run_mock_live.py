@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v2.3 - Fixed callback payload keys (intent, qty).
+v2.5 - Events first, then state. Full traceback on error.
 """
 
 import json
@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import copy
+import traceback
 from datetime import datetime, timezone
 
 from paper_state_manager import (
@@ -105,9 +106,6 @@ def _write_paper_status_atomic(state_dir, status):
 
 
 def _create_order_from_event(ev, symbol, leverage=1):
-    """
-    ✅ v2.3: اصلاح کلیدهای ورودی (intent و qty) بر اساس خروجی paper_engine
-    """
     intent = ev.get("intent")
     if intent is None:
         raise ValueError(f"Missing 'intent' in event: {ev}")
@@ -172,7 +170,7 @@ def main() -> int:
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (FIXED QTY KEY)")
+        print("🛡️  MOCK LIVE TRADING RUN (COMPLETE v3.1)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -256,19 +254,25 @@ def main() -> int:
                 )
             except Exception as e:
                 print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
+                traceback.print_exc()
                 raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
 
+            # ✅ ترتیب اصلاح‌شده: ابتدا Events، سپس State
             if events:
                 try:
-                    save_state(state_dir, state)
                     added_count = append_events(state_dir, events, strategy_hash=strategy_hash)
+                    save_state(state_dir, state)
                     total_events_generated += added_count
                 except Exception as e:
+                    print(f"  [{n}/{len(to_process)}] → ERROR in append/save: {type(e).__name__}: {e}")
+                    traceback.print_exc()
                     raise _RunComplete(1, "failed", f"save failed at idx={idx}: {type(e).__name__}: {e}")
             else:
                 try:
                     save_state(state_dir, state)
                 except Exception as e:
+                    print(f"  [{n}/{len(to_process)}] → ERROR in save_state: {type(e).__name__}: {e}")
+                    traceback.print_exc()
                     raise _RunComplete(1, "failed", f"save_state at idx={idx}: {type(e).__name__}: {e}")
 
             candles_processed += 1
@@ -295,10 +299,14 @@ def main() -> int:
         exit_code = 0
 
     except _RunComplete as rc:
-        exit_code = rc.exit_code; run_status = rc.run_status; error_message = rc.error_message
+        exit_code = rc.exit_code
+        run_status = rc.run_status
+        error_message = rc.error_message
+        print(f"\n❌ RUN FAILED: {error_message}")
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
         print(f"❌ FATAL: {error_message}")
+        traceback.print_exc()
         run_status = "failed"; exit_code = 1
     finally:
         status = {
