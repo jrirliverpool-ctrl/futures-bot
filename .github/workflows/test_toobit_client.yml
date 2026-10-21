@@ -1,7 +1,7 @@
 name: Test Toobit Client
 
 on:
-  workflow_dispatch: # ✅ فقط اجرای دستی (بدون Push خودکار)
+  workflow_dispatch: # فقط اجرای دستی برای جلوگیری از درخواست‌های ناخواسته
 
 permissions:
   contents: read
@@ -21,12 +21,12 @@ jobs:
       - name: Install dependencies
         run: pip install requests pytest
 
-      - name: Run offline mock tests
+      - name: Run Offline Mock Tests (12 tests)
         run: pytest -q tests/test_toobit_client.py
 
-      - name: Verify credentials are configured
+      # ✅ مرحله جدید: تست اتصال واقعی
+      - name: Run Real Connection Test (Read-Only)
         env:
           TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
           TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
-        run: |
-          python -c "import os,sys; sys.exit(0 if os.getenv('TOOBIT_API_KEY') and os.getenv('TOOBIT_API_SECRET') else 1)"
+        run: python scripts/run_toobit_connection_test.py
