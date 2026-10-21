@@ -1,9 +1,6 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-
-v2.9 (Standardized Callback Payloads):
-  - execution_callback برای ENTRY اضافه شد.
-  - exit_callback برای EXIT و TP1_HIT اضافه شد.
+v3.1 - Complete TP1_HIT schema + full execution.
 """
 
 import copy
@@ -11,7 +8,8 @@ from decimal import Decimal, ROUND_DOWN
 
 
 def floor_to_step(value: float, step: float) -> float:
-    if step <= 0: raise ValueError("step must be > 0")
+    if step <= 0:
+        raise ValueError("step must be > 0")
     d_value = Decimal(str(value))
     d_step = Decimal(str(step))
     n = (d_value / d_step).to_integral_value(rounding=ROUND_DOWN)
@@ -19,9 +17,12 @@ def floor_to_step(value: float, step: float) -> float:
 
 
 def apply_slippage(price: float, is_entry: bool, side: str, slip_pct: float) -> float:
-    if slip_pct < 0: raise ValueError("slip_pct must be >= 0")
-    if side == "LONG": return price * (1 + slip_pct) if is_entry else price * (1 - slip_pct)
-    if side == "SHORT": return price * (1 - slip_pct) if is_entry else price * (1 + slip_pct)
+    if slip_pct < 0:
+        raise ValueError("slip_pct must be >= 0")
+    if side == "LONG":
+        return price * (1 + slip_pct) if is_entry else price * (1 - slip_pct)
+    if side == "SHORT":
+        return price * (1 - slip_pct) if is_entry else price * (1 + slip_pct)
     raise ValueError(f"Invalid side: {side}")
 
 
@@ -41,7 +42,8 @@ def _resolve_atr(atr_current, atr_at_entry) -> float:
 
 
 def compute_initial_levels(entry_price, atr_at_signal, side, config):
-    if entry_price <= 0 or atr_at_signal <= 0: raise ValueError("entry_price and ATR must be > 0")
+    if entry_price <= 0 or atr_at_signal <= 0:
+        raise ValueError("entry_price and ATR must be > 0")
     sl_dist = config["sl_atr_mult"] * atr_at_signal
     tp_dist = config["tp1_atr_mult"] * atr_at_signal
     if side == "LONG": return entry_price - sl_dist, entry_price + tp_dist
@@ -128,7 +130,6 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         state["pending_entry"] = None
         return state, events
 
-    # ✅ v2.9: استانداردسازی کلیدها (استفاده از "price" به جای "entry_price")
     if execution_callback is not None:
         allowed = execution_callback({
             "intent": "ENTRY", "side": side, "qty": qty, "price": entry_price,
@@ -229,11 +230,24 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             p["realized_pnl"] += pnl_tp1
             p["commission_paid_usd"] = p.get("commission_paid_usd", 0.0) + tp1_commission
 
+            # ✅ v3.1: Schema کامل با تمام فیلدهای استاندارد
             events.append({
-                "type": "TP1_HIT", "price": p["initial_tp1"], "portion": 0.5,
-                "size": tp1_size, "remaining_size": p["remaining_size"],
-                "pnl_usd": pnl_tp1, "notional_usd": tp1_notional,
-                "commission_usd": tp1_commission, "net_pnl_usd": pnl_tp1 - tp1_commission,
+                "type": "TP1_HIT", 
+                "side": side,
+                "price": p["initial_tp1"], 
+                "portion": 0.5,
+                "size": tp1_size, 
+                "remaining_size": p["remaining_size"],
+                "entry_price": p["entry_price"],
+                "sl": p["current_sl"],
+                "tp1": p["initial_tp1"],
+                "exit_price_adj": None,
+                "pnl_usd": pnl_tp1, 
+                "notional_usd": tp1_notional,
+                "commission_usd": tp1_commission, 
+                "net_pnl_usd": pnl_tp1 - tp1_commission,
+                "reason": None,
+                "ambiguous_exit": False,
                 "timestamp": ts,
             })
 
