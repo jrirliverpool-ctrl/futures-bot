@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v2.5 - Events first, then state. Full traceback on error.
+v2.6 - Fixed tuple unpacking for append_events.
 """
 
 import json
@@ -170,7 +170,7 @@ def main() -> int:
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (COMPLETE v3.1)")
+        print("🛡️  MOCK LIVE TRADING RUN (COMPLETE & FIXED)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -260,9 +260,10 @@ def main() -> int:
             # ✅ ترتیب اصلاح‌شده: ابتدا Events، سپس State
             if events:
                 try:
-                    added_count = append_events(state_dir, events, strategy_hash=strategy_hash)
+                    # ✅ اصلاح باگ تاپل
+                    appended, skipped = append_events(state_dir, events, strategy_hash=strategy_hash)
                     save_state(state_dir, state)
-                    total_events_generated += added_count
+                    total_events_generated += appended
                 except Exception as e:
                     print(f"  [{n}/{len(to_process)}] → ERROR in append/save: {type(e).__name__}: {e}")
                     traceback.print_exc()
@@ -302,7 +303,12 @@ def main() -> int:
         exit_code = rc.exit_code
         run_status = rc.run_status
         error_message = rc.error_message
-        print(f"\n❌ RUN FAILED: {error_message}")
+        
+        # ✅ اصلاح شرط چاپ خطا
+        if exit_code != 0:
+            print(f"\n❌ RUN FAILED: {error_message}")
+        else:
+            print(f"\n⏸️ RUN FINISHED: {run_status}")
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
         print(f"❌ FATAL: {error_message}")
