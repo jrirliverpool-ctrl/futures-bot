@@ -1,8 +1,9 @@
 """
 order_executor.py — Execution Core (Dry-Run).
 
-⚠️ قرارداد جدید (v1.1):
+⚠️ قرارداد جدید (v1.2):
   - خروج اضطراری (EXIT) حتی با فعال بودن Kill Switch مجاز است.
+  - گیت جدید: حجم خروج نمی‌تواند از حجم پوزیشن بیشتر باشد.
 """
 
 import math
@@ -142,16 +143,31 @@ def _validate_notional(req: OrderRequest, specs: dict, ref_price: float) -> Deci
     return None
 
 
-# ✅ اصلاح: req را اضافه کردیم تا از intent مطلع شود
 def _validate_kill_switch(req: OrderRequest, state: dict) -> Decision | None:
-    # قرارداد: خروج اضطراری (EXIT) همیشه مجاز است
     if req.intent == "EXIT":
         return None
-    
     if state.get("circuit_breaker_active", False):
         return _reject("kill_switch", "circuit breaker active")
     if state.get("kill_switch", False):
         return _reject("kill_switch", "kill switch explicitly enabled")
+    return None
+
+
+# ✅ گیت جدید: بررسی حجم خروج
+def _validate_exit_qty(req: OrderRequest, state: dict) -> Decision | None:
+    """جلوگیری از خروج بیش از حجم پوزیشن فعلی"""
+    if req.intent != "EXIT":
+        return None
+    
+    pos = state.get("position")
+    if pos is None:
+        return _reject("exit_qty", "cannot EXIT without an open position")
+        
+    remaining = pos.get("remaining_size", 0.0)
+    # استفاده از epsilon برای جلوگیری از خطای شناور (Floating point error)
+    if req.qty > remaining + 1e-9:
+        return _reject("exit_qty", f"exit qty {req.qty} > remaining position {remaining}")
+        
     return None
 
 
@@ -200,12 +216,16 @@ def evaluate(req: OrderRequest, specs: dict, state: dict, config: dict = None, r
     d = _validate_notional(req, specs, ref_price)
     if d: return d
 
-    # ✅ اصلاح: req را به _validate_kill_switch پاس می‌دهیم
     d = _validate_kill_switch(req, state)
+    if d: return d
+    
+    # ✅ گیت جدید
+    d = _validate_exit_qty(req, state)
     if d: return d
     
     d = _validate_no_duplicate(req, state)
     if d: return d
+    
     d = _validate_position_limit(req, state, config)
     if d: return d
 
