@@ -1,5 +1,5 @@
 """
-test_tp1_exit.py — Verification of TP1 partial exit logic.
+test_tp1_exit.py — Verification of TP1 partial exit logic and event parsing.
 """
 import os
 import sys
@@ -49,56 +49,64 @@ def test_exit_without_position_rejected():
     assert decision.gate == "exit_qty"
 
 # ============================================================
-# ۲. تست تابع _create_order_from_event (مپ کردن TP1_HIT)
+# ۲. تست تابع _create_order_from_event (مپ کردن کلیدها)
 # ============================================================
 
-def test_create_order_maps_tp1_to_exit():
-    # رویداد TP1_HIT که paper_engine تولید می‌کند
+def test_create_order_from_exit_event():
+    """✅ تست پچ جدید: بررسی خواندن صحیح کلیدهای EXIT"""
     ev = {
-        "type": "TP1_HIT",
+        "intent": "EXIT",
         "side": "LONG",
-        "size": 0.5, # حجم جزئی
-        "price": 50000.0,
+        "qty": 16.8278,
+        "price": 83870.78,
+        "timestamp": 1792591200000
+    }
+    
+    req, price, original_intent = _create_order_from_event(ev, "BTC-SWAP-USDT")
+    
+    assert original_intent == "EXIT"
+    assert req.intent == "EXIT"
+    assert req.qty == 16.8278
+    assert price == 83870.78
+
+def test_create_order_from_tp1_event():
+    """✅ تست پچ جدید: بررسی خواندن صحیح کلیدهای TP1_HIT"""
+    ev = {
+        "intent": "TP1_HIT",
+        "side": "LONG",
+        "qty": 8.4139,
+        "price": 84596.29,
+        "timestamp": 1792591200000
     }
     
     req, price, original_intent = _create_order_from_event(ev, "BTC-SWAP-USDT")
     
     assert original_intent == "TP1_HIT"
-    assert req.intent == "EXIT" # ✅ مپ شده
-    assert req.qty == 0.5 # ✅ حجم جزئی حفظ شده
-    assert price == 50000.0
+    assert req.intent == "EXIT"
+    assert req.qty == 8.4139
 
 def test_tp1_event_accepted_by_gate():
     state = _state_with_position(size=1.0)
-    
     ev = {
-        "type": "TP1_HIT",
+        "intent": "TP1_HIT",
         "side": "LONG",
-        "size": 0.5,
+        "qty": 0.5,
         "price": 50000.0,
     }
-    
-    # تبدیل به OrderRequest
     req, price, _ = _create_order_from_event(ev, "BTC-SWAP-USDT")
-    
-    # اعتبارسنجی
     decision = evaluate(req, SPECS, state, DEFAULT_CONFIG, ref_price=price)
-    
     assert decision.accepted is True
     assert decision.order["intent"] == "EXIT"
 
 def test_tp1_event_rejected_if_over_position():
-    state = _state_with_position(size=0.3) # حجم پوزیشن کم است
-    
+    state = _state_with_position(size=0.3)
     ev = {
-        "type": "TP1_HIT",
+        "intent": "TP1_HIT",
         "side": "LONG",
-        "size": 0.5, # حجم خروج بیشتر از پوزیشن
+        "qty": 0.5,
         "price": 50000.0,
     }
-    
     req, price, _ = _create_order_from_event(ev, "BTC-SWAP-USDT")
     decision = evaluate(req, SPECS, state, DEFAULT_CONFIG, ref_price=price)
-    
     assert decision.accepted is False
     assert decision.gate == "exit_qty"
