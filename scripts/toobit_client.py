@@ -1,84 +1,134 @@
 """
-toobit_client.py — Secure Read-Only API Client for Toobit Futures.
-v1.2 - Read-Only, strict error handling, injectable timestamp for testing.
+toobit_client.py — Strict Read-Only Toobit Futures Client.
+No order submission; sanitized errors; deterministic signatures.
 """
-import time
-import hmac
 import hashlib
-import urllib.parse
+import hmac
+import time
+from urllib.parse import urlencode, urlsplit
+
 import requests
-import logging
 
 class ToobitClient:
-    def __init__(self, api_key: str, api_secret: str, base_url: str = "https://api.toobit.com"):
+    BASE_URL = "https://api.toobit.com"
+    BALANCE_ENDPOINT = "/api/v1/futures/balance"
+
+    def __init__(self, api_key: str, api_secret: str,
+                 base_url: str = BASE_URL):
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise ValueError("API key is required")
+        if not isinstance(api_secret, str) or not api_secret:
+            raise ValueError("API secret is required")
+
+        # Prevent accidental credential transmission to another host.
+        parsed = urlsplit(base_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.toobit.com"
+            or parsed.port not in (None, 443)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Unapproved API base URL")
+
         self.api_key = api_key
         self.api_secret = api_secret
-        self.base_url = base_url
+        self.base_url = self.BASE_URL
         self.session = requests.Session()
         self.session.headers.update({
-            "X-BB-APIKEY": self.api_key,
-            "Content-Type": "application/x-www-form-urlencoded"
+            "X-BB-APIKEY": api_key,
         })
-        self.logger = logging.getLogger("ToobitClient")
 
     def _generate_signature(self, query_string: str) -> str:
         return hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
-            hashlib.sha256
+            hashlib.sha256,
         ).hexdigest()
 
-    def _request(self, method: str, endpoint: str, params: dict = None, timestamp: int = None):
-        if params is None:
-            params = {}
-        
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        params: dict | None = None,
+        timestamp: int | None = None,
+    ) -> dict:
+        # Fail closed: this client never submits POST/PUT/DELETE requests.
+        if method.upper() != "GET":
+            return {"status": "REJECTED"}
+
+        # Only allow the verified read-only endpoint for now.
+        if endpoint != self.BALANCE_ENDPOINT:
+            return {"status": "REJECTED"}
+
+        if params is not None and not isinstance(params, dict):
+            return {"status": "INVALID_REQUEST"}
+
+        query_params = dict(params or {})
+
+        # Prevent caller-controlled overrides of security parameters.
+        if "timestamp" in query_params or "recvWindow" in query_params:
+            return {"status": "INVALID_REQUEST"}
+
         if timestamp is None:
             timestamp = int(time.time() * 1000)
-            
-        params["timestamp"] = timestamp
-        params["recvWindow"] = 5000
-        
-        # مرتب‌سازی و ساخت Query String
-        query_string = urllib.parse.urlencode(sorted(params.items()))
+
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+            return {"status": "INVALID_REQUEST"}
+
+        query_params["timestamp"] = timestamp
+        query_params["recvWindow"] = 5000
+
+        query_string = urlencode(sorted(query_params.items()))
         signature = self._generate_signature(query_string)
-        
-        final_url = f"{self.base_url}{endpoint}?{query_string}&signature={signature}"
-        
+
+        url = (
+            f"{self.base_url}{endpoint}"
+            f"?{query_string}&signature={signature}"
+        )
+
         try:
-            if method.upper() == "GET":
-                response = self.session.get(final_url, timeout=10)
-            else:
-                response = self.session.post(final_url, timeout=10)
-                
-            # 1. خطای شبکه (HTTP Status)
-            if response.status_code != 200:
+            response = self.session.get(url, timeout=10)
+        except requests.exceptions.Timeout:
+            return {"status": "NETWORK_ERROR", "error": "TIMEOUT"}
+        except requests.exceptions.RequestException:
+            # Do not expose exception text, request URLs, or credentials.
+            return {"status": "NETWORK_ERROR", "error": "REQUEST_FAILED"}
+
+        if response.status_code != 200:
+            return {
+                "status": "HTTP_ERROR",
+                "status_code": response.status_code,
+            }
+
+        try:
+            data = response.json()
+        except ValueError:
+            return {
+                "status": "INVALID_RESPONSE",
+                "error": "INVALID_JSON",
+            }
+
+        # Balance endpoint normally returns a JSON array.
+        # If the server returns an error object, don't treat it as success.
+        if isinstance(data, dict) and "code" in data:
+            if data["code"] not in (200, 0):
                 return {
-                    "error": f"HTTP {response.status_code}",
-                    "status": "HTTP_ERROR",
-                    "status_code": response.status_code,
-                    "raw": response.text
+                    "status": "API_ERROR",
+                    "api_code": str(data["code"])[:32],
                 }
-            
-            # 2. خطای JSON
-            try:
-                data = response.json()
-            except ValueError:
-                return {"error": "Invalid JSON response", "status": "NETWORK_ERROR", "raw": response.text}
-            
-            # 3. خطای تجاری (API Error)
-            if isinstance(data, dict) and "code" in data:
-                if data.get("code") not in (200, 0):
-                    return {"error": data.get("msg", "API Error"), "status": "API_ERROR", "raw": data}
-                
-            return {"status": "SUCCESS", "data": data}
-            
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Network Error: {e}")
-            return {"error": str(e), "status": "NETWORK_ERROR"}
+
+        if not isinstance(data, (dict, list)):
+            return {"status": "INVALID_RESPONSE"}
+
+        return {"status": "SUCCESS", "data": data}
 
     def get_balance(self, timestamp=None):
-        """فقط خواندن موجودی (بدون امکان ارسال سفارش)"""
-        return self._request("GET", "/api/v1/futures/balance", timestamp=timestamp)
-
-    def get_position(self, symbol: str, timestamp=None):
-        return self._request("GET", "/api/v1/futures/position", {"symbol": symbol}, timestamp=timestamp)
+        return self._request(
+            "GET",
+            self.BALANCE_ENDPOINT,
+            timestamp=timestamp,
+        )
