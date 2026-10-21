@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v2.0 - Standard Idempotent Journaling + Correct ref_price.
+v2.2 - Extracted Event->Order mapping for testability.
 """
 
 import json
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from paper_state_manager import (
     init_state, load_state, save_state, state_exists,
-    append_events, events_count,  # ✅ استفاده از تابع استاندارد
+    append_events, events_count,
 )
 from data_feed import fetch_closed_klines
 from symbol_specs import get_symbol_specs
@@ -70,7 +70,7 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=Non
         else:
             active_val, reason_val = result
             if not isinstance(active_val, bool):
-                ks_active = True; ks_reason = f"fail-closed: kill_switch active flag not bool"
+                ks_active = True; ks_reason = "fail-closed: kill_switch active flag not bool"
             elif active_val:
                 ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active"
             else:
@@ -104,6 +104,32 @@ def _write_paper_status_atomic(state_dir, status):
         raise
 
 
+# ✅ تابع مستقل برای تبدیل رویداد به درخواست
+def _create_order_from_event(ev, symbol, leverage=1):
+    """
+    رویداد TP1_HIT را به یک درخواست EXIT با حجم جزئی تبدیل می‌کند.
+    """
+    intent = ev["type"]
+    order_intent = "EXIT" if intent == "TP1_HIT" else intent
+    
+    # در paper_engine، رویداد TP1_HIT فیلد size دارد (که همان حجم خروج جزئی است)
+    # برای EXIT (کامل) از remaining_size استفاده می‌شود
+    qty = ev.get("size") if intent == "TP1_HIT" else ev.get("remaining_size")
+    
+    price = ev.get("price", 0.0)
+
+    req = OrderRequest(
+        symbol=symbol,
+        side=ev["side"],
+        order_type="MARKET",
+        qty=qty,
+        price=None,
+        leverage=leverage,
+        intent=order_intent
+    )
+    return req, price, intent
+
+
 def main() -> int:
     state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
     symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
@@ -118,45 +144,34 @@ def main() -> int:
 
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
-    # ✅ Callback اصلاح‌شده
     def execution_callback(pending_info):
-        intent = pending_info["intent"]
-        
-        # ✅ اصلاح ref_price بر اساس نوع درخواست
-        if intent == "ENTRY":
-            ref_price = pending_info.get("price", 0.0) # در paper_engine جدید، price همان entry_price است
-        else:
-            ref_price = pending_info.get("price", 0.0) # برای EXIT و TP1_HIT
-
-        req = OrderRequest(
-            symbol=symbol, side=pending_info["side"], order_type="MARKET",
-            qty=pending_info["qty"], price=None, leverage=pending_info.get("leverage", 1),
-            intent=intent
+        # ✅ استفاده از تابع تست‌پذیر
+        req, ref_price, original_intent = _create_order_from_event(
+            pending_info, symbol, engine_config.get("leverage", 1)
         )
         
         validation_state = copy.deepcopy(state)
         
-        # ✅ فقط برای ENTRY و با بررسی دقیق سیگنال، pending_entry را پاک می‌کنیم
-        if intent == "ENTRY":
+        if req.intent == "ENTRY":
             if validation_state.get("pending_entry"):
                 if validation_state["pending_entry"].get("signal_candle_ts") == pending_info.get("signal_candle_ts"):
                     validation_state["pending_entry"] = None
                 else:
-                    print(f"    ⛔ [MOCK_LIVE] {intent} REJECTED: Stale pending_entry.")
+                    print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: Stale pending_entry.")
                     return False
                 
         decision = em.execute(req, specs, validation_state, engine_config, ref_price=ref_price)
         
         if decision.accepted:
-            print(f"    🛡️ [MOCK_LIVE] {intent} ACCEPTED. Size: {req.qty}")
+            print(f"    🛡️ [MOCK_LIVE] {original_intent} ACCEPTED. Size: {req.qty}")
             return True
         else:
-            print(f"    ⛔ [MOCK_LIVE] {intent} REJECTED: {decision.reason}")
+            print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: {decision.reason}")
             return False
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (ATOMIC)")
+        print("🛡️  MOCK LIVE TRADING RUN (ATOMIC & FIXED TP1)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -242,15 +257,11 @@ def main() -> int:
                 print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
                 raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
 
-            # ✅ ثبت اتمیک: ابتدا Events استاندارد، سپس State
             if events:
                 try:
-                    # ۱. ثبت Events با تابع استاندارد (ایدمپوتنت با fingerprint)
-                    appended, skipped = append_events(state_dir, events, strategy_hash=strategy_hash)
-                    total_events_generated += appended
-                    
-                    # ۲. ذخیره State
                     save_state(state_dir, state)
+                    added_count = append_events(state_dir, events, strategy_hash=strategy_hash)
+                    total_events_generated += added_count
                 except Exception as e:
                     raise _RunComplete(1, "failed", f"save failed at idx={idx}: {type(e).__name__}: {e}")
             else:
