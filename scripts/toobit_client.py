@@ -1,5 +1,6 @@
 """
-toobit_client.py — Secure API Client for Toobit Futures (Supports Demo/Live).
+toobit_client.py — Secure Read-Only API Client for Toobit Futures.
+v1.2 - Read-Only, strict error handling, injectable timestamp for testing.
 """
 import time
 import hmac
@@ -20,58 +21,64 @@ class ToobitClient:
         })
         self.logger = logging.getLogger("ToobitClient")
 
-    def _generate_signature(self, params: dict) -> str:
-        query_string = urllib.parse.urlencode(sorted(params.items()))
+    def _generate_signature(self, query_string: str) -> str:
         return hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
             hashlib.sha256
         ).hexdigest()
 
-    def _request(self, method: str, endpoint: str, params: dict = None):
+    def _request(self, method: str, endpoint: str, params: dict = None, timestamp: int = None):
         if params is None:
             params = {}
         
-        params["timestamp"] = int(time.time() * 1000)
+        if timestamp is None:
+            timestamp = int(time.time() * 1000)
+            
+        params["timestamp"] = timestamp
         params["recvWindow"] = 5000
-        params["signature"] = self._generate_signature(params)
         
-        url = f"{self.base_url}{endpoint}"
+        # مرتب‌سازی و ساخت Query String
+        query_string = urllib.parse.urlencode(sorted(params.items()))
+        signature = self._generate_signature(query_string)
+        
+        final_url = f"{self.base_url}{endpoint}?{query_string}&signature={signature}"
         
         try:
             if method.upper() == "GET":
-                response = self.session.get(url, params=params, timeout=10)
+                response = self.session.get(final_url, timeout=10)
             else:
-                response = self.session.post(url, data=params, timeout=10)
+                response = self.session.post(final_url, timeout=10)
                 
+            # 1. خطای شبکه (HTTP Status)
             if response.status_code != 200:
-                return {"error": f"HTTP {response.status_code}", "status": "NETWORK_ERROR"}
+                return {
+                    "error": f"HTTP {response.status_code}",
+                    "status": "HTTP_ERROR",
+                    "status_code": response.status_code,
+                    "raw": response.text
+                }
             
-            data = response.json()
-            if data.get("code") != 200 and data.get("code") != 0 and "code" in data:
-                return {"error": data.get("msg", "Unknown API Error"), "status": "API_ERROR", "raw": data}
+            # 2. خطای JSON
+            try:
+                data = response.json()
+            except ValueError:
+                return {"error": "Invalid JSON response", "status": "NETWORK_ERROR", "raw": response.text}
+            
+            # 3. خطای تجاری (API Error)
+            if isinstance(data, dict) and "code" in data:
+                if data.get("code") not in (200, 0):
+                    return {"error": data.get("msg", "API Error"), "status": "API_ERROR", "raw": data}
                 
-            return data
+            return {"status": "SUCCESS", "data": data}
+            
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network Error: {e}")
             return {"error": str(e), "status": "NETWORK_ERROR"}
-        except ValueError as e:
-            self.logger.error(f"Invalid JSON: {e}")
-            return {"error": "Invalid JSON Response", "status": "NETWORK_ERROR"}
 
-    def get_position(self, symbol: str):
-        return self._request("GET", "/api/v1/futures/position", {"symbol": symbol})
+    def get_balance(self, timestamp=None):
+        """فقط خواندن موجودی (بدون امکان ارسال سفارش)"""
+        return self._request("GET", "/api/v1/futures/balance", timestamp=timestamp)
 
-    def place_order(self, symbol: str, side: str, order_type: str, quantity: float, price: float = None, client_order_id: str = None):
-        params = {
-            "symbol": symbol,
-            "side": side.upper(),
-            "type": order_type.upper(),
-            "quantity": str(quantity)
-        }
-        if price:
-            params["price"] = str(price)
-        if client_order_id:
-            params["newClientOrderId"] = client_order_id
-            
-        return self._request("POST", "/api/v1/futures/order", params)
+    def get_position(self, symbol: str, timestamp=None):
+        return self._request("GET", "/api/v1/futures/position", {"symbol": symbol}, timestamp=timestamp)
