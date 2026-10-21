@@ -1,8 +1,9 @@
 """
 test_order_executor.py — Contract tests برای order_executor.py.
 
-⚠️ به‌روزرسانی قرارداد (v1.1):
+⚠️ به‌روزرسانی قرارداد (v1.2):
   - EXIT حتی با فعال بودن Kill Switch مجاز است.
+  - volume خروج باید با remaining_size در position هماهنگ باشد.
 """
 
 import math
@@ -32,8 +33,14 @@ STATE_EMPTY = {
     "circuit_breaker_active": False, "kill_switch": False,
 }
 
+# ✅ اصلاح: اضافه کردن remaining_size به ساختار پوزیشن
 STATE_WITH_POSITION = {
-    "position": {"side": "LONG", "entry_price": 85000.0},
+    "position": {
+        "side": "LONG", 
+        "entry_price": 85000.0,
+        "size": 1.0,
+        "remaining_size": 1.0 # این فیلد برای گیت exit_qty حیاتی است
+    },
     "pending_entry": None, "circuit_breaker_active": False, "kill_switch": False,
 }
 
@@ -140,7 +147,7 @@ def test_kill_switch_flag_rejects():
     assert d.accepted is False and d.gate == "kill_switch"
 
 def test_exit_not_blocked_by_kill_switch_exception():
-    # ✅ اصلاح: قرارداد جدید: EXIT حتی با kill switch فعال مجاز است
+    # ✅ قرارداد جدید: EXIT حتی با kill switch فعال مجاز است
     state = dict(STATE_WITH_POSITION)
     state["circuit_breaker_active"] = True
     d = evaluate(_req(intent="EXIT"), SPECS, state, DEFAULT_CONFIG)
@@ -167,6 +174,19 @@ def test_exit_allowed_when_position_open():
     d = evaluate(_req(intent="EXIT"), SPECS, STATE_WITH_POSITION, DEFAULT_CONFIG)
     assert d.accepted is True
     assert d.order["intent"] == "EXIT"
+
+# Exit Qty (3) - ✅ تست‌های جدید
+def test_valid_partial_exit():
+    d = evaluate(_req(intent="EXIT", qty=0.5), SPECS, STATE_WITH_POSITION, DEFAULT_CONFIG)
+    assert d.accepted is True
+
+def test_exit_over_position_rejected():
+    d = evaluate(_req(intent="EXIT", qty=2.0), SPECS, STATE_WITH_POSITION, DEFAULT_CONFIG)
+    assert d.accepted is False and d.gate == "exit_qty"
+
+def test_exit_without_position_rejected():
+    d = evaluate(_req(intent="EXIT", qty=0.1), SPECS, STATE_EMPTY, DEFAULT_CONFIG)
+    assert d.accepted is False and d.gate == "exit_qty"
 
 # MockAdapter (3)
 def test_mock_adapter_records_history():
@@ -214,6 +234,8 @@ if __name__ == "__main__":
         test_duplicate_entry_with_pending_rejects,
         test_position_limit_blocks_entry_when_full,
         test_exit_allowed_when_position_open,
+        test_valid_partial_exit, test_exit_over_position_rejected,
+        test_exit_without_position_rejected,
         test_mock_adapter_records_history, test_mock_adapter_reset,
         test_mock_adapter_deterministic, test_constants,
     ]
