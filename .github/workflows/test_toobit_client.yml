@@ -1,0 +1,15 @@
+name: Test Toobit Client
+
+on:
+  workflow_dispatch: # فقط دستی اجرا می‌شود تا زمانی که مطمئن شویم
+
+jobs:
+  test-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests pytest
+      - run: pytest -q tests/test_toobit_client.py
