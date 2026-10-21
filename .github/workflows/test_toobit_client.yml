@@ -1,7 +1,8 @@
 name: Test Toobit Client
 
 on:
-  workflow_dispatch: # فقط دستی اجرا می‌شود تا زمانی که مطمئن شویم
+  push:            # ✅ این خط باعث می‌شود با هر تغییر خودکار اجرا شود
+  workflow_dispatch: # این هم برای اجرای دستی باقی می‌ماند
 
 jobs:
   test-client:
