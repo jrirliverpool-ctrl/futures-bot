@@ -1,16 +1,32 @@
 name: Test Toobit Client
 
 on:
-  push:            # ✅ این خط باعث می‌شود با هر تغییر خودکار اجرا شود
-  workflow_dispatch: # این هم برای اجرای دستی باقی می‌ماند
+  workflow_dispatch: # ✅ فقط اجرای دستی (بدون Push خودکار)
+
+permissions:
+  contents: read
 
 jobs:
   test-client:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests pytest
-      - run: pytest -q tests/test_toobit_client.py
+
+      - name: Install dependencies
+        run: pip install requests pytest
+
+      - name: Run offline mock tests
+        run: pytest -q tests/test_toobit_client.py
+
+      - name: Verify credentials are configured
+        env:
+          TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
+          TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
+        run: |
+          python -c "import os,sys; sys.exit(0 if os.getenv('TOOBIT_API_KEY') and os.getenv('TOOBIT_API_SECRET') else 1)"
