@@ -1,7 +1,9 @@
+# Trigger: Run Real Connection Test
 name: Test Toobit Client
 
 on:
-  workflow_dispatch: # فقط اجرای دستی برای جلوگیری از درخواست‌های ناخواسته
+  push:              # ✅ با هر تغییر خودکار اجرا می‌شود
+  workflow_dispatch: # امکان اجرای دستی
 
 permissions:
   contents: read
@@ -24,7 +26,6 @@ jobs:
       - name: Run Offline Mock Tests (12 tests)
         run: pytest -q tests/test_toobit_client.py
 
-      # ✅ مرحله جدید: تست اتصال واقعی
       - name: Run Real Connection Test (Read-Only)
         env:
           TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
