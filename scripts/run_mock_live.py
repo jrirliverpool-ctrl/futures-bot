@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v2.2 - Extracted Event->Order mapping for testability.
+v2.3 - Fixed callback payload keys (intent, qty).
 """
 
 import json
@@ -104,18 +104,20 @@ def _write_paper_status_atomic(state_dir, status):
         raise
 
 
-# ✅ تابع مستقل برای تبدیل رویداد به درخواست
 def _create_order_from_event(ev, symbol, leverage=1):
     """
-    رویداد TP1_HIT را به یک درخواست EXIT با حجم جزئی تبدیل می‌کند.
+    ✅ v2.3: اصلاح کلیدهای ورودی (intent و qty) بر اساس خروجی paper_engine
     """
-    intent = ev["type"]
+    intent = ev.get("intent")
+    if intent is None:
+        raise ValueError(f"Missing 'intent' in event: {ev}")
+        
     order_intent = "EXIT" if intent == "TP1_HIT" else intent
     
-    # در paper_engine، رویداد TP1_HIT فیلد size دارد (که همان حجم خروج جزئی است)
-    # برای EXIT (کامل) از remaining_size استفاده می‌شود
-    qty = ev.get("size") if intent == "TP1_HIT" else ev.get("remaining_size")
-    
+    qty = ev.get("qty")
+    if qty is None:
+        raise ValueError(f"Missing 'qty' in event: {ev}")
+        
     price = ev.get("price", 0.0)
 
     req = OrderRequest(
@@ -145,7 +147,6 @@ def main() -> int:
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
     def execution_callback(pending_info):
-        # ✅ استفاده از تابع تست‌پذیر
         req, ref_price, original_intent = _create_order_from_event(
             pending_info, symbol, engine_config.get("leverage", 1)
         )
@@ -171,7 +172,7 @@ def main() -> int:
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (ATOMIC & FIXED TP1)")
+        print("🛡️  MOCK LIVE TRADING RUN (FIXED QTY KEY)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
