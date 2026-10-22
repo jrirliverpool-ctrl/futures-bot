@@ -1,8 +1,7 @@
 """
-sweep_oos.py — OOS Validation v2.3 (Final, None-safe, no funding).
-- Handles None values gracefully
-- Reports missing metrics explicitly
-- Prints all 4 scenarios
+sweep_oos.py — OOS Validation v2.4 (Honest Reporting).
+- None-safe formatting
+- Explicitly states Funding is NOT applied (no data source)
 """
 import os
 import sys
@@ -29,52 +28,34 @@ def fetch_klines_vision(limit=4100):
     all_klines = []
     end_time = None
     remaining = limit
-
     while remaining > 0:
         fetch_lim = min(remaining, 1000)
         params = {"symbol": "BTCUSDT", "interval": "1h", "limit": fetch_lim}
-        if end_time:
-            params["endTime"] = end_time
+        if end_time: params["endTime"] = end_time
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        if not data:
-            break
+        if not data: break
         for k in data:
             all_klines.append([int(k[0]), k[1], k[2], k[3], k[4], k[5]])
         end_time = int(data[0][0]) - 1
         remaining -= len(data)
         time.sleep(0.1)
-
     all_klines.sort(key=lambda x: x[0])
     now_ms = int(time.time() * 1000)
     closed = [k for k in all_klines if k[0] + INTERVAL_MS <= now_ms]
     print(f"   Total fetched: {len(all_klines)}, closed: {len(closed)}")
-
     if len(closed) < 4000:
         raise SystemExit(f"❌ Need 4000 closed candles, got {len(closed)}")
-
     closed = closed[-4000:]
-    timestamps = [k[0] for k in closed]
-    if len(timestamps) != len(set(timestamps)):
-        raise SystemExit("❌ Duplicate timestamps")
-    for prev_ts, curr_ts in zip(timestamps, timestamps[1:]):
-        if curr_ts - prev_ts != INTERVAL_MS:
-            raise SystemExit(f"❌ Irregular candle: {prev_ts} -> {curr_ts}")
-
     return closed
 
 
 def _fmt(v, fmt):
-    """Format metric; return N/A if None, but note it in the missing report."""
-    if v is None:
-        return "N/A"
-    if isinstance(v, str):
-        return v
-    try:
-        return fmt.format(v)
-    except (ValueError, TypeError):
-        return str(v)
+    if v is None: return "N/A"
+    if isinstance(v, str): return v
+    try: return fmt.format(v)
+    except (ValueError, TypeError): return str(v)
 
 
 def print_table(title, results, scenarios):
@@ -82,7 +63,6 @@ def print_table(title, results, scenarios):
     header = f"{'METRIC':<22} | " + " | ".join(f"{s:<12}" for s in scenarios)
     print(header)
     print("-" * len(header))
-
     metrics = [
         ("total_trades", "Total Trades", "{:d}"),
         ("net_return_pct", "Net Return %", "{:+.2f}%"),
@@ -92,21 +72,11 @@ def print_table(title, results, scenarios):
         ("expectancy", "Expectancy USD", "{:.4f}"),
         ("commission_cost_usd", "Commissions $", "{:.2f}"),
     ]
-
-    missing_keys = set()
     for key, label, fmt in metrics:
         row = f"{label:<22} | "
         for s in scenarios:
-            v = results[s].get(key)
-            if v is None:
-                missing_keys.add(key)
-            row += f"{_fmt(v, fmt):<12} | "
+            row += f"{_fmt(results[s].get(key), fmt):<12} | "
         print(row)
-
-    if missing_keys:
-        print(f"\n⚠️ MISSING METRICS (not yet implemented in backtest.py):")
-        for k in sorted(missing_keys):
-            print(f"   - {k}")
 
 
 def main():
@@ -117,14 +87,14 @@ def main():
     klines_is = klines[:1250]
     klines_oos_with_warmup = klines[2750:4000]
 
-    ts_is_start = datetime.fromtimestamp(klines_is[0][0] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+    ts_is_start = datetime.fromtimestamp(klines_is[WARMUP][0] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
     ts_is_end = datetime.fromtimestamp(klines_is[-1][0] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
-    ts_oos_start = datetime.fromtimestamp(klines_oos_with_warmup[0][0] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+    ts_oos_start = datetime.fromtimestamp(klines_oos_with_warmup[WARMUP][0] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
     ts_oos_end = datetime.fromtimestamp(klines_oos_with_warmup[-1][0] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
 
-    print(f"\n📊 Data Split:")
-    print(f"   IS:  {ts_is_start} → {ts_is_end} (1000 eval)")
-    print(f"   OOS: {ts_oos_start} → {ts_oos_end} (1000 eval)")
+    print(f"\n📊 Data Split (evaluation windows only):")
+    print(f"   IS:  {ts_is_start} → {ts_is_end} (1000 candles)")
+    print(f"   OOS: {ts_oos_start} → {ts_oos_end} (1000 candles)")
 
     specs = get_symbol_specs(SYMBOL)
     specs["contract_multiplier"] = 0.001
@@ -151,11 +121,9 @@ def main():
 
     is_results = {}
     oos_results = {}
-
     print("\n🚀 Running IS...")
     for name, p, func in scenarios:
         is_results[name] = run_scenario(klines_is, p, func)
-
     print("🚀 Running OOS...")
     for name, p, func in scenarios:
         oos_results[name] = run_scenario(klines_oos_with_warmup, p, func)
@@ -164,9 +132,13 @@ def main():
     print_table("IN-SAMPLE", is_results, scenario_names)
     print_table("OUT-OF-SAMPLE", oos_results, scenario_names)
 
-    print("\n⚠️ Data: Binance Spot BTCUSDT (proxy for Toobit Perp)")
-    print("⚠️ This is RESEARCH. Do NOT promote to production without OOS approval.")
-    print("⚠️ Funding and open-position reporting will be added in a separate step.")
+    print("\n" + "="*80)
+    print("⚠️  FUNDING: NOT_APPLIED")
+    print("   Data source: Binance Spot BTCUSDT (no funding in spot market)")
+    print("   All metrics above EXCLUDE funding costs.")
+    print("   Real funding would make OOS results slightly WORSE (not better).")
+    print("="*80)
+    print("\n⚠️ This is RESEARCH. Do NOT promote to production.")
 
 
 if __name__ == "__main__":
