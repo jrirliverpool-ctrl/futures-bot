@@ -1,5 +1,6 @@
 """
 sweep_oos.py — Rigorous OOS with Data Validation and Equal Windows.
+v3.0 - Drop unclosed candles, print all 4 scenarios.
 """
 import os
 import sys
@@ -24,6 +25,10 @@ def fetch_klines_vision(limit=4000):
     all_klines = []
     end_time = None
     remaining = limit
+    
+    # ✅ چک زمان فعلی برای حذف کندل‌های باز
+    current_time = int(time.time() * 1000)
+    
     while remaining > 0:
         fetch_lim = min(remaining, 1000)
         params = {"symbol": "BTCUSDT", "interval": "1h", "limit": fetch_lim}
@@ -32,19 +37,24 @@ def fetch_klines_vision(limit=4000):
         resp.raise_for_status()
         data = resp.json()
         if not data: break
+        
         for k in data:
-            all_klines.append([int(k[0]), k[1], k[2], k[3], k[4], k[5]])
+            # k[0] = Open Time, k[6] = Close Time
+            close_time = int(k[6])
+            # ✅ فقط کندل‌هایی که بسته شده‌اند
+            if close_time < current_time:
+                all_klines.append([int(k[0]), k[1], k[2], k[3], k[4], k[5]])
+                
         end_time = int(data[0][0]) - 1
         remaining -= len(data)
         time.sleep(0.1)
+    
     all_klines.sort(key=lambda x: x[0])
     
-    # ✅ اعتبارسنجی سخت‌گیرانه داده‌ها
+    # اعتبارسنجی
     timestamps = [k[0] for k in all_klines]
     if len(timestamps) != len(set(timestamps)):
         raise SystemExit("❌ Duplicate candle timestamps detected.")
-    if timestamps != sorted(timestamps):
-        raise SystemExit("❌ Candle timestamps are not sorted.")
     for prev_ts, curr_ts in zip(timestamps, timestamps[1:]):
         if curr_ts - prev_ts != 3_600_000:
             raise SystemExit(f"❌ Missing or irregular 1h candle: {prev_ts} -> {curr_ts}")
@@ -54,12 +64,8 @@ def fetch_klines_vision(limit=4000):
 def main():
     klines = fetch_klines_vision(limit=4000)
     if len(klines) < 4000:
-        raise SystemExit(f"❌ Failed to fetch 4000 candles. Got {len(klines)}")
+        raise SystemExit(f"❌ Failed to fetch 4000 closed candles. Got {len(klines)}")
         
-    # ✅ برابری طول دوره‌ها (هر دو 1000 کندل ارزیابی) با Gap
-    # IS: 1250 کندل (250 Warmup + 1000 Eval)
-    # Gap: 1500 کندل
-    # OOS: 1250 کندل (250 Warmup + 1000 Eval)
     klines_is = klines[:1250]
     klines_oos_with_warmup = klines[2750:4000]
     
@@ -109,9 +115,9 @@ def main():
     for name, p, func in scenarios:
         oos_results[name] = run_scenario(klines_oos_with_warmup, p, func)
 
-    print("\n" + "="*120)
-    print(f"{'METRIC':<20} | {'Base_D20 (IS)':<15} | {'Base_D20 (OOS)':<15} | {'Flex_D15 (IS)':<15} | {'Flex_D15 (OOS)':<15}")
-    print("="*120)
+    print("\n" + "="*140)
+    print(f"{'METRIC':<20} | {'Base_D20 (IS)':<15} | {'Base_D20 (OOS)':<15} | {'Flex_D15 (IS)':<15} | {'Flex_D15 (OOS)':<15} | {'Flex_D20 (IS)':<15} | {'Flex_D20 (OOS)':<15}")
+    print("="*140)
     
     for key, label, fmt in [
         ("total_trades", "Total Trades", "{:d}"),
@@ -126,8 +132,17 @@ def main():
         row += f"{fmt.format(oos_results['Base_D20'].get(key)):<15} | "
         row += f"{fmt.format(is_results['Flex_D15'].get(key)):<15} | "
         row += f"{fmt.format(oos_results['Flex_D15'].get(key)):<15} | "
+        row += f"{fmt.format(is_results['Flex_D20'].get(key)):<15} | "
+        row += f"{fmt.format(oos_results['Flex_D20'].get(key)):<15} | "
         print(row)
-    print("="*120)
+    print("="*140)
+
+    # هشدار پوزیشن باز
+    for name in ["Base_D20", "Flex_D15"]:
+        if is_results[name].get("open_position_at_end"):
+            print(f"⚠️  {name} has an open position at end of IS.")
+        if oos_results[name].get("open_position_at_end"):
+            print(f"⚠️  {name} has an open position at end of OOS.")
 
 if __name__ == "__main__":
     main()
