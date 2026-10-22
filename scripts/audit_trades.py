@@ -1,6 +1,5 @@
 """
 audit_trades.py — Detailed audit of Flex_D15 IS trades.
-Fixes: Full UTC dates, commission column, open-position check.
 """
 import os
 import sys
@@ -33,7 +32,6 @@ def main():
     events = result["events"]
     final_state = result["final_state"]
     
-    # ✅ بررسی پوزیشن باز در پایان
     if final_state.get("position") is not None:
         print("⚠️  WARNING: An open position exists at the end of the IS period.")
         print(f"   Side: {final_state['position'].get('side')}")
