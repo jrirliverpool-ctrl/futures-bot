@@ -1,7 +1,8 @@
 name: Research - Audit Trades
 
 on:
-  workflow_dispatch:
+  push:              # ✅ اضافه شده برای اجبار گیت‌هاب به شناسایی و اجرای خودکار
+  workflow_dispatch: # امکان اجرای دستی
 
 permissions:
   contents: read
