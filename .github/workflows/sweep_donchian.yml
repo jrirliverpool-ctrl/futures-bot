@@ -1,32 +1,42 @@
-name: Sweep Donchian Parameters
+name: Research - Donchian Sweep
 
 on:
-  workflow_dispatch: # فقط به صورت دستی اجرا می‌شود تا منابع هدر نرود
+  workflow_dispatch:
+    inputs:
+      candle_limit:
+        description: "Requested number of closed candles"
+        required: true
+        default: "1000"
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  sweep:
+  donchian-sweep:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # بک‌تست ممکن است چند دقیقه طول بکشد
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout Code
+      - name: Checkout research branch
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
+      - name: Install required dependency
+        run: python -m pip install requests
 
-      - name: Run Donchian Sweep
-        env:
-          SYMBOL: BTC-SWAP-USDT
-          INTERVAL: 1h
-        run: python scripts/sweep_donchian.py
+      - name: Run controlled Donchian comparison
+        run: python scripts/sweep_donchian.py "${{ inputs.candle_limit }}"
+
+      - name: Upload comparison reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: donchian-sweep-results
+          path: artifacts/donchian_sweep.*
+          if-no-files-found: warn
+          retention-days: 14
