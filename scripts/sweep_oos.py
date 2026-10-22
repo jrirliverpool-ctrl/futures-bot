@@ -1,9 +1,8 @@
 """
-sweep_oos.py — OOS Validation v2.3.
-- None-safe formatting (fail-soft, no crash)
-- Explicitly reports missing metrics
-- Only uses fields currently available in backtest.py
-- Funding and open-position reporting will be added after separate audit
+sweep_oos.py — OOS Validation v2.3 (Final, None-safe, no funding).
+- Handles None values gracefully
+- Reports missing metrics explicitly
+- Prints all 4 scenarios
 """
 import os
 import sys
@@ -104,7 +103,6 @@ def print_table(title, results, scenarios):
             row += f"{_fmt(v, fmt):<12} | "
         print(row)
 
-    # ✅ Explicit report of missing metrics
     if missing_keys:
         print(f"\n⚠️ MISSING METRICS (not yet implemented in backtest.py):")
         for k in sorted(missing_keys):
