@@ -1,7 +1,7 @@
-name: Audit Equity
+name: Audit Equity & Candle Sequence
 
 on:
-  workflow_dispatch: # فقط به صورت دستی اجرا می‌شود
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,7 +23,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Run Audit Script
+      - name: Run Candle Sequence Verification
+        env:
+          STATE_DIR: ./paper_state_dir
+        run: python scripts/verify_candle_sequence.py
+
+      - name: Run Equity Audit
         env:
           STATE_DIR: ./paper_state_dir
         run: python scripts/audit_equity.py
