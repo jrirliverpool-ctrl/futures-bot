@@ -1,6 +1,6 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.2 - Strict PnL contract and Funding snapshot fix.
+v3.3 - Fixed funding timing on exit candles.
 """
 import copy
 from decimal import Decimal, ROUND_DOWN
@@ -86,9 +86,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     events = []
     pending = state.get("pending_entry")
     if pending is None: return state, events
-
     ts = int(candle[0])
-
     if config.get("kill_switch_active", False):
         events.append({"type": "KILL_SWITCH_BLOCKED", "stage": "entry_execution", "reason": config.get("kill_switch_reason"), "side": pending.get("side"), "timestamp": ts})
         state["pending_entry"] = None
@@ -98,12 +96,10 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     open_price = float(candle[1])
     entry_price = apply_slippage(open_price, is_entry=True, side=side, slip_pct=config["slippage_pct"])
     sl, tp1 = compute_initial_levels(entry_price, pending["atr_at_signal"], side, config)
-
     qty = calculate_position_size(
         state["equity"], entry_price, sl, specs, config["risk_per_trade"],
         leverage=config.get("leverage"), leverage_cap=config.get("leverage_cap"),
     )
-
     if qty is None:
         events.append({"type": "ENTRY_REJECTED", "reason": "invalid_size", "timestamp": ts})
         state["pending_entry"] = None
@@ -132,11 +128,9 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         "tp1_hit": False, "be_moved": False, "trailing_active": False,
         "highest_high_since_entry": entry_price, "lowest_low_since_entry": entry_price,
         "candles_since_entry": 0, "atr_at_entry": pending["atr_at_signal"],
-        "signal_candle_ts": pending["signal_candle_ts"],
-        "commission_paid_usd": entry_commission,
+        "signal_candle_ts": pending["signal_candle_ts"], "commission_paid_usd": entry_commission,
     }
     state["pending_entry"] = None
-
     events.append({
         "type": "ENTRY", "side": side, "price": entry_price, "size": qty,
         "sl": sl, "tp1": tp1, "notional_usd": entry_notional,
@@ -150,7 +144,6 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
     l = float(candle[3])
     c = float(candle[4])
     ts = int(candle[0])
-
     atr_current = _resolve_atr(atr_current, pos.get("atr_at_entry"))
     p = copy.deepcopy(pos)
     events = []
@@ -161,14 +154,8 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
         tp1_hit_this_candle = (side == "LONG" and h >= p["initial_tp1"]) or (side == "SHORT" and l <= p["initial_tp1"])
 
     if sl_hit:
-        if exit_callback is None or exit_callback({
-            "intent": "EXIT", "side": side, "qty": p["remaining_size"],
-            "price": p["current_sl"], "timestamp": ts
-        }):
-            events.append({
-                "type": "EXIT", "reason": "SL", "price": p["current_sl"], "timestamp": ts,
-                "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"],
-            })
+        if exit_callback is None or exit_callback({"intent": "EXIT", "side": side, "qty": p["remaining_size"], "price": p["current_sl"], "timestamp": ts}):
+            events.append({"type": "EXIT", "reason": "SL", "price": p["current_sl"], "timestamp": ts, "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"]})
             return p, events, True
         else:
             return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
@@ -191,10 +178,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
 
     if not p["tp1_hit"] and tp1_hit_this_candle:
         tp1_size = p["size"] * 0.5
-        if exit_callback is None or exit_callback({
-            "intent": "TP1_HIT", "side": side, "qty": tp1_size,
-            "price": p["initial_tp1"], "timestamp": ts
-        }):
+        if exit_callback is None or exit_callback({"intent": "TP1_HIT", "side": side, "qty": tp1_size, "price": p["initial_tp1"], "timestamp": ts}):
             dir_sign = 1 if side == "LONG" else -1
             pnl_tp1 = tp1_size * (p["initial_tp1"] - p["entry_price"]) * config["contract_multiplier_for_pnl"] * dir_sign
             mult = config["contract_multiplier_for_pnl"]
@@ -228,14 +212,8 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
 
     p["candles_since_entry"] += 1
     if p["candles_since_entry"] >= config["time_exit_candles"]:
-        if exit_callback is None or exit_callback({
-            "intent": "EXIT", "side": side, "qty": p["remaining_size"],
-            "price": c, "timestamp": ts
-        }):
-            events.append({
-                "type": "EXIT", "reason": "TIME_EXIT", "price": c,
-                "timestamp": ts, "ambiguous": False, "remaining_size": p["remaining_size"],
-            })
+        if exit_callback is None or exit_callback({"intent": "EXIT", "side": side, "qty": p["remaining_size"], "price": c, "timestamp": ts}):
+            events.append({"type": "EXIT", "reason": "TIME_EXIT", "price": c, "timestamp": ts, "ambiguous": False, "remaining_size": p["remaining_size"]})
             return p, events, True
         else:
             return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
@@ -310,16 +288,14 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
     position_closed = False
     if state.get("position") is not None:
-        # ✅ Snapshot از پوزیشن قبل از تغییرات (برای Funding)
+        # ✅ اصلاح: Funding قبل از بررسی SL/TP اعمال می‌شود
         funding_pos = copy.deepcopy(state["position"])
-        
+        apply_funding_if_due(state, candle, specs, config, events, pos=funding_pos)
+
         atr_current = indicators["atr"][i]
         pos_after, pos_events, exited = manage_position_on_candle(
             state["position"], candle, atr_current, config, exit_callback=exit_callback
         )
-
-        if not exited:
-            apply_funding_if_due(state, candle, specs, config, events, pos=funding_pos)
 
         events.extend(pos_events)
 
@@ -330,14 +306,11 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         if exited:
             exit_event = next(e for e in pos_events if e["type"] == "EXIT")
             result = close_position(state, pos_after, exit_event["price"], specs, config)
-            
-            # ✅ قرارداد PnL
             exit_event.update({
-                "pnl_usd": result["pnl_gross"], # سود ناخالص
-                "pnl_gross": result["pnl_gross"],
+                "pnl_usd": result["pnl_gross"], "pnl_gross": result["pnl_gross"],
                 "commission_usd": result["final_commission"],
                 "total_commission_usd": result["total_commission"],
-                "trade_net_pnl_usd": result["pnl_net"], # سود خالص (این را در گزارش استفاده کنید)
+                "trade_net_pnl_usd": result["pnl_net"],
                 "exit_price_adj": result["exit_price_adj"],
                 "entry_price": pos_after["entry_price"],
             })
@@ -393,41 +366,3 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
     state["last_processed_candle_ts"] = ts
     return state, events
-
-# DEFAULT_CONFIG و DEFAULT_STATE بدون تغییر باقی می‌مانند
-DEFAULT_CONFIG = {
-    "risk_per_trade": 0.01,
-    "sl_atr_mult": 1.5,
-    "tp1_atr_mult": 2.0,
-    "be_trigger_at_r": 1.0,
-    "trailing_atr_mult": 1.5,
-    "be_sl_offset_atr": 0.1,
-    "time_exit_candles": 48,
-    "cooldown_candles": 2,
-    "daily_loss_limit": 0.03,
-    "weekly_loss_limit": 0.07,
-    "total_dd_limit": 0.15,
-    "slippage_pct": 0.0005,
-    "open_taker_fee": 0.0,
-    "close_taker_fee": 0.0,
-    "interval_ms": 3_600_000,
-    "kill_switch_active": False,
-    "kill_switch_reason": None,
-}
-
-DEFAULT_STATE = {
-    "version": "1.0.0",
-    "initial_equity": 1000.0,
-    "equity": 1000.0,
-    "peak_equity": 1000.0,
-    "last_processed_candle_ts": None,
-    "position": None,
-    "pending_entry": None,
-    "cooldown_until_index": None,
-    "daily_loss": 0.0,
-    "weekly_loss": 0.0,
-    "loss_day_key": None,
-    "loss_week_key": None,
-    "circuit_breaker_active": False,
-    "last_funding_ts": None,
-}
