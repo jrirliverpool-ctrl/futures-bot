@@ -36,25 +36,25 @@ jobs:
 
       - name: Run Safety Tests
         run: |
-          # ✅ اضافه شدن تست جدید TP1 Exit
-          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py tests/test_tp1_exit.py
+          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py tests/test_tp1_exit.py tests/test_telegram_notifier.py
 
       - name: Run Mock Live Engine
         env:
           STATE_DIR: ./paper_state_dir
           SYMBOL: BTC-SWAP-USDT
           INTERVAL: 1h
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/run_mock_live.py
 
       - name: Commit State Updates
-        if: always() # اجرا حتی در صورت شکست برای ذخیره وضعیت failed
+        if: always()
         run: |
           set -e
           
           git config user.name "ApexQuant Bot"
           git config user.email "bot@apexquant.local"
 
-          # اضافه کردن تمام تغییرات در پوشه (شامل paper_status.json)
           git add -f -A -- paper_state_dir/
           
           if ! git diff --staged --quiet; then
