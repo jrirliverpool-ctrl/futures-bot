@@ -1,0 +1,41 @@
+name: Start New Evaluation Period
+
+on:
+  workflow_dispatch: # فقط دستی اجرا می‌شود
+
+permissions:
+  contents: write
+
+jobs:
+  start-period:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Start New Period Script
+        env:
+          STATE_DIR: ./paper_state_dir
+        run: python scripts/start_new_period.py
+
+      - name: Commit New Period State
+        run: |
+          set -e
+          git config user.name "ApexQuant Bot"
+          git config user.email "bot@apexquant.local"
+          
+          # اضافه کردن تمام تغییرات (پوشه آرشیو و فایل‌های جدید)
+          git add -f -A -- paper_state_dir/
+          
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: archive old data and start new 30-day period [skip ci]"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          else
+            echo "No state changes to commit."
+          fi
