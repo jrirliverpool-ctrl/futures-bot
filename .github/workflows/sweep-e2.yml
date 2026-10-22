@@ -1,0 +1,33 @@
+name: Research - E2 Flexible Trend
+
+on:
+  workflow_dispatch:
+    inputs:
+      candle_limit:
+        description: "Requested number of closed candles"
+        required: true
+        default: "1000"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sweep-e2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout research branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install required dependency
+        run: python -m pip install requests
+
+      - name: Run E2 controlled comparison
+        run: python scripts/sweep_e2.py "${{ inputs.candle_limit }}"
