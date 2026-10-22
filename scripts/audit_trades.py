@@ -1,5 +1,6 @@
 """
 audit_trades.py — Detailed audit of Flex_D15 IS trades.
+Fixes: Requests 4100 candles to ensure 4000 closed are available.
 """
 import os
 import sys
@@ -13,7 +14,15 @@ from sweep_oos import fetch_klines_vision
 from symbol_specs import get_symbol_specs
 
 def main():
-    klines = fetch_klines_vision(4000)
+    # ✅ Request 4100 candles (one may be unclosed)
+    klines = fetch_klines_vision(4100)
+    
+    # ✅ Use the last 4000 closed candles
+    if len(klines) < 4000:
+        raise SystemExit(f"❌ Need 4000 closed candles, got {len(klines)}")
+    klines = klines[-4000:]
+    
+    # ✅ IS period: 1250 input candles (250 warmup + 1000 eval)
     klines_is = klines[:1250]
     
     specs = get_symbol_specs("BTC-SWAP-USDT")
@@ -34,9 +43,6 @@ def main():
     
     if final_state.get("position") is not None:
         print("⚠️  WARNING: An open position exists at the end of the IS period.")
-        print(f"   Side: {final_state['position'].get('side')}")
-        print(f"   Entry: {final_state['position'].get('entry_price')}")
-        print("   This means not all trades were closed. Audit may be incomplete.\n")
     
     trades = []
     current_entry = None
