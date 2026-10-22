@@ -1,5 +1,5 @@
 {
-  "candles_processed_this_run": 1,
+  "candles_processed_this_run": 0,
   "catchup_lag": 0,
   "equity": 971.8365982771752,
   "error_message": null,
@@ -7,15 +7,15 @@
   "interval": "1h",
   "last_processed_candle_ts": 1792670400000,
   "peak_equity": 971.8365982771752,
-  "reconciler_status": "OK",
-  "reconciler_summary": "5 checks: 0 error, 0 warning",
+  "reconciler_status": null,
+  "reconciler_summary": null,
   "run_exit_code": 0,
-  "run_finished_at_iso": "2026-10-22T13:39:55.903140+00:00",
-  "run_started_at_iso": "2026-10-22T13:39:55.140899+00:00",
-  "run_status": "success",
+  "run_finished_at_iso": "2026-10-22T13:53:21.727029+00:00",
+  "run_started_at_iso": "2026-10-22T13:53:21.038707+00:00",
+  "run_status": "no_op",
   "schema_version": "1.0.0",
   "state_dir": "./paper_state_dir",
   "strategy_hash": "sha256:7d608627418f8c9a9f7d157d03d0fdc5e25add19cc35f0cc3ee1cc024c347d90",
   "symbol": "BTC-SWAP-USDT",
-  "total_new_detected": 1
+  "total_new_detected": 0
 }
