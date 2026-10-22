@@ -15,7 +15,6 @@ from strategy import evaluate_signal as base_eval
 from symbol_specs import get_symbol_specs
 
 SYMBOL = "BTC-SWAP-USDT"
-TIMEFRAME = "1h"
 INITIAL_EQUITY = 1000.0
 WARMUP = 250
 
@@ -59,7 +58,7 @@ def main():
         
     # ✅ برابری طول دوره‌ها (هر دو 1000 کندل ارزیابی) با Gap
     # IS: 1250 کندل (250 Warmup + 1000 Eval)
-    # Gap: 1500 کندل (1250 تا 2750)
+    # Gap: 1500 کندل
     # OOS: 1250 کندل (250 Warmup + 1000 Eval)
     klines_is = klines[:1250]
     klines_oos_with_warmup = klines[2750:4000]
@@ -71,11 +70,8 @@ def main():
     
     print(f"\n📊 Data Split Verification:")
     print(f"   IS Period:  {ts_is_start} to {ts_is_end} (Eval: 1000 candles)")
-    print(f"   Gap:        {(datetime.fromtimestamp(klines[1250][0]/1000, tz=timezone.utc)).strftime('%Y-%m-%d')} to {(datetime.fromtimestamp(klines[2749][0]/1000, tz=timezone.utc)).strftime('%Y-%m-%d')}")
     print(f"   OOS Period: {ts_oos_start} to {ts_oos_end} (Eval: 1000 candles)")
-    
-    print("\n⚠️ WARNING: This uses Spot BTCUSDT as a proxy for Perp BTC-SWAP-USDT.")
-    print("   Results are indicative, not definitive for Toobit execution.\n")
+    print(f"   Gap:        ~1500 candles between IS and OOS")
     
     specs = get_symbol_specs(SYMBOL)
     specs["contract_multiplier"] = 0.001 
@@ -105,7 +101,7 @@ def main():
     is_results = {}
     oos_results = {}
 
-    print("🚀 RUNNING IN-SAMPLE (1000 eval candles)...")
+    print("\n🚀 RUNNING IN-SAMPLE (1000 eval candles)...")
     for name, p, func in scenarios:
         is_results[name] = run_scenario(klines_is, p, func)
 
