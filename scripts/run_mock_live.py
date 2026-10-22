@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v3.0 - Added Strategy Monitor diagnostics.
+v3.1 - Strict three-state diagnostic monitor.
 """
 
 import json
@@ -115,13 +115,13 @@ def _create_order_from_event(ev, symbol, leverage=1):
     intent = ev.get("intent")
     if intent is None:
         raise ValueError(f"Missing 'intent' in event: {ev}")
-        
+
     order_intent = "EXIT" if intent == "TP1_HIT" else intent
-    
+
     qty = ev.get("qty")
     if qty is None:
         raise ValueError(f"Missing 'qty' in event: {ev}")
-        
+
     price = ev.get("price", 0.0)
 
     req = OrderRequest(
@@ -132,7 +132,7 @@ def _create_order_from_event(ev, symbol, leverage=1):
 
 
 def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor_status):
-    """Build a read-only diagnostic from the actual indicator arrays."""
+    """Build a read-only diagnostic reflecting exact strategy conditions."""
     closes = indicators["closes"]
     ema_fast = indicators["ema_fast"]
     ema_slow = indicators["ema_slow"]
@@ -141,20 +141,12 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
     timestamps = indicators["timestamps"]
 
     result = {
-        "symbol": symbol,
-        "interval": interval,
-        "monitor_status": monitor_status,
-        "signal": signal.get("signal", "UNKNOWN"),
-        "reason": signal.get("reason", "N/A"),
-        "candle_time_utc": "N/A",
-        "close": None,
-        "ema_fast": None,
-        "ema_slow": None,
-        "ema_alignment": "UNAVAILABLE",
-        "close_vs_ema_slow": "UNAVAILABLE",
-        "donchian_high_prev": None,
-        "donchian_low_prev": None,
-        "breakout": "UNAVAILABLE",
+        "symbol": symbol, "interval": interval, "monitor_status": monitor_status,
+        "signal": signal.get("signal", "UNKNOWN"), "reason": signal.get("reason", "N/A"),
+        "candle_time_utc": "N/A", "close": None, "ema_fast": None, "ema_slow": None,
+        "ema_alignment": "UNAVAILABLE", "close_vs_ema_slow": "UNAVAILABLE",
+        "donchian_high_prev": None, "donchian_low_prev": None, "breakout": "UNAVAILABLE",
+        "conditions": {}
     }
 
     if index < 0 or index >= len(closes):
@@ -162,22 +154,33 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
 
     ts = timestamps[index]
     result["candle_time_utc"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
-    result["close"] = closes[index]
-    result["ema_fast"] = ema_fast[index]
-    result["ema_slow"] = ema_slow[index]
-
+    close = closes[index]
     fast = ema_fast[index]
     slow = ema_slow[index]
-    close = closes[index]
+    result["close"] = close
+    result["ema_fast"] = fast
+    result["ema_slow"] = slow
 
-    if fast is not None and slow is not None:
+    # --- ارزیابی دقیق شروط (سه‌حالته: True/False/None) ---
+    conds = {}
+    if fast is not None and slow is not None and close is not None:
+        conds["ema_bullish"] = (fast > slow)
+        conds["ema_bearish"] = (fast < slow)
+        conds["price_above_ema200"] = (close > slow)
+        conds["price_below_ema200"] = (close < slow)
+        
         if fast > slow: result["ema_alignment"] = "BULLISH"
         elif fast < slow: result["ema_alignment"] = "BEARISH"
         else: result["ema_alignment"] = "EQUAL"
-
+        
         if close > slow: result["close_vs_ema_slow"] = "ABOVE"
         elif close < slow: result["close_vs_ema_slow"] = "BELOW"
         else: result["close_vs_ema_slow"] = "EQUAL"
+    else:
+        conds["ema_bullish"] = None
+        conds["ema_bearish"] = None
+        conds["price_above_ema200"] = None
+        conds["price_below_ema200"] = None
 
     if index >= 1:
         dh = donchian_high[index - 1]
@@ -185,11 +188,31 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
         result["donchian_high_prev"] = dh
         result["donchian_low_prev"] = dl
 
-        if dh is not None and dl is not None:
+        if dh is not None and dl is not None and close is not None:
+            conds["breakout_up"] = (close > dh)
+            conds["breakdown_down"] = (close < dl)
             if close > dh: result["breakout"] = "UP"
             elif close < dl: result["breakout"] = "DOWN"
             else: result["breakout"] = "NONE"
+        else:
+            conds["breakout_up"] = None
+            conds["breakdown_down"] = None
+    else:
+        conds["breakout_up"] = None
+        conds["breakdown_down"] = None
 
+    # نتیجه نهایی منطقی
+    if conds.get("ema_bullish") and conds.get("price_above_ema200") and conds.get("breakout_up"):
+        conds["final_long"] = True
+    else:
+        conds["final_long"] = False
+        
+    if conds.get("ema_bearish") and conds.get("price_below_ema200") and conds.get("breakdown_down"):
+        conds["final_short"] = True
+    else:
+        conds["final_short"] = False
+
+    result["conditions"] = conds
     return result
 
 
@@ -212,9 +235,9 @@ def main() -> int:
         req, ref_price, original_intent = _create_order_from_event(
             pending_info, symbol, engine_config.get("leverage", 1)
         )
-        
+
         validation_state = copy.deepcopy(state)
-        
+
         if req.intent == "ENTRY":
             if validation_state.get("pending_entry"):
                 if validation_state["pending_entry"].get("signal_candle_ts") == pending_info.get("signal_candle_ts"):
@@ -222,9 +245,9 @@ def main() -> int:
                 else:
                     print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: Stale pending_entry.")
                     return False
-                
+
         decision = em.execute(req, specs, validation_state, engine_config, ref_price=ref_price)
-        
+
         if decision.accepted:
             print(f"    🛡️ [MOCK_LIVE] {original_intent} ACCEPTED. Size: {req.qty}")
             return True
@@ -234,7 +257,7 @@ def main() -> int:
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (WITH MONITORING)")
+        print("🛡️  MOCK LIVE TRADING RUN (STRICT MONITOR)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -393,7 +416,7 @@ def main() -> int:
         exit_code = rc.exit_code
         run_status = rc.run_status
         error_message = rc.error_message
-        
+
         if exit_code != 0:
             print(f"\n❌ RUN FAILED: {error_message}")
         else:
