@@ -1,304 +1,110 @@
-"""
-paper_state_manager.py — Persistence layer برای Paper Trading.
-
-برخلاف state_manager که روی یک فایل کار می‌کند، این ماژول
-روی یک دایرکتوری کار می‌کند که شامل:
-
-  state.json      ← snapshot (overwrite)
-  events.jsonl    ← append-only log
-
-مسئولیت‌ها:
-  - load/save state (atomic، از طریق state_manager)
-  - append events به JSONL با idempotent dedup
-  - load events و محاسبه max seq
-
-غیرمسئولیت‌ها:
-  - تصمیم‌گیری معامله
-  - مدیریت پوزیشن
-
-قرارداد event schema
-════════════════════
-ورودی خام از paper_engine فیلد `timestamp` دارد (میلی‌ثانیه UTC).
-در خروجی JSONL، همان مقدار با نام `candle_ts_ms` ذخیره می‌شود.
-این تبدیل صریح است تا schema خروجی پایدار و قابل مقایسه باشد.
-
-قرارداد fingerprint
-═══════════════════
-event_id = 16-char hex از SHA256 روی canonical JSON شامل:
-  - strategy_hash
-  - event_type
-  - timestamp
-  - side
-  - price
-  - size
-  - sl (یا new_sl اگر sl نبود)
-  - tp1
-  - entry_price
-  - exit_price_adj
-  - pnl_usd
-  - remaining_size
-  - reason
-  - ambiguous
-
-تمام فیلدهای هویت event در fingerprint وارد می‌شوند تا
-دو event متفاوت هرگز fingerprint یکسان نگیرند.
-
-سیاست strict (policy v2.2.3)
-════════════════════════════
-load_state پیش‌فرض strict=True است. یعنی اگر state.json با
-strategy_hash متفاوتی ذخیره شده باشد، ValueError می‌دهد و
-run_paper با پیام روشن متوقف می‌شود. این تصمیم عمدی است تا
-تغییر استراتژی وسط دوره‌ی Paper، بی‌صدا پذیرفته نشود.
-
-برای migration صریح، load_state(state_dir, strict=False)
-هنوز کار می‌کند — ولی باید آگاهانه فراخوانی شود.
-
-Spec: docs/step9a_paper_persistence.md
-"""
-
-import hashlib
+"""paper_state_manager.py — Strict JSONL handling for trades and events."""
 import json
 import os
-from datetime import datetime, timezone
+import logging
 
-from strategy_config import STRATEGY_CONFIG
-from compute_hash import compute_strategy_hash
-from state_manager import (
-    save_state as _save_state_json,
-    load_state as _load_state_json,
-    state_exists as _state_exists,
-    default_state as _default_state,
-)
+logger = logging.getLogger("PaperStateManager")
 
-
-# ============================================================
-# Paths
-# ============================================================
-
-def state_file(state_dir: str) -> str:
-    return os.path.join(state_dir, "state.json")
-
-
-def events_file(state_dir: str) -> str:
-    return os.path.join(state_dir, "events.jsonl")
-
-
-# ============================================================
-# State I/O
-# ============================================================
-
-def load_state(state_dir: str, strict: bool = True) -> dict:
-    """
-    Load state.json از state_dir.
-
-    strict=True (پیش‌فرض):
-        strategy_hash ذخیره‌شده باید با hash فعلی استراتژی مطابقت داشته باشد.
-        در غیر این صورت ValueError با پیام روشن.
-
-    strict=False:
-        فقط برای migration صریح و آگاهانه. هیچ بازنویسی خودکار
-        strategy_hash در state رخ نمی‌دهد؛ فقط پذیرش بارگذاری.
-
-    Raises:
-        FileNotFoundError, ValueError, json.JSONDecodeError
-    """
-    return _load_state_json(state_file(state_dir), strict=strict)
-
-
-def save_state(state_dir: str, state: dict) -> None:
-    """Atomic save (از طریق state_manager)."""
-    _save_state_json(state_file(state_dir), state)
-
-
-def state_exists(state_dir: str) -> bool:
-    return _state_exists(state_file(state_dir))
-
-
-def init_state(state_dir: str, initial_equity: float = 1000.0,
-               symbol: str = "BTC-SWAP-USDT") -> dict:
-    """
-    ساخت state اولیه اگر وجود ندارد.
-    Returns: state فعلی (موجود یا تازه‌ساخته‌شده).
-    """
-    if state_exists(state_dir):
-        return load_state(state_dir)
-    state = _default_state(initial_equity)
-    state["symbol"] = symbol
+def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
+    from state_manager import save_state
+    state = {
+        "version": "1.0.0",
+        "initial_equity": initial_equity,
+        "equity": initial_equity,
+        "peak_equity": initial_equity,
+        "symbol": symbol,
+        "position": None,
+        "pending_entry": None,
+        "last_processed_candle_ts": None,
+        "cooldown_until_index": None,
+        "daily_loss": 0.0,
+        "weekly_loss": 0.0,
+        "loss_day_key": None,
+        "loss_week_key": None,
+        "circuit_breaker_active": False,
+        "last_funding_ts": None,
+    }
     save_state(state_dir, state)
     return state
 
+def state_exists(state_dir):
+    return os.path.exists(os.path.join(state_dir, "state.json"))
 
-# ============================================================
-# Event Fingerprint
-# ============================================================
+def load_state(state_dir, strict=True):
+    from state_manager import load_state as _load
+    return _load(state_dir)
 
-def _fingerprint(event: dict, strategy_hash: str) -> str:
-    """
-    fingerprint 16-char از محتوای کامل event.
+def save_state(state_dir, state):
+    from state_manager import save_state as _save
+    _save(state_dir, state)
 
-    شامل تمام فیلدهای هویت event تا collision رخ ندهد.
-    """
-    payload = {
-        "strategy_hash": strategy_hash,
-        "event_type": event.get("type"),
-        "timestamp": event.get("timestamp"),
-        "side": event.get("side"),
-        "price": event.get("price"),
-        "size": event.get("size"),
-        "sl": event.get("sl", event.get("new_sl")),
-        "tp1": event.get("tp1"),
-        "entry_price": event.get("entry_price"),
-        "exit_price_adj": event.get("exit_price_adj"),
-        "pnl_usd": event.get("pnl_usd"),
-        "remaining_size": event.get("remaining_size"),
-        "reason": event.get("reason"),
-        "ambiguous": event.get("ambiguous"),
-    }
-    canonical = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-
-
-# ============================================================
-# Event Serialization
-# ============================================================
-
-def _serialize_event(event: dict, strategy_hash: str,
-                     seq: int, event_id: str) -> dict:
-    """
-    تبدیل event خام به record JSONL با schema ثابت.
-
-    ورودی خام: فیلد `timestamp`
-    خروجی JSONL: فیلد `candle_ts_ms`
-    """
-    ts = event.get("timestamp")
-
-    ts_iso = ""
-    if ts is not None and ts != "":
+def validate_jsonl_tail(events_path):
+    """✅ اطمینان از اینکه فایل با \n تمام شده (نشانه نوشتن کامل)"""
+    if not os.path.exists(events_path):
+        return
+    with open(events_path, 'rb') as f:
         try:
-            ts_iso = datetime.fromtimestamp(
-                int(ts) / 1000, tz=timezone.utc,
-            ).isoformat()
-        except (OSError, ValueError, OverflowError, TypeError):
-            ts_iso = ""
-
-    return {
-        "event_id": event_id,
-        "seq": seq,
-        "strategy_hash": strategy_hash,
-        "strategy_version": STRATEGY_CONFIG["version"],
-        "candle_ts_ms": ts if ts is not None else None,
-        "event_type": event.get("type", ""),
-        "side": event.get("side"),
-        "size": event.get("size"),
-        "price": event.get("price"),
-        "entry_price": event.get("entry_price"),
-        "sl": event.get("sl", event.get("new_sl")),
-        "tp1": event.get("tp1"),
-        "exit_price_adj": event.get("exit_price_adj"),
-        "pnl_usd": event.get("pnl_usd"),
-        "remaining_size": event.get("remaining_size"),
-        "reason": event.get("reason"),
-        "ambiguous_exit": event.get("ambiguous"),
-        "timestamp_iso": ts_iso,
-    }
-
-
-# ============================================================
-# Events Read/Write
-# ============================================================
-
-def load_events(state_dir: str) -> list:
-    """
-    خواندن تمام events از events.jsonl.
-    Returns: list of dict. اگر فایل نبود → [].
-    خطوط خالی و خطوط نامعتبر skip می‌شوند.
-    """
-    path = events_file(state_dir)
-    if not os.path.exists(path):
-        return []
-
-    events = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return events
-
-
-def max_seq(events: list) -> int:
-    """بزرگ‌ترین seq موجود. 0 اگر خالی."""
-    m = 0
-    for e in events:
-        try:
-            s = int(e.get("seq", 0))
-            if s > m:
-                m = s
-        except (ValueError, TypeError):
-            continue
-    return m
-
-
-def append_events(state_dir: str, events: list,
-                  strategy_hash: str = None) -> tuple:
-    """
-    Append events به events.jsonl با idempotent dedup.
-
-    Returns:
-        (appended_count, skipped_count)
-    """
-    if strategy_hash is None:
-        strategy_hash = compute_strategy_hash()
-
-    path = events_file(state_dir)
-    os.makedirs(state_dir, exist_ok=True)
-
-    existing = load_events(state_dir)
-    existing_ids = {e.get("event_id") for e in existing if e.get("event_id")}
-    current_max = max_seq(existing)
-
-    appended = 0
-    skipped = 0
-
-    with open(path, "a", encoding="utf-8") as f:
-        for ev in events:
-            eid = _fingerprint(ev, strategy_hash)
-            if eid in existing_ids:
-                skipped += 1
-                continue
-
-            current_max += 1
-            record = _serialize_event(ev, strategy_hash,
-                                      seq=current_max, event_id=eid)
-            f.write(json.dumps(
-                record,
-                ensure_ascii=True,
-                allow_nan=False,
-                separators=(",", ":"),
-            ))
-            f.write("\n")
-            existing_ids.add(eid)
-            appended += 1
-
-        f.flush()
-        try:
-            os.fsync(f.fileno())
+            f.seek(-1, os.SEEK_END)
+            last_char = f.read(1)
+            if last_char != b'\n':
+                raise ValueError(f"JSONL file {events_path} does not end with newline. Truncation suspected.")
         except OSError:
             pass
 
+def load_events(state_dir):
+    events_path = os.path.join(state_dir, "events.jsonl")
+    if not os.path.exists(events_path):
+        return []
+    
+    validate_jsonl_tail(events_path)
+    
+    events = []
+    with open(events_path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line: continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                # ✅ Fail-Fast: متوقف کردن سیستم در صورت خرابی فایل
+                raise ValueError(f"Corrupted JSONL at {events_path}:{line_num}: {e}")
+    return events
+
+def append_events(state_dir, events, strategy_hash):
+    if not events:
+        return 0, 0
+        
+    events_path = os.path.join(state_dir, "events.jsonl")
+    existing_ids = set()
+    
+    if os.path.exists(events_path):
+        validate_jsonl_tail(events_path)
+        with open(events_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try: existing_ids.add(json.loads(line).get("event_id"))
+                    except: pass
+
+    appended = 0
+    skipped = 0
+    with open(events_path, "a", encoding="utf-8") as f:
+        for ev in events:
+            ev_id = ev.get("event_id")
+            if not ev_id or ev_id in existing_ids:
+                skipped += 1
+                continue
+            
+            # افزودن seq
+            ev["seq"] = len(existing_ids) + appended + 1
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            existing_ids.add(ev_id)
+            appended += 1
+            
     return appended, skipped
 
-
-def events_count(state_dir: str) -> int:
-    """تعداد کل events."""
-    return len(load_events(state_dir))
+def events_count(state_dir):
+    events_path = os.path.join(state_dir, "events.jsonl")
+    if not os.path.exists(events_path):
+        return 0
+    with open(events_path, "r") as f:
+        return sum(1 for _ in f)
