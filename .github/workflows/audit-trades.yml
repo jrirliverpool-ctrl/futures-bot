@@ -1,0 +1,27 @@
+name: Research - Audit Trades
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout research branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install required dependency
+        run: python -m pip install requests
+
+      - name: Run Trade Audit
+        run: python scripts/audit_trades.py
