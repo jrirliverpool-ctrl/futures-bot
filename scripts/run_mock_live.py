@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v2.6 - Fixed tuple unpacking for append_events.
+v2.9 - Added startup retry for notifications, fixed final status ordering.
 """
 
 import json
@@ -30,6 +30,12 @@ from reconciler import reconcile_with_data
 
 from execution_manager import ExecutionManager
 from order_executor import OrderRequest
+
+from telegram_notifier import (
+    initialize_event_baseline,
+    notify_pending_events,
+    notify_run_status,
+)
 
 MAX_CATCHUP_CANDLES = 100
 PAPER_STATUS_SCHEMA = "1.0.0"
@@ -170,7 +176,7 @@ def main() -> int:
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (COMPLETE & FIXED)")
+        print("🛡️  MOCK LIVE TRADING RUN (PROD-GRADE TELEGRAM)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
@@ -195,6 +201,17 @@ def main() -> int:
         equity = state["equity"]
         peak_equity = state["peak_equity"]
         has_position = state["position"] is not None
+
+        # ✅ 1. مقداردهی اولیه و تلاش مجدد برای اعلان‌های در انتظار
+        if not initialize_event_baseline(state_dir):
+            print("⚠️ Telegram event baseline unavailable; notifications paused.")
+        else:
+            try:
+                sent = notify_pending_events(state_dir)
+                if sent:
+                    print(f"📨 Telegram confirmed {sent} pending notification(s) on startup.")
+            except Exception as e:
+                print(f"⚠️ Telegram startup notification issue: {type(e).__name__}")
 
         print(f"  last_processed_candle_ts : {last_processed}")
         print(f"  equity                   : {equity}")
@@ -257,10 +274,8 @@ def main() -> int:
                 traceback.print_exc()
                 raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
 
-            # ✅ ترتیب اصلاح‌شده: ابتدا Events، سپس State
             if events:
                 try:
-                    # ✅ اصلاح باگ تاپل
                     appended, skipped = append_events(state_dir, events, strategy_hash=strategy_hash)
                     save_state(state_dir, state)
                     total_events_generated += appended
@@ -275,6 +290,14 @@ def main() -> int:
                     print(f"  [{n}/{len(to_process)}] → ERROR in save_state: {type(e).__name__}: {e}")
                     traceback.print_exc()
                     raise _RunComplete(1, "failed", f"save_state at idx={idx}: {type(e).__name__}: {e}")
+
+            # ارسال اعلان‌های باقی‌مانده بعد از ذخیره
+            try:
+                sent = notify_pending_events(state_dir)
+                if sent:
+                    print(f"  📨 Telegram confirmed {sent} event notification(s).")
+            except Exception as e:
+                print(f"  ⚠️ Telegram notification issue: {type(e).__name__}")
 
             candles_processed += 1
             print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} signal={signal_label} events={len(events)}")
@@ -304,7 +327,6 @@ def main() -> int:
         run_status = rc.run_status
         error_message = rc.error_message
         
-        # ✅ اصلاح شرط چاپ خطا
         if exit_code != 0:
             print(f"\n❌ RUN FAILED: {error_message}")
         else:
@@ -315,6 +337,7 @@ def main() -> int:
         traceback.print_exc()
         run_status = "failed"; exit_code = 1
     finally:
+        # ✅ 2. ساخت وضعیت نهایی در حافظه
         status = {
             "schema_version": PAPER_STATUS_SCHEMA,
             "run_started_at_iso": start_iso,
@@ -329,12 +352,25 @@ def main() -> int:
             "equity": equity, "peak_equity": peak_equity, "has_position": has_position,
             "error_message": error_message,
         }
+
+        # ✅ 3. ذخیره وضعیت. اگر شکست خورد، وضعیت را در حافظه آپدیت می‌کنیم
         try:
             _write_paper_status_atomic(state_dir, status)
             print(f"\n📝 paper_status.json written (run_status={run_status})")
         except Exception as we:
             print(f"\n❌ failed to write paper_status.json: {type(we).__name__}: {we}")
-            if exit_code == 0: exit_code = 1
+            if exit_code == 0:
+                exit_code = 1
+            status["run_exit_code"] = exit_code
+            status["run_status"] = "failed"
+            status["error_message"] = f"Failed to write status: {we}"
+
+        # ✅ 4. ارسال اعلان نهایی با وضعیت دقیق
+        try:
+            if not notify_run_status(status):
+                print("⚠️ Telegram status notification was not confirmed.")
+        except Exception as e:
+            print(f"⚠️ Telegram status error: {type(e).__name__}")
 
     return exit_code
 
