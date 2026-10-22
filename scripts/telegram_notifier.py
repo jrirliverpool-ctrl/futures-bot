@@ -117,11 +117,7 @@ def _load_notifier_state(state_dir):
     return state
 
 def initialize_event_baseline(state_dir) -> bool:
-    """Mark pre-existing events as historical; do not send them on first setup.
-
-    Call once near startup, before processing new candles.
-    Existing marker files are never overwritten.
-    """
+    """Mark pre-existing events as historical; do not send them on first setup."""
     path = _state_path(state_dir)
     try:
         if os.path.exists(path):
@@ -164,16 +160,11 @@ def _format_event(event):
     return "\n".join(lines)
 
 def notify_pending_events(state_dir) -> int:
-    """Send events absent from the local sent-ID registry.
-
-    Returns the count confirmed by Telegram. Failures remain retryable.
-    """
+    """Send events absent from the local sent-ID registry."""
     try:
         notifier_state = _load_notifier_state(state_dir)
         if notifier_state is None:
-            logger.warning(
-                "Telegram event notifications paused: baseline not initialized."
-            )
+            logger.warning("Telegram event notifications paused: baseline not initialized.")
             return 0
 
         sent_ids = set(notifier_state["sent_event_ids"])
@@ -195,19 +186,13 @@ def notify_pending_events(state_dir) -> int:
             try:
                 _write_json_atomic(_state_path(state_dir), notifier_state)
             except Exception as exc:
-                logger.warning(
-                    "Could not persist Telegram sent marker: %s",
-                    type(exc).__name__,
-                )
+                logger.warning("Could not persist Telegram sent marker: %s", type(exc).__name__)
                 break
             sent_count += 1
 
         return sent_count
     except Exception as exc:
-        logger.warning(
-            "Telegram event processing failed: %s",
-            type(exc).__name__,
-        )
+        logger.warning("Telegram event processing failed: %s", type(exc).__name__)
         return 0
 
 def notify_run_status(status: dict) -> bool:
@@ -230,8 +215,34 @@ def notify_run_status(status: dict) -> bool:
             lines.append(f"Error: {str(status['error_message'])[:700]}")
         return send_telegram_alert("\n".join(lines))
     except Exception as exc:
-        logger.warning(
-            "Telegram status notification failed: %s",
-            type(exc).__name__,
-        )
+        logger.warning("Telegram status notification failed: %s", type(exc).__name__)
+        return False
+
+def notify_strategy_monitor(monitor: dict) -> bool:
+    """Send a read-only strategy diagnostic; never raise."""
+    try:
+        if not isinstance(monitor, dict):
+            return False
+
+        lines = [
+            "ApexQuant | Strategy Monitor",
+            f"Symbol: {monitor.get('symbol', 'BTC-SWAP-USDT')}",
+            f"Timeframe: {monitor.get('interval', '1h')}",
+            f"Monitor status: {monitor.get('monitor_status', 'UNKNOWN')}",
+            f"Candle time (UTC): {monitor.get('candle_time_utc', 'N/A')}",
+            f"Close: {monitor.get('close', 'N/A')}",
+            f"EMA50: {monitor.get('ema_fast', 'N/A')}",
+            f"EMA200: {monitor.get('ema_slow', 'N/A')}",
+            f"EMA alignment: {monitor.get('ema_alignment', 'N/A')}",
+            f"Close vs EMA200: {monitor.get('close_vs_ema_slow', 'N/A')}",
+            f"Donchian high (prev): {monitor.get('donchian_high_prev', 'N/A')}",
+            f"Donchian low (prev): {monitor.get('donchian_low_prev', 'N/A')}",
+            f"Breakout: {monitor.get('breakout', 'N/A')}",
+            f"Signal: {monitor.get('signal', 'N/A')}",
+            f"Reason: {str(monitor.get('reason', 'N/A'))[:500]}",
+        ]
+
+        return send_telegram_alert("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Telegram strategy monitor failed: %s", type(exc).__name__)
         return False
