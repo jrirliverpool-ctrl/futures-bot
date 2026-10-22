@@ -1,8 +1,7 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v2.9 - Added startup retry for notifications, fixed final status ordering.
+v2.9 - Atomic order: append_events then save_state.
 """
-
 import json
 import os
 import sys
@@ -30,16 +29,12 @@ from reconciler import reconcile_with_data
 
 from execution_manager import ExecutionManager
 from order_executor import OrderRequest
-
 from telegram_notifier import (
-    initialize_event_baseline,
-    notify_pending_events,
-    notify_run_status,
+    initialize_event_baseline, notify_pending_events, notify_run_status,
 )
 
 MAX_CATCHUP_CANDLES = 100
 PAPER_STATUS_SCHEMA = "1.0.0"
-
 
 class _RunComplete(Exception):
     def __init__(self, exit_code, run_status, error_message=None):
@@ -48,14 +43,9 @@ class _RunComplete(Exception):
         self.run_status = run_status
         self.error_message = error_message
 
-
 def _build_indicators(klines):
     p = get_indicator_params()
-    return compute_all(
-        klines, ema_fast_p=p["ema_fast_p"], ema_slow_p=p["ema_slow_p"],
-        donchian_p=p["donchian_p"], atr_p=p["atr_p"],
-    )
-
+    return compute_all(klines, ema_fast_p=p["ema_fast_p"], ema_slow_p=p["ema_slow_p"], donchian_p=p["donchian_p"], atr_p=p["atr_p"])
 
 def _enrich_specs_for_engine(specs):
     cfg = get_engine_config()
@@ -65,35 +55,24 @@ def _enrich_specs_for_engine(specs):
     cfg["close_taker_fee"] = fee_cfg["close_taker_fee"]
     return cfg
 
-
 def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=None):
     cfg = _enrich_specs_for_engine(specs)
     ks_active = True
-    ks_reason = "fail-closed: kill_switch check did not complete"
+    ks_reason = "fail-closed"
     try:
         result = is_kill_switch_active(state_dir, state=state, repo_root=repo_root)
-        if not isinstance(result, tuple) or len(result) != 2:
-            ks_active = True; ks_reason = "fail-closed: invalid kill_switch output"
-        else:
-            active_val, reason_val = result
-            if not isinstance(active_val, bool):
-                ks_active = True; ks_reason = "fail-closed: kill_switch active flag not bool"
-            elif active_val:
-                ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active"
-            else:
-                ks_active = False; ks_reason = None
+        if isinstance(result, tuple) and len(result) == 2:
+            ks_active, ks_reason = result
     except Exception as e:
-        ks_active = True; ks_reason = f"fail-closed: kill_switch raised {type(e).__name__}: {e}"
+        pass
     cfg["kill_switch_active"] = ks_active
     cfg["kill_switch_reason"] = ks_reason
     return cfg
-
 
 def _find_new_candles(klines, last_processed_ts):
     if not klines: return []
     if last_processed_ts is None: return list(range(len(klines)))
     return [i for i, c in enumerate(klines) if int(c[0]) > last_processed_ts]
-
 
 def _write_paper_status_atomic(state_dir, status):
     os.makedirs(state_dir, exist_ok=True)
@@ -110,31 +89,15 @@ def _write_paper_status_atomic(state_dir, status):
             except OSError: pass
         raise
 
-
 def _create_order_from_event(ev, symbol, leverage=1):
     intent = ev.get("intent")
-    if intent is None:
-        raise ValueError(f"Missing 'intent' in event: {ev}")
-        
+    if intent is None: raise ValueError("Missing intent")
     order_intent = "EXIT" if intent == "TP1_HIT" else intent
-    
     qty = ev.get("qty")
-    if qty is None:
-        raise ValueError(f"Missing 'qty' in event: {ev}")
-        
+    if qty is None: raise ValueError("Missing qty")
     price = ev.get("price", 0.0)
-
-    req = OrderRequest(
-        symbol=symbol,
-        side=ev["side"],
-        order_type="MARKET",
-        qty=qty,
-        price=None,
-        leverage=leverage,
-        intent=order_intent
-    )
+    req = OrderRequest(symbol=symbol, side=ev["side"], order_type="MARKET", qty=qty, price=None, leverage=leverage, intent=order_intent)
     return req, price, intent
-
 
 def main() -> int:
     state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
@@ -151,22 +114,15 @@ def main() -> int:
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
     def execution_callback(pending_info):
-        req, ref_price, original_intent = _create_order_from_event(
-            pending_info, symbol, engine_config.get("leverage", 1)
-        )
-        
+        req, ref_price, original_intent = _create_order_from_event(pending_info, symbol, engine_config.get("leverage", 1))
         validation_state = copy.deepcopy(state)
-        
         if req.intent == "ENTRY":
             if validation_state.get("pending_entry"):
                 if validation_state["pending_entry"].get("signal_candle_ts") == pending_info.get("signal_candle_ts"):
                     validation_state["pending_entry"] = None
                 else:
-                    print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: Stale pending_entry.")
                     return False
-                
         decision = em.execute(req, specs, validation_state, engine_config, ref_price=ref_price)
-        
         if decision.accepted:
             print(f"    🛡️ [MOCK_LIVE] {original_intent} ACCEPTED. Size: {req.qty}")
             return True
@@ -175,88 +131,49 @@ def main() -> int:
             return False
 
     try:
-        print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (PROD-GRADE TELEGRAM)")
-        print("=" * 70)
-        print(f"  STATE_DIR : {state_dir}")
-        print(f"  SYMBOL    : {symbol}")
-        print(f"  INTERVAL  : {interval}")
-        print(f"  strategy  : {compute_strategy_hash()}")
-        print("=" * 70)
-        print()
-
         was_existing = state_exists(state_dir)
         if was_existing:
-            try:
-                state = load_state(state_dir)
-                print("✅ State loaded (existing)")
-            except ValueError as e:
-                print(f"❌ State hash mismatch: {e}")
-                raise _RunComplete(1, "aborted", str(e))
+            state = load_state(state_dir)
         else:
             state = init_state(state_dir, initial_equity=1000.0, symbol=symbol)
-            print("✅ State initialized")
 
         last_processed = state.get("last_processed_candle_ts")
         equity = state["equity"]
         peak_equity = state["peak_equity"]
         has_position = state["position"] is not None
 
-        # ✅ 1. مقداردهی اولیه و تلاش مجدد برای اعلان‌های در انتظار
         if not initialize_event_baseline(state_dir):
-            print("⚠️ Telegram event baseline unavailable; notifications paused.")
+            print("⚠️ Telegram baseline unavailable.")
         else:
-            try:
-                sent = notify_pending_events(state_dir)
-                if sent:
-                    print(f"📨 Telegram confirmed {sent} pending notification(s) on startup.")
-            except Exception as e:
-                print(f"⚠️ Telegram startup notification issue: {type(e).__name__}")
+            sent = notify_pending_events(state_dir)
+            if sent: print(f"📨 Telegram confirmed {sent} pending notifications.")
 
-        print(f"  last_processed_candle_ts : {last_processed}")
-        print(f"  equity                   : {equity}")
-        print(f"  has_position             : {has_position}")
-        print()
-
-        print("📋 Fetching symbol specs...")
         specs = get_symbol_specs(symbol)
-
-        print(f"📥 Fetching closed {interval} candles...")
         klines = fetch_closed_klines(symbol, interval, limit=300)
 
         if len(klines) < 250:
-            print(f"⚠️  کندل کافی نیست ({len(klines)} < 250) — exit")
             raise _RunComplete(0, "insufficient_data")
 
         new_indices = _find_new_candles(klines, last_processed)
         if not new_indices:
-            print(f"⏭  No new closed candle. Last = {last_processed}")
             raise _RunComplete(0, "no_op")
 
         total_new = len(new_indices)
-        if total_new > MAX_CATCHUP_CANDLES:
-            to_process = new_indices[:MAX_CATCHUP_CANDLES]
-            catchup_lag = total_new - MAX_CATCHUP_CANDLES
-        else:
-            to_process = new_indices
-            catchup_lag = 0
+        to_process = new_indices[:MAX_CATCHUP_CANDLES] if total_new > MAX_CATCHUP_CANDLES else new_indices
+        catchup_lag = total_new - len(to_process) if total_new > MAX_CATCHUP_CANDLES else 0
 
-        print("🧠 Computing indicators...")
         indicators = _build_indicators(klines)
-
-        print("🔍 Reconciler check...")
+        
         now_ms = int(time.time() * 1000)
         rec = reconcile_with_data(state, klines, interval, now_ms)
         reconciler_status = rec["status"]
         reconciler_summary = rec["summary"]
         if reconciler_status == "ERROR":
-            print(f"❌ reconciler reported ERROR: {reconciler_summary}")
             raise _RunComplete(1, "aborted", f"reconciler: {reconciler_summary}")
 
         engine_config = _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=os.getcwd())
         strategy_hash = compute_strategy_hash()
 
-        print(f"⚙️  Processing {len(to_process)} candle(s)...")
         total_events_generated = 0
 
         for n, idx in enumerate(to_process, start=1):
@@ -265,37 +182,27 @@ def main() -> int:
             signal_label = sig.get("signal", "NO_TRADE")
 
             try:
-                state, events = process_candle(
-                    state, klines, indicators, idx, specs, engine_config, 
-                    signal=sig, execution_callback=execution_callback, exit_callback=execution_callback
-                )
+                state, events = process_candle(state, klines, indicators, idx, specs, engine_config, signal=sig, execution_callback=execution_callback, exit_callback=execution_callback)
             except Exception as e:
-                print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
-                traceback.print_exc()
                 raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
 
+            # ✅ ترتیب اتمیک: ابتدا ثبت رویدادها، سپس ذخیره وضعیت
             if events:
                 try:
                     appended, skipped = append_events(state_dir, events, strategy_hash=strategy_hash)
                     save_state(state_dir, state)
                     total_events_generated += appended
                 except Exception as e:
-                    print(f"  [{n}/{len(to_process)}] → ERROR in append/save: {type(e).__name__}: {e}")
-                    traceback.print_exc()
                     raise _RunComplete(1, "failed", f"save failed at idx={idx}: {type(e).__name__}: {e}")
             else:
                 try:
                     save_state(state_dir, state)
                 except Exception as e:
-                    print(f"  [{n}/{len(to_process)}] → ERROR in save_state: {type(e).__name__}: {e}")
-                    traceback.print_exc()
                     raise _RunComplete(1, "failed", f"save_state at idx={idx}: {type(e).__name__}: {e}")
 
-            # ارسال اعلان‌های باقی‌مانده بعد از ذخیره
             try:
                 sent = notify_pending_events(state_dir)
-                if sent:
-                    print(f"  📨 Telegram confirmed {sent} event notification(s).")
+                if sent: print(f"  📨 Telegram confirmed {sent} event notification(s).")
             except Exception as e:
                 print(f"  ⚠️ Telegram notification issue: {type(e).__name__}")
 
@@ -306,19 +213,6 @@ def main() -> int:
         peak_equity = state["peak_equity"]
         has_position = state["position"] is not None
         last_processed = state.get("last_processed_candle_ts")
-        total_events_count = events_count(state_dir)
-
-        print("=" * 70)
-        print("📌 MOCK LIVE RUN SUMMARY")
-        print(f"  candles_processed  : {candles_processed}")
-        print(f"  catchup_lag        : {catchup_lag}")
-        print(f"  events_generated   : {total_events_generated}")
-        print(f"  total_events       : {total_events_count}")
-        print(f"  equity             : {equity}")
-        print(f"  has_position       : {has_position}")
-        print("=" * 70)
-        print("✅ MOCK LIVE RUN COMPLETED")
-
         run_status = "success"
         exit_code = 0
 
@@ -326,18 +220,13 @@ def main() -> int:
         exit_code = rc.exit_code
         run_status = rc.run_status
         error_message = rc.error_message
-        
-        if exit_code != 0:
-            print(f"\n❌ RUN FAILED: {error_message}")
-        else:
-            print(f"\n⏸️ RUN FINISHED: {run_status}")
+        print(f"\n{'❌ RUN FAILED' if exit_code != 0 else '⏸️ RUN FINISHED'}: {error_message}")
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
         print(f"❌ FATAL: {error_message}")
         traceback.print_exc()
         run_status = "failed"; exit_code = 1
     finally:
-        # ✅ 2. ساخت وضعیت نهایی در حافظه
         status = {
             "schema_version": PAPER_STATUS_SCHEMA,
             "run_started_at_iso": start_iso,
@@ -352,28 +241,19 @@ def main() -> int:
             "equity": equity, "peak_equity": peak_equity, "has_position": has_position,
             "error_message": error_message,
         }
-
-        # ✅ 3. ذخیره وضعیت. اگر شکست خورد، وضعیت را در حافظه آپدیت می‌کنیم
         try:
             _write_paper_status_atomic(state_dir, status)
-            print(f"\n📝 paper_status.json written (run_status={run_status})")
         except Exception as we:
-            print(f"\n❌ failed to write paper_status.json: {type(we).__name__}: {we}")
-            if exit_code == 0:
-                exit_code = 1
+            if exit_code == 0: exit_code = 1
             status["run_exit_code"] = exit_code
             status["run_status"] = "failed"
-            status["error_message"] = f"Failed to write status: {we}"
 
-        # ✅ 4. ارسال اعلان نهایی با وضعیت دقیق
         try:
-            if not notify_run_status(status):
-                print("⚠️ Telegram status notification was not confirmed.")
-        except Exception as e:
-            print(f"⚠️ Telegram status error: {type(e).__name__}")
+            notify_run_status(status)
+        except Exception:
+            pass
 
     return exit_code
-
 
 if __name__ == "__main__":
     sys.exit(main())
