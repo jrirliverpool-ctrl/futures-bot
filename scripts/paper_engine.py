@@ -1,9 +1,11 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.3 - Fixed funding timing on exit candles.
+v3.0 - TP1_HIT schema fixed. Funding applied after SL/TP (original order).
 """
+
 import copy
 from decimal import Decimal, ROUND_DOWN
+
 
 def floor_to_step(value: float, step: float) -> float:
     if step <= 0: raise ValueError("step must be > 0")
@@ -12,11 +14,13 @@ def floor_to_step(value: float, step: float) -> float:
     n = (d_value / d_step).to_integral_value(rounding=ROUND_DOWN)
     return float(n * d_step)
 
+
 def apply_slippage(price: float, is_entry: bool, side: str, slip_pct: float) -> float:
     if slip_pct < 0: raise ValueError("slip_pct must be >= 0")
     if side == "LONG": return price * (1 + slip_pct) if is_entry else price * (1 - slip_pct)
     if side == "SHORT": return price * (1 - slip_pct) if is_entry else price * (1 + slip_pct)
     raise ValueError(f"Invalid side: {side}")
+
 
 def _is_valid_atr(x) -> bool:
     if isinstance(x, bool): return False
@@ -26,10 +30,12 @@ def _is_valid_atr(x) -> bool:
     if x <= 0: return False
     return True
 
+
 def _resolve_atr(atr_current, atr_at_entry) -> float:
     if _is_valid_atr(atr_current): return float(atr_current)
     if _is_valid_atr(atr_at_entry): return float(atr_at_entry)
     raise ValueError(f"ATR unavailable: atr_current={atr_current!r}, atr_at_entry={atr_at_entry!r}")
+
 
 def compute_initial_levels(entry_price, atr_at_signal, side, config):
     if entry_price <= 0 or atr_at_signal <= 0: raise ValueError("entry_price and ATR must be > 0")
@@ -38,6 +44,7 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
     if side == "LONG": return entry_price - sl_dist, entry_price + tp_dist
     if side == "SHORT": return entry_price + sl_dist, entry_price - tp_dist
     raise ValueError(f"Invalid side: {side}")
+
 
 def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade, leverage=None, leverage_cap=None):
     if equity <= 0 or risk_per_trade <= 0: return None
@@ -61,8 +68,10 @@ def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trad
     if min_notional > 0 and notional < min_notional: return None
     return qty
 
+
 def _day_key(ts_ms): return ts_ms // 86_400_000
 def _week_key(ts_ms): return ts_ms // (7 * 86_400_000)
+
 
 def reset_period_losses_if_needed(state, ts):
     current_day = _day_key(ts)
@@ -74,19 +83,24 @@ def reset_period_losses_if_needed(state, ts):
         state["weekly_loss"] = 0.0
         state["loss_week_key"] = current_week
 
+
 def update_peak_equity(state):
     state["peak_equity"] = max(state.get("peak_equity", state["initial_equity"]), state["equity"])
+
 
 def current_total_drawdown(state):
     peak = state.get("peak_equity", state["initial_equity"])
     if peak <= 0: return 0.0
     return max(0.0, (peak - state["equity"]) / peak)
 
+
 def execute_pending_entry(state, candle, specs, config, execution_callback=None):
     events = []
     pending = state.get("pending_entry")
     if pending is None: return state, events
+
     ts = int(candle[0])
+
     if config.get("kill_switch_active", False):
         events.append({"type": "KILL_SWITCH_BLOCKED", "stage": "entry_execution", "reason": config.get("kill_switch_reason"), "side": pending.get("side"), "timestamp": ts})
         state["pending_entry"] = None
@@ -96,10 +110,12 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     open_price = float(candle[1])
     entry_price = apply_slippage(open_price, is_entry=True, side=side, slip_pct=config["slippage_pct"])
     sl, tp1 = compute_initial_levels(entry_price, pending["atr_at_signal"], side, config)
+
     qty = calculate_position_size(
         state["equity"], entry_price, sl, specs, config["risk_per_trade"],
         leverage=config.get("leverage"), leverage_cap=config.get("leverage_cap"),
     )
+
     if qty is None:
         events.append({"type": "ENTRY_REJECTED", "reason": "invalid_size", "timestamp": ts})
         state["pending_entry"] = None
@@ -128,9 +144,11 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         "tp1_hit": False, "be_moved": False, "trailing_active": False,
         "highest_high_since_entry": entry_price, "lowest_low_since_entry": entry_price,
         "candles_since_entry": 0, "atr_at_entry": pending["atr_at_signal"],
-        "signal_candle_ts": pending["signal_candle_ts"], "commission_paid_usd": entry_commission,
+        "signal_candle_ts": pending["signal_candle_ts"],
+        "commission_paid_usd": entry_commission,
     }
     state["pending_entry"] = None
+
     events.append({
         "type": "ENTRY", "side": side, "price": entry_price, "size": qty,
         "sl": sl, "tp1": tp1, "notional_usd": entry_notional,
@@ -138,12 +156,14 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     })
     return state, events
 
+
 def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=None):
     side = pos["side"]
     h = float(candle[2])
     l = float(candle[3])
     c = float(candle[4])
     ts = int(candle[0])
+
     atr_current = _resolve_atr(atr_current, pos.get("atr_at_entry"))
     p = copy.deepcopy(pos)
     events = []
@@ -154,8 +174,14 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
         tp1_hit_this_candle = (side == "LONG" and h >= p["initial_tp1"]) or (side == "SHORT" and l <= p["initial_tp1"])
 
     if sl_hit:
-        if exit_callback is None or exit_callback({"intent": "EXIT", "side": side, "qty": p["remaining_size"], "price": p["current_sl"], "timestamp": ts}):
-            events.append({"type": "EXIT", "reason": "SL", "price": p["current_sl"], "timestamp": ts, "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"]})
+        if exit_callback is None or exit_callback({
+            "intent": "EXIT", "side": side, "qty": p["remaining_size"],
+            "price": p["current_sl"], "timestamp": ts
+        }):
+            events.append({
+                "type": "EXIT", "reason": "SL", "price": p["current_sl"], "timestamp": ts,
+                "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"],
+            })
             return p, events, True
         else:
             return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
@@ -178,7 +204,10 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
 
     if not p["tp1_hit"] and tp1_hit_this_candle:
         tp1_size = p["size"] * 0.5
-        if exit_callback is None or exit_callback({"intent": "TP1_HIT", "side": side, "qty": tp1_size, "price": p["initial_tp1"], "timestamp": ts}):
+        if exit_callback is None or exit_callback({
+            "intent": "TP1_HIT", "side": side, "qty": tp1_size,
+            "price": p["initial_tp1"], "timestamp": ts
+        }):
             dir_sign = 1 if side == "LONG" else -1
             pnl_tp1 = tp1_size * (p["initial_tp1"] - p["entry_price"]) * config["contract_multiplier_for_pnl"] * dir_sign
             mult = config["contract_multiplier_for_pnl"]
@@ -212,13 +241,20 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
 
     p["candles_since_entry"] += 1
     if p["candles_since_entry"] >= config["time_exit_candles"]:
-        if exit_callback is None or exit_callback({"intent": "EXIT", "side": side, "qty": p["remaining_size"], "price": c, "timestamp": ts}):
-            events.append({"type": "EXIT", "reason": "TIME_EXIT", "price": c, "timestamp": ts, "ambiguous": False, "remaining_size": p["remaining_size"]})
+        if exit_callback is None or exit_callback({
+            "intent": "EXIT", "side": side, "qty": p["remaining_size"],
+            "price": c, "timestamp": ts
+        }):
+            events.append({
+                "type": "EXIT", "reason": "TIME_EXIT", "price": c,
+                "timestamp": ts, "ambiguous": False, "remaining_size": p["remaining_size"],
+            })
             return p, events, True
         else:
             return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
 
     return p, events, False
+
 
 def close_position(state, pos, exit_price, specs, config):
     side = pos["side"]
@@ -254,14 +290,16 @@ def close_position(state, pos, exit_price, specs, config):
         "pnl_net": pnl_net,
     }
 
-def apply_funding_if_due(state, candle, specs, config, events, pos=None):
+
+def apply_funding_if_due(state, candle, specs, config, events):
     current_ts = int(candle[0])
-    if pos is None: pos = state.get("position")
+    pos = state.get("position")
     if not pos or pos.get("remaining_size", 0) <= 0: return
     if current_ts % 28_800_000 != 0: return
     if "funding_rates" not in config: return
     funding_rates = config.get("funding_rates", {})
-    if current_ts not in funding_rates: raise ValueError(f"Missing funding rate for timestamp {current_ts}")
+    if current_ts not in funding_rates:
+        raise ValueError(f"Missing funding rate for timestamp {current_ts}")
     if state.get("last_funding_ts") == current_ts: return
     rate = funding_rates[current_ts]
     size = pos["remaining_size"]
@@ -273,6 +311,7 @@ def apply_funding_if_due(state, candle, specs, config, events, pos=None):
     state["equity"] += cashflow
     state["last_funding_ts"] = current_ts
     events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts})
+
 
 def process_candle(state, klines, indicators, i, specs, config, signal=None, execution_callback=None, exit_callback=None):
     state = copy.deepcopy(state)
@@ -288,14 +327,13 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
     position_closed = False
     if state.get("position") is not None:
-        # ✅ اصلاح: Funding قبل از بررسی SL/TP اعمال می‌شود
-        funding_pos = copy.deepcopy(state["position"])
-        apply_funding_if_due(state, candle, specs, config, events, pos=funding_pos)
-
         atr_current = indicators["atr"][i]
         pos_after, pos_events, exited = manage_position_on_candle(
             state["position"], candle, atr_current, config, exit_callback=exit_callback
         )
+
+        if not exited:
+            apply_funding_if_due(state, candle, specs, config, events)
 
         events.extend(pos_events)
 
@@ -306,8 +344,10 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         if exited:
             exit_event = next(e for e in pos_events if e["type"] == "EXIT")
             result = close_position(state, pos_after, exit_event["price"], specs, config)
+            
             exit_event.update({
-                "pnl_usd": result["pnl_gross"], "pnl_gross": result["pnl_gross"],
+                "pnl_usd": result["pnl_gross"],
+                "pnl_gross": result["pnl_gross"],
                 "commission_usd": result["final_commission"],
                 "total_commission_usd": result["total_commission"],
                 "trade_net_pnl_usd": result["pnl_net"],
@@ -366,3 +406,41 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
     state["last_processed_candle_ts"] = ts
     return state, events
+
+
+DEFAULT_CONFIG = {
+    "risk_per_trade": 0.01,
+    "sl_atr_mult": 1.5,
+    "tp1_atr_mult": 2.0,
+    "be_trigger_at_r": 1.0,
+    "trailing_atr_mult": 1.5,
+    "be_sl_offset_atr": 0.1,
+    "time_exit_candles": 48,
+    "cooldown_candles": 2,
+    "daily_loss_limit": 0.03,
+    "weekly_loss_limit": 0.07,
+    "total_dd_limit": 0.15,
+    "slippage_pct": 0.0005,
+    "open_taker_fee": 0.0,
+    "close_taker_fee": 0.0,
+    "interval_ms": 3_600_000,
+    "kill_switch_active": False,
+    "kill_switch_reason": None,
+}
+
+DEFAULT_STATE = {
+    "version": "1.0.0",
+    "initial_equity": 1000.0,
+    "equity": 1000.0,
+    "peak_equity": 1000.0,
+    "last_processed_candle_ts": None,
+    "position": None,
+    "pending_entry": None,
+    "cooldown_until_index": None,
+    "daily_loss": 0.0,
+    "weekly_loss": 0.0,
+    "loss_day_key": None,
+    "loss_week_key": None,
+    "circuit_breaker_active": False,
+    "last_funding_ts": None,
+}
