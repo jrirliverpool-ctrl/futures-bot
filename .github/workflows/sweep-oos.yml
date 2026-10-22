@@ -1,8 +1,8 @@
-# Trigger: Force GitHub to recognize this workflow
 name: Research - OOS Validation
 
 on:
-  workflow_dispatch:
+  push:              # ✅ با هر تغییر خودکار اجرا می‌شود تا گیت‌هاب مجبور به شناسایی شود
+  workflow_dispatch: # امکان اجرای دستی
 
 permissions:
   contents: read
