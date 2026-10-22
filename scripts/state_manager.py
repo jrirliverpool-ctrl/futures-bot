@@ -4,6 +4,26 @@ import math
 import os
 import tempfile
 
+def default_state(initial_equity=1000.0):
+    """Returns a fresh default state dictionary (used by backtest.py)."""
+    return {
+        "version": "1.0.0",
+        "initial_equity": initial_equity,
+        "equity": initial_equity,
+        "peak_equity": initial_equity,
+        "symbol": "UNKNOWN",
+        "position": None,
+        "pending_entry": None,
+        "last_processed_candle_ts": None,
+        "cooldown_until_index": None,
+        "daily_loss": 0.0,
+        "weekly_loss": 0.0,
+        "loss_day_key": None,
+        "loss_week_key": None,
+        "circuit_breaker_active": False,
+        "last_funding_ts": None,
+    }
+
 def validate_state(state: dict) -> None:
     if not isinstance(state, dict):
         raise ValueError("state must be a dict")
