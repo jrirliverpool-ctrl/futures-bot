@@ -1,7 +1,6 @@
 """
-sweep_oos.py — Rigorous Out-of-Sample (OOS) Test using Bybit API.
-Fetches 2000 candles from Bybit (unseen data).
-Splits into IS (first 1000) and OOS (last 1000).
+sweep_oos.py — Rigorous Out-of-Sample (OOS) Test.
+Uses Binance Data Vision (data-api.binance.vision) to bypass geo-blocks.
 """
 import os
 import sys
@@ -23,10 +22,10 @@ TIMEFRAME = "1h"
 INITIAL_EQUITY = 1000.0
 WARMUP = 250
 
-def fetch_bybit_klines(limit=2000):
-    """Fetches historical candles from Bybit API in chunks."""
-    print(f"🌐 Fetching {limit} candles from Bybit ({SYMBOL})...")
-    url = "https://api.bybit.com/v5/market/kline"
+def fetch_klines_vision(limit=2000):
+    """Fetches historical candles from Binance Data Vision API."""
+    print(f"🌐 Fetching {limit} candles from Binance Data Vision...")
+    url = "https://data-api.binance.vision/api/v3/klines"
     
     all_klines = []
     end_time = None
@@ -35,33 +34,27 @@ def fetch_bybit_klines(limit=2000):
     while remaining > 0:
         fetch_lim = min(remaining, 1000)
         params = {
-            "category": "linear",
             "symbol": "BTCUSDT",
-            "interval": "60", # 1 hour
+            "interval": "1h",
             "limit": fetch_lim
         }
         if end_time:
-            params["end"] = end_time
+            params["endTime"] = end_time
             
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         
-        if data.get("retCode") != 0:
-            raise SystemExit(f"❌ Bybit API Error: {data.get('retMsg')}")
-            
-        klines_data = data.get("result", {}).get("list", [])
-        if not klines_data:
+        if not data:
             break
             
-        # Bybit returns [startTime, open, high, low, close, volume, turnover]
-        # We need [ts, open, high, low, close, volume] ascending
-        for k in klines_data:
+        # Convert to ApexQuant format: [ts, open, high, low, close, volume]
+        for k in data:
             all_klines.append([int(k[0]), k[1], k[2], k[3], k[4], k[5]])
             
         # Update end_time to before the earliest fetched candle
-        end_time = int(klines_data[-1][0]) - 1
-        remaining -= len(klines_data)
+        end_time = int(data[0][0]) - 1
+        remaining -= len(data)
         time.sleep(0.1) # Rate limit
         
     # Sort ascending
@@ -70,7 +63,7 @@ def fetch_bybit_klines(limit=2000):
 
 def main():
     # 1. Fetch Data
-    klines = fetch_bybit_klines(limit=2000)
+    klines = fetch_klines_vision(limit=2000)
     if len(klines) < 2000:
         raise SystemExit(f"❌ Failed to fetch enough data. Got {len(klines)}")
         
@@ -85,7 +78,7 @@ def main():
     print(f"   OOS candles: {len(klines_oos_with_warmup)} (Warmup: {WARMUP})")
     
     specs = get_symbol_specs(SYMBOL)
-    specs["contract_multiplier"] = 0.001 # Bybit BTCUSDT linear contract
+    specs["contract_multiplier"] = 0.001 # Binance BTCUSDT linear equivalent
 
     scenarios = [
         ("Base_D20", 20, base_eval),
