@@ -5,7 +5,7 @@
   "equity": 971.1734878455316,
   "initial_equity": 971.8365982771752,
   "last_funding_ts": null,
-  "last_processed_candle_ts": 1792818000000,
+  "last_processed_candle_ts": 1792821600000,
   "loss_day_key": 20750,
   "loss_week_key": 2964,
   "peak_equity": 971.8365982771752,
@@ -14,7 +14,7 @@
   "position": {
     "atr_at_entry": 394.46373640902186,
     "be_moved": false,
-    "candles_since_entry": 7,
+    "candles_since_entry": 8,
     "commission_paid_usd": 0.66311043164364,
     "current_sl": 81337.70240461353,
     "entry_candle_ts": 1792796400000,
