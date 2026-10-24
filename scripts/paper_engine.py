@@ -1,9 +1,9 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.0 - TP1_HIT schema fixed. Funding applied after SL/TP (original order).
+v3.5 — Equity-based daily/weekly loss, peak after funding, strict validation.
 """
-
 import copy
+import math
 from decimal import Decimal, ROUND_DOWN
 
 
@@ -13,6 +13,12 @@ def floor_to_step(value: float, step: float) -> float:
     d_step = Decimal(str(step))
     n = (d_value / d_step).to_integral_value(rounding=ROUND_DOWN)
     return float(n * d_step)
+
+
+def _is_finite_number(v) -> bool:
+    if isinstance(v, bool): return False
+    if not isinstance(v, (int, float)): return False
+    return math.isfinite(v)
 
 
 def apply_slippage(price: float, is_entry: bool, side: str, slip_pct: float) -> float:
@@ -38,7 +44,10 @@ def _resolve_atr(atr_current, atr_at_entry) -> float:
 
 
 def compute_initial_levels(entry_price, atr_at_signal, side, config):
-    if entry_price <= 0 or atr_at_signal <= 0: raise ValueError("entry_price and ATR must be > 0")
+    if not (_is_finite_number(entry_price) and _is_finite_number(atr_at_signal)):
+        raise ValueError("entry_price and ATR must be finite numbers")
+    if entry_price <= 0 or atr_at_signal <= 0:
+        raise ValueError("entry_price and ATR must be > 0")
     sl_dist = config["sl_atr_mult"] * atr_at_signal
     tp_dist = config["tp1_atr_mult"] * atr_at_signal
     if side == "LONG": return entry_price - sl_dist, entry_price + tp_dist
@@ -47,6 +56,9 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
 
 
 def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade, leverage=None, leverage_cap=None):
+    if not (_is_finite_number(equity) and _is_finite_number(entry_price)
+            and _is_finite_number(stop_loss) and _is_finite_number(risk_per_trade)):
+        return None
     if equity <= 0 or risk_per_trade <= 0: return None
     if leverage is not None:
         if isinstance(leverage, bool) or not isinstance(leverage, int): return None
@@ -74,14 +86,31 @@ def _week_key(ts_ms): return ts_ms // (7 * 86_400_000)
 
 
 def reset_period_losses_if_needed(state, ts):
+    """Reset day/week trackers when boundaries change. Actual loss is computed
+    from equity in _refresh_period_loss()."""
     current_day = _day_key(ts)
     current_week = _week_key(ts)
     if state.get("loss_day_key") != current_day:
-        state["daily_loss"] = 0.0
+        state["daily_start_equity"] = state["equity"]
         state["loss_day_key"] = current_day
     if state.get("loss_week_key") != current_week:
-        state["weekly_loss"] = 0.0
+        state["weekly_start_equity"] = state["equity"]
         state["loss_week_key"] = current_week
+
+
+def _refresh_period_loss(state):
+    """Compute daily_loss and weekly_loss from equity drawdown since period start.
+    This captures ALL equity changes: PnL, fees, funding."""
+    day_start = state.get("daily_start_equity")
+    if day_start is None:
+        day_start = state["initial_equity"]
+        state["daily_start_equity"] = day_start
+    week_start = state.get("weekly_start_equity")
+    if week_start is None:
+        week_start = state["initial_equity"]
+        state["weekly_start_equity"] = week_start
+    state["daily_loss"] = max(0.0, day_start - state["equity"])
+    state["weekly_loss"] = max(0.0, week_start - state["equity"])
 
 
 def update_peak_equity(state):
@@ -108,6 +137,11 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
 
     side = pending["side"]
     open_price = float(candle[1])
+    if not math.isfinite(open_price) or open_price <= 0:
+        events.append({"type": "ENTRY_REJECTED", "reason": "invalid_open_price", "timestamp": ts})
+        state["pending_entry"] = None
+        return state, events
+
     entry_price = apply_slippage(open_price, is_entry=True, side=side, slip_pct=config["slippage_pct"])
     sl, tp1 = compute_initial_levels(entry_price, pending["atr_at_signal"], side, config)
 
@@ -146,6 +180,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         "candles_since_entry": 0, "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
         "commission_paid_usd": entry_commission,
+        "funding_pnl_usd": 0.0,
     }
     state["pending_entry"] = None
 
@@ -184,7 +219,8 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             })
             return p, events, True
         else:
-            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
+            events.append({"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts})
+            return p, events, False
 
     if side == "LONG": p["highest_high_since_entry"] = max(p["highest_high_since_entry"], h)
     else: p["lowest_low_since_entry"] = min(p["lowest_low_since_entry"], l)
@@ -251,7 +287,8 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             })
             return p, events, True
         else:
-            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
+            events.append({"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts})
+            return p, events, False
 
     return p, events, False
 
@@ -272,15 +309,11 @@ def close_position(state, pos, exit_price, specs, config):
 
     prior_commissions = pos.get("commission_paid_usd", 0.0)
     total_comm = prior_commissions + final_commission
-    pnl_net = pnl_gross - total_comm
+    prior_funding = pos.get("funding_pnl_usd", 0.0)
+    pnl_net = pnl_gross - total_comm + prior_funding
 
     pnl_for_equity = pnl_gross - final_commission
     state["equity"] += pnl_for_equity
-
-    if pnl_net < 0:
-        loss = abs(pnl_net)
-        state["daily_loss"] = state.get("daily_loss", 0.0) + loss
-        state["weekly_loss"] = state.get("weekly_loss", 0.0) + loss
 
     update_peak_equity(state)
 
@@ -294,22 +327,41 @@ def close_position(state, pos, exit_price, specs, config):
 def apply_funding_if_due(state, candle, specs, config, events):
     current_ts = int(candle[0])
     pos = state.get("position")
-    if not pos or pos.get("remaining_size", 0) <= 0: return
-    if current_ts % 28_800_000 != 0: return
-    if "funding_rates" not in config: return
-    funding_rates = config.get("funding_rates", {})
+    if not pos or pos.get("remaining_size", 0) <= 0:
+        return
+    if current_ts % 28_800_000 != 0:
+        return
+
+    funding_rates = config.get("funding_rates") or {}
+    if not funding_rates:
+        return
+
     if current_ts not in funding_rates:
-        raise ValueError(f"Missing funding rate for timestamp {current_ts}")
-    if state.get("last_funding_ts") == current_ts: return
+        raise ValueError(f"Missing funding rate for timestamp {current_ts} while funding model is active.")
+
+    if state.get("last_funding_ts") == current_ts:
+        return
+
     rate = funding_rates[current_ts]
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        raise ValueError(f"Invalid funding rate type: {type(rate).__name__}")
+    if rate != rate:
+        raise ValueError(f"Funding rate is NaN at timestamp {current_ts}")
+    if rate == float("inf") or rate == float("-inf"):
+        raise ValueError(f"Funding rate is infinite at timestamp {current_ts}")
+
     size = pos["remaining_size"]
-    close_price = float(candle[4])
+    open_price = float(candle[1])
     mult = specs["contract_multiplier"]
-    notional = size * close_price * mult
+
+    notional = size * open_price * mult
     s = 1 if pos["side"] == "LONG" else -1
     cashflow = -s * notional * rate
+
     state["equity"] += cashflow
+    update_peak_equity(state)
     state["last_funding_ts"] = current_ts
+    pos["funding_pnl_usd"] = pos.get("funding_pnl_usd", 0.0) + cashflow
     events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts})
 
 
@@ -321,6 +373,9 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
     reset_period_losses_if_needed(state, ts)
 
+    if state.get("position") is not None:
+        apply_funding_if_due(state, candle, specs, config, events)
+
     if state.get("pending_entry") is not None:
         state, entry_events = execute_pending_entry(state, candle, specs, config, execution_callback=execution_callback)
         events.extend(entry_events)
@@ -331,10 +386,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         pos_after, pos_events, exited = manage_position_on_candle(
             state["position"], candle, atr_current, config, exit_callback=exit_callback
         )
-
-        if not exited:
-            apply_funding_if_due(state, candle, specs, config, events)
-
         events.extend(pos_events)
 
         for ev in pos_events:
@@ -344,10 +395,8 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         if exited:
             exit_event = next(e for e in pos_events if e["type"] == "EXIT")
             result = close_position(state, pos_after, exit_event["price"], specs, config)
-            
             exit_event.update({
-                "pnl_usd": result["pnl_gross"],
-                "pnl_gross": result["pnl_gross"],
+                "pnl_usd": result["pnl_gross"], "pnl_gross": result["pnl_gross"],
                 "commission_usd": result["final_commission"],
                 "total_commission_usd": result["total_commission"],
                 "trade_net_pnl_usd": result["pnl_net"],
@@ -359,6 +408,9 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
             state["cooldown_until_index"] = i + config["cooldown_candles"] + 1
         else:
             state["position"] = pos_after
+
+    # ✅ Recompute daily/weekly loss from current equity (captures all changes)
+    _refresh_period_loss(state)
 
     if not state.get("circuit_breaker_active", False):
         if state["daily_loss"] >= state["initial_equity"] * config["daily_loss_limit"]:
@@ -441,6 +493,8 @@ DEFAULT_STATE = {
     "weekly_loss": 0.0,
     "loss_day_key": None,
     "loss_week_key": None,
+    "daily_start_equity": None,
+    "weekly_start_equity": None,
     "circuit_breaker_active": False,
     "last_funding_ts": None,
 }
