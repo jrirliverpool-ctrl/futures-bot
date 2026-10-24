@@ -13,18 +13,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install requests pytest pandas numpy
-          
-      - name: Run Tests (Excluding known broken files)
-        run: |
-          python -m pytest tests/ -q --tb=short \
-            --ignore=tests/test_backtest.py \
-            --ignore=tests/test_chain_integration.py \
-            --ignore=tests/test_paper_engine.py \
-            --ignore=tests/test_paper_state_manager.py \
-            --ignore=tests/test_state_manager.py
+      - name: Run Tests
+        run: python -m pytest tests/ -q --tb=short --ignore=tests/test_backtest.py --ignore=tests/test_chain_integration.py --ignore=tests/test_paper_engine.py --ignore=tests/test_paper_state_manager.py --ignore=tests/test_state_manager.py
