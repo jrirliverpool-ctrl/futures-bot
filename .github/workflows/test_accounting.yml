@@ -1,0 +1,38 @@
+name: Research - Accounting Validation
+
+on:
+  push:
+    paths:
+      - 'scripts/paper_engine.py'
+      - 'tests/test_accounting.py'
+      - '.github/workflows/test_accounting.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-accounting:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest
+
+      - name: Run Accounting Tests ONLY
+        run: python -m pytest tests/test_accounting.py -vv --tb=long -ra
+
+      - name: Run Full Test Suite (Regression)
+        if: success()
+        run: python -m pytest tests/ -q --tb=short
