@@ -1,23 +1,31 @@
 """state_manager.py — Atomic State validation with strict numeric checks and strategy hash."""
+import csv
 import json
 import math
 import os
 import tempfile
+from datetime import datetime, timezone
 
 from compute_hash import compute_strategy_hash, get_strategy_metadata
 
-# ✅ ثابت‌های موردنیاز تست‌ها
 STATE_SCHEMA_VERSION = "1.0.0"
 
-# ✅ ستون‌های استاندارد لاگ معاملات (موردنیاز test_state_manager)
+# ✅ ستون‌های استاندارد لاگ معاملات (بر اساس نیاز تست‌ها)
 TRADE_LOG_COLUMNS = [
-    "timestamp", "symbol", "side", "qty", "entry_price", 
-    "exit_price", "pnl_usd", "commission_usd", "reason", "equity"
+    "event_type", "event_seq", "timestamp_iso", "symbol", "side", 
+    "qty", "entry_price", "exit_price", "pnl_usd", "commission_usd", 
+    "reason", "equity", "strategy_version", "strategy_hash"
 ]
 
 
+def _get_state_path(path):
+    """تشخیص اینکه ورودی مسیر فایل است یا پوشه."""
+    if path.endswith(".json"):
+        return path
+    return os.path.join(path, "state.json")
+
+
 def default_state(initial_equity=1000.0):
-    """Returns a fresh default state dictionary (used by backtest.py)."""
     metadata = get_strategy_metadata()
     return {
         "version": STATE_SCHEMA_VERSION,
@@ -38,6 +46,16 @@ def default_state(initial_equity=1000.0):
         "circuit_breaker_active": False,
         "last_funding_ts": None,
     }
+
+
+def load_or_init_state(path, initial_equity=1000.0, symbol="UNKNOWN"):
+    state_path = _get_state_path(path)
+    if os.path.exists(state_path):
+        return load_state(path, strict=True)
+    state = default_state(initial_equity)
+    state["symbol"] = symbol
+    save_state(path, state)
+    return state
 
 
 def validate_state(state: dict) -> None:
@@ -64,11 +82,14 @@ def _check_finite_values(obj, path):
             raise ValueError(f"Invalid numeric value at {path}: {obj}")
 
 
-def save_state(state_dir, state):
+def save_state(path, state):
     validate_state(state)
-    os.makedirs(state_dir, exist_ok=True)
-    target = os.path.join(state_dir, "state.json")
-    fd, tmp_path = tempfile.mkstemp(dir=state_dir, prefix=".state_", suffix=".tmp")
+    target = _get_state_path(path)
+    state_dir = os.path.dirname(target)
+    if state_dir:
+        os.makedirs(state_dir, exist_ok=True)
+    
+    fd, tmp_path = tempfile.mkstemp(dir=state_dir or ".", prefix=".state_", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
@@ -82,11 +103,11 @@ def save_state(state_dir, state):
         raise
 
 
-def load_state(state_dir, strict=True):
-    path = os.path.join(state_dir, "state.json")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"State not found at {path}")
-    with open(path, "r", encoding="utf-8") as f:
+def load_state(path, strict=True):
+    target = _get_state_path(path)
+    if not os.path.exists(target):
+        raise FileNotFoundError(f"State not found at {target}")
+    with open(target, "r", encoding="utf-8") as f:
         state = json.load(f)
     validate_state(state)
     if strict:
@@ -104,14 +125,58 @@ def load_state(state_dir, strict=True):
     return state
 
 
-def delete_state(state_dir):
-    """حذف فایل state.json به همراه پشتیبان‌های آن."""
-    state_path = os.path.join(state_dir, "state.json")
-    if os.path.exists(state_path):
-        os.remove(state_path)
-    for f in os.listdir(state_dir):
-        if f.startswith("state.json.bak") or f.startswith(".state_"):
-            try:
-                os.remove(os.path.join(state_dir, f))
-            except OSError:
-                pass
+def delete_state(path):
+    target = _get_state_path(path)
+    if os.path.exists(target):
+        os.remove(target)
+    state_dir = os.path.dirname(target)
+    if state_dir and os.path.exists(state_dir):
+        for f in os.listdir(state_dir):
+            if f.startswith("state.json.bak") or f.startswith(".state_"):
+                try: os.remove(os.path.join(state_dir, f))
+                except OSError: pass
+
+
+def append_trade_events(csv_path, events, strategy_metadata=None):
+    """افزودن رویدادهای معامله به فایل CSV با هدر استاندارد."""
+    if not events: return
+    file_exists = os.path.exists(csv_path)
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=TRADE_LOG_COLUMNS, extrasaction='ignore')
+        if not file_exists:
+            writer.writeheader()
+            
+        for ev in events:
+            row = {col: "" for col in TRADE_LOG_COLUMNS}
+            row["event_type"] = ev.get("type", "UNKNOWN")
+            row["event_seq"] = ev.get("seq", 0)
+            
+            ts = ev.get("timestamp")
+            if ts:
+                row["timestamp_iso"] = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).isoformat()
+                
+            row["symbol"] = ev.get("symbol", "UNKNOWN")
+            row["side"] = ev.get("side", "")
+            row["qty"] = ev.get("size", ev.get("qty", ""))
+            row["entry_price"] = ev.get("entry_price", ev.get("price", ""))
+            row["exit_price"] = ev.get("exit_price_adj", ev.get("price", ""))
+            row["pnl_usd"] = ev.get("pnl_usd", "")
+            row["commission_usd"] = ev.get("commission_usd", "")
+            row["reason"] = ev.get("reason", "")
+            row["equity"] = ev.get("equity", "")
+            
+            if strategy_metadata:
+                row["strategy_version"] = strategy_metadata.get("version", "")
+                row["strategy_hash"] = strategy_metadata.get("hash", "")
+                
+            writer.writerow(row)
+
+
+def load_trade_log(csv_path):
+    if not os.path.exists(csv_path):
+        return []
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return list(reader)
