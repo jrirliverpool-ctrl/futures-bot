@@ -5,6 +5,12 @@ import logging
 
 logger = logging.getLogger("PaperStateManager")
 
+
+def state_file(state_dir):
+    """Returns the path to the state.json file in the given directory."""
+    return os.path.join(state_dir, "state.json")
+
+
 def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
     from state_manager import save_state
     state = {
@@ -27,16 +33,21 @@ def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
     save_state(state_dir, state)
     return state
 
+
 def state_exists(state_dir):
-    return os.path.exists(os.path.join(state_dir, "state.json"))
+    return os.path.exists(state_file(state_dir))
+
 
 def load_state(state_dir, strict=True):
     from state_manager import load_state as _load
-    return _load(state_dir)
+    # ✅ پاس دادن صحیح پارامتر strict به تابع اصلی
+    return _load(state_dir, strict=strict)
+
 
 def save_state(state_dir, state):
     from state_manager import save_state as _save
     _save(state_dir, state)
+
 
 def validate_jsonl_tail(events_path):
     """✅ اطمینان از اینکه فایل با \n تمام شده (نشانه نوشتن کامل)"""
@@ -51,13 +62,14 @@ def validate_jsonl_tail(events_path):
         except OSError:
             pass
 
+
 def load_events(state_dir):
     events_path = os.path.join(state_dir, "events.jsonl")
     if not os.path.exists(events_path):
         return []
-    
+
     validate_jsonl_tail(events_path)
-    
+
     events = []
     with open(events_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
@@ -66,17 +78,17 @@ def load_events(state_dir):
             try:
                 events.append(json.loads(line))
             except json.JSONDecodeError as e:
-                # ✅ Fail-Fast: متوقف کردن سیستم در صورت خرابی فایل
                 raise ValueError(f"Corrupted JSONL at {events_path}:{line_num}: {e}")
     return events
+
 
 def append_events(state_dir, events, strategy_hash):
     if not events:
         return 0, 0
-        
+
     events_path = os.path.join(state_dir, "events.jsonl")
     existing_ids = set()
-    
+
     if os.path.exists(events_path):
         validate_jsonl_tail(events_path)
         with open(events_path, "r", encoding="utf-8") as f:
@@ -93,14 +105,14 @@ def append_events(state_dir, events, strategy_hash):
             if not ev_id or ev_id in existing_ids:
                 skipped += 1
                 continue
-            
-            # افزودن seq
+
             ev["seq"] = len(existing_ids) + appended + 1
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")
             existing_ids.add(ev_id)
             appended += 1
-            
+
     return appended, skipped
+
 
 def events_count(state_dir):
     events_path = os.path.join(state_dir, "events.jsonl")
