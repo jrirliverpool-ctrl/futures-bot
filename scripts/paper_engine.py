@@ -58,7 +58,6 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
 
 
 def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade, leverage=None, leverage_cap=None):
-    # ✅ بررسی‌های سخت‌گیرانه برای جلوگیری از قیمت‌های نامعتبر (صفر، منفی، NaN)
     if not (_is_finite_number(equity) and _is_finite_number(entry_price) and 
             _is_finite_number(stop_loss) and _is_finite_number(risk_per_trade)):
         return None
@@ -249,7 +248,6 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             "intent": "TP1_HIT", "side": side, "qty": tp1_size,
             "price": p["initial_tp1"], "timestamp": ts
         }):
-            # ✅ استفاده از specs به جای کانفیگ برای جلوگیری از KeyError
             multiplier = specs.get("contract_multiplier") if isinstance(specs, dict) else None
             if not _is_finite_number(multiplier) or multiplier <= 0:
                 raise ValueError("A valid positive contract_multiplier is required for TP1 accounting")
@@ -320,7 +318,6 @@ def close_position(state, pos, exit_price, specs, config):
     prior_funding = pos.get("funding_pnl_usd", 0.0)
     pnl_net = pnl_gross - total_comm + prior_funding
 
-    # ✅ جلوگیری از دوباره‌شماری سود TP1
     pnl_for_equity = pnl_remaining - final_commission
     state["equity"] += pnl_for_equity
     update_peak_equity(state)
@@ -390,7 +387,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         )
         events.extend(pos_events)
 
-        # ✅ واریز سود TP1 به موجودی
         for ev in pos_events:
             if ev["type"] == "TP1_HIT":
                 pnl_tp1 = ev.get("pnl_usd")
@@ -468,9 +464,7 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
 
 def run_engine(state, klines, indicators, specs, config, signals=None, execution_callback=None, exit_callback=None):
-    """
-    ✅ حلقه اصلی برای پردازش دسته‌ای کندل‌ها (مورد نیاز تست‌ها).
-    """
+    """حلقه اصلی برای پردازش دسته‌ای کندل‌ها."""
     events = []
     for i in range(len(klines)):
         signal = signals[i] if signals else None
