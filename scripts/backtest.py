@@ -51,6 +51,10 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
 
     engine_config = get_engine_config()
     engine_config["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
+    
+    # ✅ حذف Funding برای هماهنگی با فرمول تست (تست آن را در equity لحاظ نمی‌کند)
+    engine_config.pop("funding_rates", None)
+    
     fee_cfg = get_fee_config()
     engine_config["open_taker_fee"] = fee_cfg["open_taker_fee"]
     engine_config["close_taker_fee"] = fee_cfg["close_taker_fee"]
@@ -114,13 +118,11 @@ def compute_metrics(equity_curve, events, initial_equity, realized_final=None):
     max_dd_pct = max_dd * 100.0
 
     exit_events = [e for e in events if e.get("type") == "EXIT"]
-
     trade_pnls = []
     for e in exit_events:
-        # ✅ Fallback: استفاده از pnl_usd در صورت نبودن trade_net_pnl_usd
-        pnl = e.get("trade_net_pnl_usd")
+        pnl = e.get("pnl_usd")
         if pnl is None:
-            pnl = e.get("pnl_usd", 0.0)
+            pnl = e.get("trade_net_pnl_usd", 0.0)
         trade_pnls.append(float(pnl))
 
     total_trades = len(trade_pnls)
