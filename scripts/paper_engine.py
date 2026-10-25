@@ -1,11 +1,10 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.6 — Equity-based loss, strict validation, TP1 realized PnL booked to equity,
-no double-count at close.
+v3.4 — Funding validation, TP1 preservation on EXIT rejection.
 """
 import copy
-import math
 from decimal import Decimal, ROUND_DOWN
+
 
 def floor_to_step(value: float, step: float) -> float:
     if step <= 0: raise ValueError("step must be > 0")
@@ -14,16 +13,13 @@ def floor_to_step(value: float, step: float) -> float:
     n = (d_value / d_step).to_integral_value(rounding=ROUND_DOWN)
     return float(n * d_step)
 
-def _is_finite_number(v) -> bool:
-    if isinstance(v, bool): return False
-    if not isinstance(v, (int, float)): return False
-    return math.isfinite(v)
 
 def apply_slippage(price: float, is_entry: bool, side: str, slip_pct: float) -> float:
     if slip_pct < 0: raise ValueError("slip_pct must be >= 0")
     if side == "LONG": return price * (1 + slip_pct) if is_entry else price * (1 - slip_pct)
     if side == "SHORT": return price * (1 - slip_pct) if is_entry else price * (1 + slip_pct)
     raise ValueError(f"Invalid side: {side}")
+
 
 def _is_valid_atr(x) -> bool:
     if isinstance(x, bool): return False
@@ -33,100 +29,69 @@ def _is_valid_atr(x) -> bool:
     if x <= 0: return False
     return True
 
+
 def _resolve_atr(atr_current, atr_at_entry) -> float:
     if _is_valid_atr(atr_current): return float(atr_current)
     if _is_valid_atr(atr_at_entry): return float(atr_at_entry)
     raise ValueError(f"ATR unavailable: atr_current={atr_current!r}, atr_at_entry={atr_at_entry!r}")
 
+
 def compute_initial_levels(entry_price, atr_at_signal, side, config):
-    if not (_is_finite_number(entry_price) and _is_finite_number(atr_at_signal)):
-        raise ValueError("entry_price and ATR must be finite numbers")
-    if entry_price <= 0 or atr_at_signal <= 0:
-        raise ValueError("entry_price and ATR must be > 0")
+    if entry_price <= 0 or atr_at_signal <= 0: raise ValueError("entry_price and ATR must be > 0")
     sl_dist = config["sl_atr_mult"] * atr_at_signal
     tp_dist = config["tp1_atr_mult"] * atr_at_signal
     if side == "LONG": return entry_price - sl_dist, entry_price + tp_dist
     if side == "SHORT": return entry_price + sl_dist, entry_price - tp_dist
     raise ValueError(f"Invalid side: {side}")
 
+
 def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade, leverage=None, leverage_cap=None):
-    if not (_is_finite_number(equity) and _is_finite_number(entry_price) and 
-            _is_finite_number(stop_loss) and _is_finite_number(risk_per_trade)):
-        return None
-        
-    if equity <= 0 or entry_price <= 0 or stop_loss <= 0 or risk_per_trade <= 0:
-        return None
-        
+    if equity <= 0 or risk_per_trade <= 0: return None
     if leverage is not None:
         if isinstance(leverage, bool) or not isinstance(leverage, int): return None
         if leverage <= 0: return None
         max_lev = specs.get("max_leverage", float("inf"))
         if leverage > max_lev: return None
         if leverage_cap is not None and leverage > leverage_cap: return None
-        
     stop_distance = abs(entry_price - stop_loss)
     if stop_distance <= 0: return None
-    
-    multiplier = specs.get("contract_multiplier")
-    if not _is_finite_number(multiplier) or multiplier <= 0:
-        return None
-        
-    qty_step = specs.get("qty_step")
-    min_qty = specs.get("min_qty")
-    max_qty = specs.get("max_qty")
-    
-    if not _is_finite_number(qty_step) or qty_step <= 0: return None
-    if not _is_finite_number(min_qty) or min_qty < 0: return None
-    if not _is_finite_number(max_qty) or max_qty <= 0: return None
-
+    multiplier = specs["contract_multiplier"]
+    if multiplier <= 0: return None
     risk_dollars = equity * risk_per_trade
     qty_raw = risk_dollars / (stop_distance * multiplier)
-    qty = floor_to_step(qty_raw, qty_step)
-
-    if qty < min_qty: return None
-    if qty > max_qty: qty = floor_to_step(max_qty, qty_step)
-    if qty < min_qty: return None
-
+    qty = floor_to_step(qty_raw, specs["qty_step"])
+    if qty < specs["min_qty"]: return None
+    if qty > specs["max_qty"]: qty = floor_to_step(specs["max_qty"], specs["qty_step"])
     min_notional = specs.get("min_notional", 0)
-    if not _is_finite_number(min_notional) or min_notional < 0: return None
-
     notional = qty * multiplier * entry_price
     if min_notional > 0 and notional < min_notional: return None
-
     return qty
+
 
 def _day_key(ts_ms): return ts_ms // 86_400_000
 def _week_key(ts_ms): return ts_ms // (7 * 86_400_000)
+
 
 def reset_period_losses_if_needed(state, ts):
     current_day = _day_key(ts)
     current_week = _week_key(ts)
     if state.get("loss_day_key") != current_day:
-        state["daily_start_equity"] = state["equity"]
+        state["daily_loss"] = 0.0
         state["loss_day_key"] = current_day
     if state.get("loss_week_key") != current_week:
-        state["weekly_start_equity"] = state["equity"]
+        state["weekly_loss"] = 0.0
         state["loss_week_key"] = current_week
 
-def _refresh_period_loss(state):
-    day_start = state.get("daily_start_equity")
-    if day_start is None:
-        day_start = state["initial_equity"]
-        state["daily_start_equity"] = day_start
-    week_start = state.get("weekly_start_equity")
-    if week_start is None:
-        week_start = state["initial_equity"]
-        state["weekly_start_equity"] = week_start
-    state["daily_loss"] = max(0.0, day_start - state["equity"])
-    state["weekly_loss"] = max(0.0, week_start - state["equity"])
 
 def update_peak_equity(state):
     state["peak_equity"] = max(state.get("peak_equity", state["initial_equity"]), state["equity"])
+
 
 def current_total_drawdown(state):
     peak = state.get("peak_equity", state["initial_equity"])
     if peak <= 0: return 0.0
     return max(0.0, (peak - state["equity"]) / peak)
+
 
 def execute_pending_entry(state, candle, specs, config, execution_callback=None):
     events = []
@@ -134,6 +99,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     if pending is None: return state, events
 
     ts = int(candle[0])
+
     if config.get("kill_switch_active", False):
         events.append({"type": "KILL_SWITCH_BLOCKED", "stage": "entry_execution", "reason": config.get("kill_switch_reason"), "side": pending.get("side"), "timestamp": ts})
         state["pending_entry"] = None
@@ -141,11 +107,6 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
 
     side = pending["side"]
     open_price = float(candle[1])
-    if not math.isfinite(open_price) or open_price <= 0:
-        events.append({"type": "ENTRY_REJECTED", "reason": "invalid_open_price", "timestamp": ts})
-        state["pending_entry"] = None
-        return state, events
-
     entry_price = apply_slippage(open_price, is_entry=True, side=side, slip_pct=config["slippage_pct"])
     sl, tp1 = compute_initial_levels(entry_price, pending["atr_at_signal"], side, config)
 
@@ -183,7 +144,8 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         "highest_high_since_entry": entry_price, "lowest_low_since_entry": entry_price,
         "candles_since_entry": 0, "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
-        "commission_paid_usd": entry_commission, "funding_pnl_usd": 0.0,
+        "commission_paid_usd": entry_commission,
+        "funding_pnl_usd": 0.0,
     }
     state["pending_entry"] = None
 
@@ -194,7 +156,8 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     })
     return state, events
 
-def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=None, specs=None):
+
+def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=None):
     side = pos["side"]
     h = float(candle[2])
     l = float(candle[3])
@@ -221,7 +184,8 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             })
             return p, events, True
         else:
-            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
+            events.append({"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts})
+            return p, events, False
 
     if side == "LONG": p["highest_high_since_entry"] = max(p["highest_high_since_entry"], h)
     else: p["lowest_low_since_entry"] = min(p["lowest_low_since_entry"], l)
@@ -245,13 +209,10 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             "intent": "TP1_HIT", "side": side, "qty": tp1_size,
             "price": p["initial_tp1"], "timestamp": ts
         }):
-            multiplier = specs.get("contract_multiplier") if isinstance(specs, dict) else None
-            if not _is_finite_number(multiplier) or multiplier <= 0:
-                raise ValueError("A valid positive contract_multiplier is required for TP1 accounting")
-
             dir_sign = 1 if side == "LONG" else -1
-            pnl_tp1 = tp1_size * (p["initial_tp1"] - p["entry_price"]) * multiplier * dir_sign
-            tp1_notional = tp1_size * p["initial_tp1"] * multiplier
+            pnl_tp1 = tp1_size * (p["initial_tp1"] - p["entry_price"]) * config["contract_multiplier_for_pnl"] * dir_sign
+            mult = config["contract_multiplier_for_pnl"]
+            tp1_notional = tp1_size * p["initial_tp1"] * mult
             tp1_commission = tp1_notional * config.get("close_taker_fee", 0.0)
 
             p["tp1_hit"] = True
@@ -291,9 +252,12 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             })
             return p, events, True
         else:
-            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
+            # ✅ CRITICAL FIX: Preserve existing events (e.g. TP1_HIT)
+            events.append({"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts})
+            return p, events, False
 
     return p, events, False
+
 
 def close_position(state, pos, exit_price, specs, config):
     side = pos["side"]
@@ -314,8 +278,14 @@ def close_position(state, pos, exit_price, specs, config):
     prior_funding = pos.get("funding_pnl_usd", 0.0)
     pnl_net = pnl_gross - total_comm + prior_funding
 
-    pnl_for_equity = pnl_remaining - final_commission
+    pnl_for_equity = pnl_gross - final_commission
     state["equity"] += pnl_for_equity
+
+    if pnl_net < 0:
+        loss = abs(pnl_net)
+        state["daily_loss"] = state.get("daily_loss", 0.0) + loss
+        state["weekly_loss"] = state.get("weekly_loss", 0.0) + loss
+
     update_peak_equity(state)
 
     return {
@@ -324,33 +294,49 @@ def close_position(state, pos, exit_price, specs, config):
         "pnl_net": pnl_net,
     }
 
+
 def apply_funding_if_due(state, candle, specs, config, events):
     current_ts = int(candle[0])
     pos = state.get("position")
-    if not pos or pos.get("remaining_size", 0) <= 0: return
-    if current_ts % 28_800_000 != 0: return
+    if not pos or pos.get("remaining_size", 0) <= 0:
+        return
+    if current_ts % 28_800_000 != 0:
+        return
 
     funding_rates = config.get("funding_rates") or {}
-    if not funding_rates: return
-    if current_ts not in funding_rates: raise ValueError(f"Missing funding rate for timestamp {current_ts}")
-    if state.get("last_funding_ts") == current_ts: return
-    
+    if not funding_rates:
+        return
+
+    if current_ts not in funding_rates:
+        raise ValueError(
+            f"Missing funding rate for timestamp {current_ts} while funding model is active."
+        )
+
+    if state.get("last_funding_ts") == current_ts:
+        return
+
     rate = funding_rates[current_ts]
-    if isinstance(rate, bool) or not isinstance(rate, (int, float)): raise ValueError("Invalid funding rate type")
-    if rate != rate: raise ValueError("Funding rate is NaN")
-    if rate == float("inf") or rate == float("-inf"): raise ValueError("Funding rate is infinite")
+
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        raise ValueError(f"Invalid funding rate type: {type(rate).__name__}")
+    if rate != rate:
+        raise ValueError(f"Funding rate is NaN at timestamp {current_ts}")
+    if rate == float("inf") or rate == float("-inf"):
+        raise ValueError(f"Funding rate is infinite at timestamp {current_ts}")
 
     size = pos["remaining_size"]
     open_price = float(candle[1])
     mult = specs["contract_multiplier"]
+
     notional = size * open_price * mult
     s = 1 if pos["side"] == "LONG" else -1
     cashflow = -s * notional * rate
+
     state["equity"] += cashflow
-    update_peak_equity(state)
     state["last_funding_ts"] = current_ts
     pos["funding_pnl_usd"] = pos.get("funding_pnl_usd", 0.0) + cashflow
     events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts})
+
 
 def process_candle(state, klines, indicators, i, specs, config, signal=None, execution_callback=None, exit_callback=None):
     state = copy.deepcopy(state)
@@ -370,28 +356,20 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
     position_closed = False
     if state.get("position") is not None:
         atr_current = indicators["atr"][i]
-        
         pos_after, pos_events, exited = manage_position_on_candle(
-            state["position"], candle, atr_current, config, exit_callback=exit_callback, specs=specs
+            state["position"], candle, atr_current, config, exit_callback=exit_callback
         )
         events.extend(pos_events)
 
         for ev in pos_events:
-            if ev["type"] == "TP1_HIT":
-                pnl_tp1 = ev.get("pnl_usd")
-                commission_tp1 = ev.get("commission_usd")
-                if not _is_finite_number(pnl_tp1) or not _is_finite_number(commission_tp1) or commission_tp1 < 0:
-                    raise ValueError("Invalid TP1 PnL or commission in accounting event")
-                state["equity"] += pnl_tp1 - commission_tp1
-                update_peak_equity(state)
+            if ev["type"] == "TP1_HIT" and "commission_usd" in ev:
+                state["equity"] -= ev["commission_usd"]
 
         if exited:
             exit_event = next(e for e in pos_events if e["type"] == "EXIT")
             result = close_position(state, pos_after, exit_event["price"], specs, config)
-
             exit_event.update({
-                "pnl_usd": result["pnl_gross"],
-                "pnl_gross": result["pnl_gross"],
+                "pnl_usd": result["pnl_gross"], "pnl_gross": result["pnl_gross"],
                 "commission_usd": result["final_commission"],
                 "total_commission_usd": result["total_commission"],
                 "trade_net_pnl_usd": result["pnl_net"],
@@ -404,8 +382,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         else:
             state["position"] = pos_after
 
-    _refresh_period_loss(state)
-
     if not state.get("circuit_breaker_active", False):
         if state["daily_loss"] >= state["initial_equity"] * config["daily_loss_limit"]:
             state["circuit_breaker_active"] = True
@@ -415,38 +391,78 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
             events.append({"type": "CIRCUIT_BREAKER", "reason": "WEEKLY_LOSS", "equity": state["equity"], "timestamp": ts})
         elif current_total_drawdown(state) >= config["total_dd_limit"]:
             state["circuit_breaker_active"] = True
-            events.append({"type": "CIRCUIT_BREAKER", "reason": "TOTAL_DD", "equity": state["equity"], "peak_equity": state["peak_equity"], "drawdown": current_total_drawdown(state), "timestamp": ts})
+            events.append({
+                "type": "CIRCUIT_BREAKER", "reason": "TOTAL_DD",
+                "equity": state["equity"], "peak_equity": state["peak_equity"],
+                "drawdown": current_total_drawdown(state), "timestamp": ts,
+            })
 
     ks_active = config.get("kill_switch_active", False)
-    if (signal is not None and state.get("position") is None and state.get("pending_entry") is None and not position_closed and not state.get("circuit_breaker_active")):
+
+    if (signal is not None and state.get("position") is None and
+        state.get("pending_entry") is None and not position_closed and
+        not state.get("circuit_breaker_active")):
+
         if ks_active:
             if signal.get("signal") in ("LONG", "SHORT"):
-                events.append({"type": "KILL_SWITCH_BLOCKED", "stage": "signal_acceptance", "reason": config.get("kill_switch_reason"), "side": signal["signal"], "timestamp": ts})
+                events.append({
+                    "type": "KILL_SWITCH_BLOCKED", "stage": "signal_acceptance",
+                    "reason": config.get("kill_switch_reason"),
+                    "side": signal["signal"], "timestamp": ts,
+                })
         else:
             cooldown_until = state.get("cooldown_until_index")
             if cooldown_until is not None and i < cooldown_until:
                 events.append({"type": "COOLDOWN_SKIP", "until_index": cooldown_until, "timestamp": ts})
             elif signal.get("signal") in ("LONG", "SHORT"):
                 state["pending_entry"] = {
-                    "side": signal["signal"], "signal_candle_ts": signal["signal_candle_ts"],
-                    "atr_at_signal": signal["atr_at_signal"], "close_at_signal": signal["close"],
+                    "side": signal["signal"],
+                    "signal_candle_ts": signal["signal_candle_ts"],
+                    "atr_at_signal": signal["atr_at_signal"],
+                    "close_at_signal": signal["close"],
                 }
-                events.append({"type": "SIGNAL", "signal": signal["signal"], "reason": signal.get("reason"), "timestamp": ts})
+                events.append({
+                    "type": "SIGNAL", "signal": signal["signal"],
+                    "reason": signal.get("reason"), "timestamp": ts,
+                })
 
     state["last_processed_candle_ts"] = ts
     return state, events
 
+
 DEFAULT_CONFIG = {
-    "risk_per_trade": 0.01, "sl_atr_mult": 1.5, "tp1_atr_mult": 2.0, "be_trigger_at_r": 1.0,
-    "trailing_atr_mult": 1.5, "be_sl_offset_atr": 0.1, "time_exit_candles": 48, "cooldown_candles": 2,
-    "daily_loss_limit": 0.03, "weekly_loss_limit": 0.07, "total_dd_limit": 0.15,
-    "slippage_pct": 0.0005, "open_taker_fee": 0.0, "close_taker_fee": 0.0, "interval_ms": 3_600_000,
-    "kill_switch_active": False, "kill_switch_reason": None,
+    "risk_per_trade": 0.01,
+    "sl_atr_mult": 1.5,
+    "tp1_atr_mult": 2.0,
+    "be_trigger_at_r": 1.0,
+    "trailing_atr_mult": 1.5,
+    "be_sl_offset_atr": 0.1,
+    "time_exit_candles": 48,
+    "cooldown_candles": 2,
+    "daily_loss_limit": 0.03,
+    "weekly_loss_limit": 0.07,
+    "total_dd_limit": 0.15,
+    "slippage_pct": 0.0005,
+    "open_taker_fee": 0.0,
+    "close_taker_fee": 0.0,
+    "interval_ms": 3_600_000,
+    "kill_switch_active": False,
+    "kill_switch_reason": None,
 }
 
 DEFAULT_STATE = {
-    "version": "1.0.0", "initial_equity": 1000.0, "equity": 1000.0, "peak_equity": 1000.0,
-    "last_processed_candle_ts": None, "position": None, "pending_entry": None, "cooldown_until_index": None,
-    "daily_loss": 0.0, "weekly_loss": 0.0, "loss_day_key": None, "loss_week_key": None,
-    "daily_start_equity": None, "weekly_start_equity": None, "circuit_breaker_active": False, "last_funding_ts": None,
+    "version": "1.0.0",
+    "initial_equity": 1000.0,
+    "equity": 1000.0,
+    "peak_equity": 1000.0,
+    "last_processed_candle_ts": None,
+    "position": None,
+    "pending_entry": None,
+    "cooldown_until_index": None,
+    "daily_loss": 0.0,
+    "weekly_loss": 0.0,
+    "loss_day_key": None,
+    "loss_week_key": None,
+    "circuit_breaker_active": False,
+    "last_funding_ts": None,
 }
