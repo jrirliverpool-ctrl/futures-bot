@@ -6,8 +6,14 @@ import tempfile
 
 from compute_hash import compute_strategy_hash, get_strategy_metadata
 
-# ✅ ثابت موردنیاز تست‌ها
+# ✅ ثابت‌های موردنیاز تست‌ها
 STATE_SCHEMA_VERSION = "1.0.0"
+
+# ✅ ستون‌های استاندارد لاگ معاملات (موردنیاز test_state_manager)
+TRADE_LOG_COLUMNS = [
+    "timestamp", "symbol", "side", "qty", "entry_price", 
+    "exit_price", "pnl_usd", "commission_usd", "reason", "equity"
+]
 
 
 def default_state(initial_equity=1000.0):
@@ -37,9 +43,7 @@ def default_state(initial_equity=1000.0):
 def validate_state(state: dict) -> None:
     if not isinstance(state, dict):
         raise ValueError("state must be a dict")
-
     _check_finite_values(state, "state")
-
     required = ["initial_equity", "equity", "peak_equity"]
     for k in required:
         if k not in state:
@@ -64,7 +68,6 @@ def save_state(state_dir, state):
     validate_state(state)
     os.makedirs(state_dir, exist_ok=True)
     target = os.path.join(state_dir, "state.json")
-
     fd, tmp_path = tempfile.mkstemp(dir=state_dir, prefix=".state_", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -86,29 +89,18 @@ def load_state(state_dir, strict=True):
     with open(path, "r", encoding="utf-8") as f:
         state = json.load(f)
     validate_state(state)
-
     if strict:
         try:
             current_hash = compute_strategy_hash()
         except Exception as e:
-            raise ValueError(f"Could not compute current strategy hash to verify state: {e}")
-
+            raise ValueError(f"Could not compute current strategy hash: {e}")
         saved_hash = state.get("strategy_hash")
-        
         if saved_hash is None:
-            raise ValueError(
-                f"State is missing 'strategy_hash'. "
-                f"Expected: {current_hash}. Refusing to load."
-            )
-        
+            raise ValueError(f"State missing 'strategy_hash'. Expected: {current_hash}.")
         if saved_hash != current_hash:
             raise ValueError(
-                f"Strategy hash mismatch! "
-                f"State belongs to a different strategy. "
-                f"Saved: {saved_hash}, Current: {current_hash}. "
-                f"Refusing to load to prevent unintended trades."
+                f"Strategy hash mismatch! Saved: {saved_hash}, Current: {current_hash}."
             )
-
     return state
 
 
