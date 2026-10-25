@@ -11,6 +11,11 @@ def state_file(state_dir):
     return os.path.join(state_dir, "state.json")
 
 
+def events_file(state_dir):
+    """Returns the path to the events.jsonl file in the given directory."""
+    return os.path.join(state_dir, "events.jsonl")
+
+
 def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
     from state_manager import save_state
     state = {
@@ -40,7 +45,6 @@ def state_exists(state_dir):
 
 def load_state(state_dir, strict=True):
     from state_manager import load_state as _load
-    # ✅ پاس دادن صحیح پارامتر strict به تابع اصلی
     return _load(state_dir, strict=strict)
 
 
@@ -50,7 +54,6 @@ def save_state(state_dir, state):
 
 
 def validate_jsonl_tail(events_path):
-    """✅ اطمینان از اینکه فایل با \n تمام شده (نشانه نوشتن کامل)"""
     if not os.path.exists(events_path):
         return
     with open(events_path, 'rb') as f:
@@ -64,7 +67,7 @@ def validate_jsonl_tail(events_path):
 
 
 def load_events(state_dir):
-    events_path = os.path.join(state_dir, "events.jsonl")
+    events_path = events_file(state_dir)
     if not os.path.exists(events_path):
         return []
 
@@ -86,7 +89,7 @@ def append_events(state_dir, events, strategy_hash):
     if not events:
         return 0, 0
 
-    events_path = os.path.join(state_dir, "events.jsonl")
+    events_path = events_file(state_dir)
     existing_ids = set()
 
     if os.path.exists(events_path):
@@ -115,7 +118,7 @@ def append_events(state_dir, events, strategy_hash):
 
 
 def events_count(state_dir):
-    events_path = os.path.join(state_dir, "events.jsonl")
+    events_path = events_file(state_dir)
     if not os.path.exists(events_path):
         return 0
     with open(events_path, "r") as f:
