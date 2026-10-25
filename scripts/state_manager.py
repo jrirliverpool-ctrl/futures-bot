@@ -4,15 +4,19 @@ import math
 import os
 import tempfile
 
-# ✅ استفاده از تابع هش canonical موجود در پروژه (Single Source of Truth)
-from compute_hash import compute_strategy_hash
+from compute_hash import compute_strategy_hash, get_strategy_metadata
+
+# ✅ ثابت موردنیاز تست‌ها
+STATE_SCHEMA_VERSION = "1.0.0"
 
 
 def default_state(initial_equity=1000.0):
     """Returns a fresh default state dictionary (used by backtest.py)."""
+    metadata = get_strategy_metadata()
     return {
-        "version": "1.0.0",
-        "strategy_hash": compute_strategy_hash(),
+        "version": STATE_SCHEMA_VERSION,
+        "strategy_hash": metadata["hash"],
+        "strategy_version": metadata["version"],
         "initial_equity": initial_equity,
         "equity": initial_equity,
         "peak_equity": initial_equity,
@@ -79,29 +83,24 @@ def load_state(state_dir, strict=True):
     path = os.path.join(state_dir, "state.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"State not found at {path}")
-
     with open(path, "r", encoding="utf-8") as f:
         state = json.load(f)
-
     validate_state(state)
 
-    # ✅ منطق بررسی هش استراتژی در حالت strict
     if strict:
         try:
             current_hash = compute_strategy_hash()
         except Exception as e:
-            raise ValueError(
-                f"Could not compute current strategy hash to verify state: {e}"
-            )
+            raise ValueError(f"Could not compute current strategy hash to verify state: {e}")
 
         saved_hash = state.get("strategy_hash")
-
+        
         if saved_hash is None:
             raise ValueError(
                 f"State is missing 'strategy_hash'. "
                 f"Expected: {current_hash}. Refusing to load."
             )
-
+        
         if saved_hash != current_hash:
             raise ValueError(
                 f"Strategy hash mismatch! "
@@ -114,7 +113,7 @@ def load_state(state_dir, strict=True):
 
 
 def delete_state(state_dir):
-    """حذف فایل state.json به همراه پشتیبان‌ها (مورد استفاده در تست‌های chain)."""
+    """حذف فایل state.json به همراه پشتیبان‌های آن."""
     state_path = os.path.join(state_dir, "state.json")
     if os.path.exists(state_path):
         os.remove(state_path)
