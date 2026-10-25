@@ -1,7 +1,8 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.4 — Funding validation, TP1 preservation on EXIT rejection.
+v3.0 - TP1_HIT schema fixed. Funding applied after SL/TP (original order).
 """
+
 import copy
 from decimal import Decimal, ROUND_DOWN
 
@@ -145,7 +146,6 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         "candles_since_entry": 0, "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
         "commission_paid_usd": entry_commission,
-        "funding_pnl_usd": 0.0,
     }
     state["pending_entry"] = None
 
@@ -184,8 +184,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             })
             return p, events, True
         else:
-            events.append({"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts})
-            return p, events, False
+            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
 
     if side == "LONG": p["highest_high_since_entry"] = max(p["highest_high_since_entry"], h)
     else: p["lowest_low_since_entry"] = min(p["lowest_low_since_entry"], l)
@@ -252,9 +251,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             })
             return p, events, True
         else:
-            # ✅ CRITICAL FIX: Preserve existing events (e.g. TP1_HIT)
-            events.append({"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts})
-            return p, events, False
+            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
 
     return p, events, False
 
@@ -275,8 +272,7 @@ def close_position(state, pos, exit_price, specs, config):
 
     prior_commissions = pos.get("commission_paid_usd", 0.0)
     total_comm = prior_commissions + final_commission
-    prior_funding = pos.get("funding_pnl_usd", 0.0)
-    pnl_net = pnl_gross - total_comm + prior_funding
+    pnl_net = pnl_gross - total_comm
 
     pnl_for_equity = pnl_gross - final_commission
     state["equity"] += pnl_for_equity
@@ -298,43 +294,22 @@ def close_position(state, pos, exit_price, specs, config):
 def apply_funding_if_due(state, candle, specs, config, events):
     current_ts = int(candle[0])
     pos = state.get("position")
-    if not pos or pos.get("remaining_size", 0) <= 0:
-        return
-    if current_ts % 28_800_000 != 0:
-        return
-
-    funding_rates = config.get("funding_rates") or {}
-    if not funding_rates:
-        return
-
+    if not pos or pos.get("remaining_size", 0) <= 0: return
+    if current_ts % 28_800_000 != 0: return
+    if "funding_rates" not in config: return
+    funding_rates = config.get("funding_rates", {})
     if current_ts not in funding_rates:
-        raise ValueError(
-            f"Missing funding rate for timestamp {current_ts} while funding model is active."
-        )
-
-    if state.get("last_funding_ts") == current_ts:
-        return
-
+        raise ValueError(f"Missing funding rate for timestamp {current_ts}")
+    if state.get("last_funding_ts") == current_ts: return
     rate = funding_rates[current_ts]
-
-    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
-        raise ValueError(f"Invalid funding rate type: {type(rate).__name__}")
-    if rate != rate:
-        raise ValueError(f"Funding rate is NaN at timestamp {current_ts}")
-    if rate == float("inf") or rate == float("-inf"):
-        raise ValueError(f"Funding rate is infinite at timestamp {current_ts}")
-
     size = pos["remaining_size"]
-    open_price = float(candle[1])
+    close_price = float(candle[4])
     mult = specs["contract_multiplier"]
-
-    notional = size * open_price * mult
+    notional = size * close_price * mult
     s = 1 if pos["side"] == "LONG" else -1
     cashflow = -s * notional * rate
-
     state["equity"] += cashflow
     state["last_funding_ts"] = current_ts
-    pos["funding_pnl_usd"] = pos.get("funding_pnl_usd", 0.0) + cashflow
     events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts})
 
 
@@ -346,9 +321,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
     reset_period_losses_if_needed(state, ts)
 
-    if state.get("position") is not None:
-        apply_funding_if_due(state, candle, specs, config, events)
-
     if state.get("pending_entry") is not None:
         state, entry_events = execute_pending_entry(state, candle, specs, config, execution_callback=execution_callback)
         events.extend(entry_events)
@@ -359,6 +331,10 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         pos_after, pos_events, exited = manage_position_on_candle(
             state["position"], candle, atr_current, config, exit_callback=exit_callback
         )
+
+        if not exited:
+            apply_funding_if_due(state, candle, specs, config, events)
+
         events.extend(pos_events)
 
         for ev in pos_events:
@@ -368,8 +344,10 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
         if exited:
             exit_event = next(e for e in pos_events if e["type"] == "EXIT")
             result = close_position(state, pos_after, exit_event["price"], specs, config)
+            
             exit_event.update({
-                "pnl_usd": result["pnl_gross"], "pnl_gross": result["pnl_gross"],
+                "pnl_usd": result["pnl_gross"],
+                "pnl_gross": result["pnl_gross"],
                 "commission_usd": result["final_commission"],
                 "total_commission_usd": result["total_commission"],
                 "trade_net_pnl_usd": result["pnl_net"],
