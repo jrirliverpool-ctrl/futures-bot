@@ -7,34 +7,17 @@ logger = logging.getLogger("PaperStateManager")
 
 
 def state_file(state_dir):
-    """Returns the path to the state.json file in the given directory."""
     return os.path.join(state_dir, "state.json")
 
 
 def events_file(state_dir):
-    """Returns the path to the events.jsonl file in the given directory."""
     return os.path.join(state_dir, "events.jsonl")
 
 
 def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
-    from state_manager import save_state
-    state = {
-        "version": "1.0.0",
-        "initial_equity": initial_equity,
-        "equity": initial_equity,
-        "peak_equity": initial_equity,
-        "symbol": symbol,
-        "position": None,
-        "pending_entry": None,
-        "last_processed_candle_ts": None,
-        "cooldown_until_index": None,
-        "daily_loss": 0.0,
-        "weekly_loss": 0.0,
-        "loss_day_key": None,
-        "loss_week_key": None,
-        "circuit_breaker_active": False,
-        "last_funding_ts": None,
-    }
+    from state_manager import save_state, default_state
+    state = default_state(initial_equity)
+    state["symbol"] = symbol
     save_state(state_dir, state)
     return state
 
@@ -61,7 +44,7 @@ def validate_jsonl_tail(events_path):
             f.seek(-1, os.SEEK_END)
             last_char = f.read(1)
             if last_char != b'\n':
-                raise ValueError(f"JSONL file {events_path} does not end with newline. Truncation suspected.")
+                raise ValueError(f"JSONL file {events_path} does not end with newline.")
         except OSError:
             pass
 
@@ -123,3 +106,21 @@ def events_count(state_dir):
         return 0
     with open(events_path, "r") as f:
         return sum(1 for _ in f)
+
+
+def max_seq(state_dir):
+    """بازگرداندن بیشترین seq معتبر یا صفر."""
+    events = load_events(state_dir)
+    seqs = []
+    for event in events:
+        value = event.get("seq", 0)
+        if isinstance(value, bool):
+            raise ValueError("Invalid event seq: boolean is not allowed")
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid event seq: {value!r}")
+        if number < 0:
+            raise ValueError(f"Invalid event seq: {value!r}")
+        seqs.append(number)
+    return max(seqs, default=0)
