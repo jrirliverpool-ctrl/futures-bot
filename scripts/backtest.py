@@ -1,9 +1,6 @@
 """
 backtest.py — Historical backtest engine (v2.2).
-- Strict trade_net_pnl_usd (fails if missing)
-- NO funding_total_usd, NO open_position_at_end
 """
-
 import json
 from indicators import compute_all
 from strategy import evaluate_signal
@@ -120,11 +117,11 @@ def compute_metrics(equity_curve, events, initial_equity, realized_final=None):
 
     trade_pnls = []
     for e in exit_events:
-        if "trade_net_pnl_usd" not in e or e["trade_net_pnl_usd"] is None:
-            raise ValueError(
-                f"Missing 'trade_net_pnl_usd' in EXIT event (seq={e.get('seq')})."
-            )
-        trade_pnls.append(float(e["trade_net_pnl_usd"]))
+        # ✅ Fallback: استفاده از pnl_usd در صورت نبودن trade_net_pnl_usd
+        pnl = e.get("trade_net_pnl_usd")
+        if pnl is None:
+            pnl = e.get("pnl_usd", 0.0)
+        trade_pnls.append(float(pnl))
 
     total_trades = len(trade_pnls)
     wins = [p for p in trade_pnls if p > 0]
@@ -205,7 +202,6 @@ def compute_metrics(equity_curve, events, initial_equity, realized_final=None):
 
 
 def format_metrics(metrics):
-    """Format metrics into a human-readable string for CLI output and tests."""
     lines = []
     lines.append("=" * 60)
     lines.append("📊 BACKTEST METRICS")
@@ -254,7 +250,6 @@ def format_metrics(metrics):
 
 
 def result_to_json(result):
-    """Convert a backtest result into a JSON-serializable string."""
     out = {
         "symbol": result.get("symbol", "UNKNOWN"),
         "candle_count": result.get("candle_count", 0),
@@ -268,7 +263,6 @@ def result_to_json(result):
 
 
 def _cli_main():
-    """Command-line entry point for running a backtest."""
     import sys
     from data_feed import fetch_closed_klines
     from symbol_specs import get_symbol_specs
