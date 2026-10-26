@@ -47,9 +47,13 @@ def default_state(initial_equity=1000.0):
 
 
 def state_exists(path):
-    """✅ بررسی وجود فایل state (اضافه شده برای رفع خطای تست)"""
     target = _get_state_path(path)
     return os.path.exists(target)
+
+
+def trade_log_exists(csv_path):
+    """✅ بررسی وجود فایل لاگ معاملات (اضافه شده برای رفع خطای تست)"""
+    return os.path.exists(csv_path)
 
 
 def load_or_init_state(path, initial_equity=1000.0, symbol="UNKNOWN"):
