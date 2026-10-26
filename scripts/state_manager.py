@@ -52,8 +52,13 @@ def state_exists(path):
 
 
 def trade_log_exists(csv_path):
-    """✅ بررسی وجود فایل لاگ معاملات (اضافه شده برای رفع خطای تست)"""
     return os.path.exists(csv_path)
+
+
+def delete_trade_log(csv_path):
+    """✅ حذف فایل لاگ معاملات (اضافه شده برای رفع خطای تست)"""
+    if os.path.exists(csv_path):
+        os.remove(csv_path)
 
 
 def load_or_init_state(path, initial_equity=1000.0, symbol="UNKNOWN"):
@@ -131,18 +136,6 @@ def load_state(path, strict=True):
                 f"Strategy hash mismatch! Saved: {saved_hash}, Current: {current_hash}."
             )
     return state
-
-
-def delete_state(path):
-    target = _get_state_path(path)
-    if os.path.exists(target):
-        os.remove(target)
-    state_dir = os.path.dirname(target)
-    if state_dir and os.path.exists(state_dir):
-        for f in os.listdir(state_dir):
-            if f.startswith("state.json.bak") or f.startswith(".state_"):
-                try: os.remove(os.path.join(state_dir, f))
-                except OSError: pass
 
 
 def append_trade_events(csv_path, events, strategy_metadata=None):
