@@ -52,7 +52,7 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
     engine_config = get_engine_config()
     engine_config["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
     
-    # ✅ غیرفعال کردن کامل Funding در بک‌تست برای هماهنگی با فرمول تست
+    # ✅ غیرفعال کردن Funding در بک‌تست برای هماهنگی با فرمول تست
     engine_config["funding_rates"] = {}
     
     fee_cfg = get_fee_config()
