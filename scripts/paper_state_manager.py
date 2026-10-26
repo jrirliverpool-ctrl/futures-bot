@@ -3,6 +3,7 @@ import json
 import os
 import logging
 import hashlib
+from datetime import datetime, timezone
 
 logger = logging.getLogger("PaperStateManager")
 
@@ -16,13 +17,12 @@ def events_file(state_dir):
 
 
 def _fingerprint(event, strategy_hash):
-    """✅ تولید هش یکتا برای هر رویداد (برای جلوگیری از ثبت تکراری)"""
+    """✅ تولید هش ۱۶ کاراکتری یکتا برای هر رویداد"""
     payload = json.dumps(event, sort_keys=True, ensure_ascii=True)
-    return hashlib.sha256(f"{payload}{strategy_hash}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{payload}{strategy_hash}".encode("utf-8")).hexdigest()[:16]
 
 
 def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
-    """✅ اگر استیت وجود دارد، آن را لود می‌کند؛ در غیر این صورت یکی می‌سازد"""
     from state_manager import save_state, default_state, load_state
     if state_exists(state_dir):
         return load_state(state_dir, strict=False)
@@ -65,13 +65,13 @@ def load_events(state_dir):
 
 
 def append_events(state_dir, events, strategy_hash=None):
-    """✅ ثبت رویدادها با تولید خودکار شناسه و جلوگیری از تکرار"""
     if not events:
         return 0, 0
 
+    from compute_hash import compute_strategy_hash, get_strategy_metadata
     if strategy_hash is None:
-        from compute_hash import compute_strategy_hash
         strategy_hash = compute_strategy_hash()
+    metadata = get_strategy_metadata()
 
     events_path = events_file(state_dir)
     existing_ids = set()
@@ -89,13 +89,21 @@ def append_events(state_dir, events, strategy_hash=None):
     
     with open(events_path, "a", encoding="utf-8") as f:
         for ev in events:
-            ev = ev.copy()  # جلوگیری از تغییر دیکشنری اصلی
+            ev = ev.copy()
             
-            # ✅ تبدیل فیلد timestamp به candle_ts_ms طبق قرارداد تست
+            # ✅ تبدیل type به event_type طبق نیاز تست
+            if "type" in ev:
+                ev["event_type"] = ev.pop("type")
+                
+            # ✅ تبدیل timestamp به candle_ts_ms و timestamp_iso
             if "timestamp" in ev:
-                ev["candle_ts_ms"] = ev.pop("timestamp")
+                ts = ev.pop("timestamp")
+                ev["candle_ts_ms"] = ts
+                ev["timestamp_iso"] = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).isoformat()
                 
             ev["strategy_hash"] = strategy_hash
+            ev["strategy_version"] = metadata["version"]
+            
             ev_id = _fingerprint(ev, strategy_hash)
             
             if ev_id in existing_ids:
@@ -120,7 +128,6 @@ def events_count(state_dir):
 
 
 def max_seq(events):
-    """✅ بازگرداندن بیشترین seq معتبر از لیست رویدادها (طبق قرارداد تست)"""
     if not events:
         return 0
     seqs = []
