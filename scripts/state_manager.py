@@ -10,7 +10,6 @@ from compute_hash import compute_strategy_hash, get_strategy_metadata
 
 STATE_SCHEMA_VERSION = "1.0.0"
 
-# ✅ ستون‌های استاندارد لاگ معاملات (بر اساس نیاز تست‌ها)
 TRADE_LOG_COLUMNS = [
     "event_type", "event_seq", "timestamp_iso", "symbol", "side", 
     "qty", "entry_price", "exit_price", "pnl_usd", "commission_usd", 
@@ -19,7 +18,6 @@ TRADE_LOG_COLUMNS = [
 
 
 def _get_state_path(path):
-    """تشخیص اینکه ورودی مسیر فایل است یا پوشه."""
     if path.endswith(".json"):
         return path
     return os.path.join(path, "state.json")
@@ -46,6 +44,12 @@ def default_state(initial_equity=1000.0):
         "circuit_breaker_active": False,
         "last_funding_ts": None,
     }
+
+
+def state_exists(path):
+    """✅ بررسی وجود فایل state (اضافه شده برای رفع خطای تست)"""
+    target = _get_state_path(path)
+    return os.path.exists(target)
 
 
 def load_or_init_state(path, initial_equity=1000.0, symbol="UNKNOWN"):
@@ -138,7 +142,6 @@ def delete_state(path):
 
 
 def append_trade_events(csv_path, events, strategy_metadata=None):
-    """افزودن رویدادهای معامله به فایل CSV با هدر استاندارد."""
     if not events: return
     file_exists = os.path.exists(csv_path)
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
