@@ -2,6 +2,7 @@
 import json
 import os
 import logging
+import hashlib
 
 logger = logging.getLogger("PaperStateManager")
 
@@ -12,6 +13,12 @@ def state_file(state_dir):
 
 def events_file(state_dir):
     return os.path.join(state_dir, "events.jsonl")
+
+
+def _fingerprint(event):
+    """✅ تولید یک هش یکتا برای هر رویداد (برای جلوگیری از ثبت تکراری)"""
+    payload = json.dumps(event, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
