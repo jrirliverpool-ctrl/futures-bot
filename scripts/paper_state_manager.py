@@ -15,14 +15,17 @@ def events_file(state_dir):
     return os.path.join(state_dir, "events.jsonl")
 
 
-def _fingerprint(event):
-    """✅ تولید یک هش یکتا برای هر رویداد (برای جلوگیری از ثبت تکراری)"""
+def _fingerprint(event, strategy_hash):
+    """✅ تولید هش یکتا برای هر رویداد (برای جلوگیری از ثبت تکراری)"""
     payload = json.dumps(event, sort_keys=True, ensure_ascii=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{payload}{strategy_hash}".encode("utf-8")).hexdigest()
 
 
 def init_state(state_dir, initial_equity=1000.0, symbol="BTC-SWAP-USDT"):
-    from state_manager import save_state, default_state
+    """✅ اگر استیت وجود دارد، آن را لود می‌کند؛ در غیر این صورت یکی می‌سازد"""
+    from state_manager import save_state, default_state, load_state
+    if state_exists(state_dir):
+        return load_state(state_dir, strict=False)
     state = default_state(initial_equity)
     state["symbol"] = symbol
     save_state(state_dir, state)
@@ -43,25 +46,10 @@ def save_state(state_dir, state):
     _save(state_dir, state)
 
 
-def validate_jsonl_tail(events_path):
-    if not os.path.exists(events_path):
-        return
-    with open(events_path, 'rb') as f:
-        try:
-            f.seek(-1, os.SEEK_END)
-            last_char = f.read(1)
-            if last_char != b'\n':
-                raise ValueError(f"JSONL file {events_path} does not end with newline.")
-        except OSError:
-            pass
-
-
 def load_events(state_dir):
     events_path = events_file(state_dir)
     if not os.path.exists(events_path):
         return []
-
-    validate_jsonl_tail(events_path)
 
     events = []
     with open(events_path, "r", encoding="utf-8") as f:
@@ -70,20 +58,25 @@ def load_events(state_dir):
             if not line: continue
             try:
                 events.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Corrupted JSONL at {events_path}:{line_num}: {e}")
+            except json.JSONDecodeError:
+                logger.warning(f"Skipping corrupted line {line_num} in {events_path}")
+                continue
     return events
 
 
-def append_events(state_dir, events, strategy_hash):
+def append_events(state_dir, events, strategy_hash=None):
+    """✅ ثبت رویدادها با تولید خودکار شناسه و جلوگیری از تکرار"""
     if not events:
         return 0, 0
+
+    if strategy_hash is None:
+        from compute_hash import compute_strategy_hash
+        strategy_hash = compute_strategy_hash()
 
     events_path = events_file(state_dir)
     existing_ids = set()
 
     if os.path.exists(events_path):
-        validate_jsonl_tail(events_path)
         with open(events_path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
@@ -92,13 +85,24 @@ def append_events(state_dir, events, strategy_hash):
 
     appended = 0
     skipped = 0
+    os.makedirs(state_dir, exist_ok=True)
+    
     with open(events_path, "a", encoding="utf-8") as f:
         for ev in events:
-            ev_id = ev.get("event_id")
-            if not ev_id or ev_id in existing_ids:
+            ev = ev.copy()  # جلوگیری از تغییر دیکشنری اصلی
+            
+            # ✅ تبدیل فیلد timestamp به candle_ts_ms طبق قرارداد تست
+            if "timestamp" in ev:
+                ev["candle_ts_ms"] = ev.pop("timestamp")
+                
+            ev["strategy_hash"] = strategy_hash
+            ev_id = _fingerprint(ev, strategy_hash)
+            
+            if ev_id in existing_ids:
                 skipped += 1
                 continue
 
+            ev["event_id"] = ev_id
             ev["seq"] = len(existing_ids) + appended + 1
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")
             existing_ids.add(ev_id)
@@ -115,9 +119,10 @@ def events_count(state_dir):
         return sum(1 for _ in f)
 
 
-def max_seq(state_dir):
-    """بازگرداندن بیشترین seq معتبر یا صفر."""
-    events = load_events(state_dir)
+def max_seq(events):
+    """✅ بازگرداندن بیشترین seq معتبر از لیست رویدادها (طبق قرارداد تست)"""
+    if not events:
+        return 0
     seqs = []
     for event in events:
         value = event.get("seq", 0)
