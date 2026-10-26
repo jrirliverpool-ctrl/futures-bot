@@ -17,7 +17,6 @@ def events_file(state_dir):
 
 
 def _fingerprint(event, strategy_hash):
-    """✅ تولید هش ۱۶ کاراکتری یکتا برای هر رویداد"""
     payload = json.dumps(event, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(f"{payload}{strategy_hash}".encode("utf-8")).hexdigest()[:16]
 
@@ -91,11 +90,9 @@ def append_events(state_dir, events, strategy_hash=None):
         for ev in events:
             ev = ev.copy()
             
-            # ✅ تبدیل type به event_type طبق نیاز تست
             if "type" in ev:
                 ev["event_type"] = ev.pop("type")
                 
-            # ✅ تبدیل timestamp به candle_ts_ms و timestamp_iso
             if "timestamp" in ev:
                 ts = ev.pop("timestamp")
                 ev["candle_ts_ms"] = ts
