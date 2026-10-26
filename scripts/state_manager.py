@@ -21,22 +21,13 @@ TRADE_LOG_COLUMNS = [
 ]
 
 
-# ============================================================
-# Path helpers
-# ============================================================
-
 def _get_state_path(path):
     if path.endswith(".json"):
         return path
     return os.path.join(path, "state.json")
 
 
-# ============================================================
-# Default / Validate
-# ============================================================
-
 def default_state(initial_equity=1000.0):
-    # ✅ رد مقادیر غیرعددی، bool، NaN و Infinity
     if isinstance(initial_equity, bool):
         raise ValueError("initial_equity must be a number, not bool")
     if not isinstance(initial_equity, (int, float)):
@@ -79,7 +70,6 @@ def validate_state(state: dict) -> None:
 
     _check_finite_values(state, "state")
 
-    # فیلدهای اجباری و عددی
     for k in ("initial_equity", "equity", "peak_equity"):
         if k not in state:
             raise ValueError(f"Missing required key: {k}")
@@ -90,14 +80,12 @@ def validate_state(state: dict) -> None:
         if state[k] < 0:
             raise ValueError(f"{k} must be >= 0")
 
-    # فیلدهای اختیاری اما با نوع مشخص
     if state.get("position") is not None and not isinstance(state["position"], dict):
         raise ValueError("position must be None or dict")
 
     if state.get("pending_entry") is not None and not isinstance(state["pending_entry"], dict):
         raise ValueError("pending_entry must be None or dict")
 
-    # ✅ bool هم زیرنوع int است؛ باید صریحاً رد شود
     cdi = state.get("cooldown_until_index")
     if cdi is not None and (isinstance(cdi, bool) or not isinstance(cdi, int)):
         raise ValueError("cooldown_until_index must be None or int")
@@ -118,10 +106,6 @@ def _check_finite_values(obj, path):
         if not math.isfinite(obj):
             raise ValueError(f"Invalid numeric value at {path}: {obj}")
 
-
-# ============================================================
-# Save / Load / Delete
-# ============================================================
 
 def save_state(path, state):
     validate_state(state)
@@ -182,10 +166,6 @@ def delete_state(path):
                 except OSError: pass
 
 
-# ============================================================
-# State existence / Init
-# ============================================================
-
 def state_exists(path):
     return os.path.exists(_get_state_path(path))
 
@@ -199,10 +179,6 @@ def load_or_init_state(path, initial_equity=1000.0, symbol="UNKNOWN"):
     return state
 
 
-# ============================================================
-# Trade Log (CSV)
-# ============================================================
-
 def trade_log_exists(csv_path):
     return os.path.exists(csv_path)
 
@@ -213,14 +189,12 @@ def delete_trade_log(csv_path):
 
 
 def _event_identity(ev):
-    """محاسبه هش محتوایی برای dedup — بدون فیلدهای پویا مثل seq/event_id."""
     payload = {k: v for k, v in ev.items() if k not in ("seq", "event_id")}
     s = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
 def _validate_event_for_csv(ev):
-    """اعتبارسنجی رویداد پیش از نوشتن، تا هیچ داده‌ی نیمه‌کاره‌ای ثبت نشود."""
     if not isinstance(ev, dict):
         raise ValueError("event must be a dict")
     ts = ev.get("timestamp")
@@ -229,7 +203,6 @@ def _validate_event_for_csv(ev):
             raise ValueError(f"Invalid timestamp type: {type(ts).__name__}")
         if not math.isfinite(ts):
             raise ValueError("timestamp must be finite")
-        # اگر عدد بود، سعی کنیم iso بسازیم تا از بازه‌ی مجاز مطمئن شویم
         try:
             datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc)
         except (OverflowError, OSError, ValueError) as e:
@@ -237,7 +210,6 @@ def _validate_event_for_csv(ev):
 
 
 def _read_trade_log_rows(csv_path):
-    """خواندن داخلی CSV بدون validate_header (برای append و load)."""
     if not os.path.exists(csv_path):
         return []
     with open(csv_path, "r", encoding="utf-8", newline="") as f:
@@ -246,7 +218,6 @@ def _read_trade_log_rows(csv_path):
 
 
 def _last_valid_seq(rows):
-    """بازگرداندن آخرین event_seq معتبر یا صفر."""
     last = 0
     for row in rows:
         val = row.get("event_seq")
@@ -262,32 +233,20 @@ def _last_valid_seq(rows):
 
 
 def append_trade_events(csv_path, events, strategy_metadata=None):
-    """
-    افزودن رویدادها به CSV به شکل امن:
-      - همه رویدادها قبل از نوشتن اعتبارسنجی می‌شوند.
-      - dedup بر اساس هش محتوایی رویداد.
-      - شماره‌گذاری از آخرین seq معتبر ادامه می‌یابد.
-      - در صورت خطا در خواندن فایل قبلی، خطا ثبت می‌شود و عملیات متوقف می‌گردد.
-    بازمی‌گرداند: (appended, skipped)
-    """
     if not events:
         return 0, 0
 
     if strategy_metadata is None:
         strategy_metadata = get_strategy_metadata()
 
-    # ۱) اعتبارسنجی کل دسته قبل از هر نوشتن
     for ev in events:
         _validate_event_for_csv(ev)
 
-    # ۲) خواندن وضعیت فعلی فایل CSV؛ خطا نباید بی‌صدا نادیده گرفته شود
     existing_rows = []
     if os.path.exists(csv_path):
         try:
             existing_rows = _read_trade_log_rows(csv_path)
         except Exception as e:
-            # با توجه به اینکه این فایل نقش دفتر معاملات را دارد، خرابی آن
-            # باید صریحاً گزارش شود تا کاربر قبل از ادامه آن را بررسی کند.
             raise ValueError(
                 f"Could not read existing trade log {csv_path}: {e}"
             )
@@ -300,7 +259,6 @@ def append_trade_events(csv_path, events, strategy_metadata=None):
 
     start_seq = _last_valid_seq(existing_rows) + 1
 
-    # ۳) نوشتن
     file_exists = os.path.exists(csv_path)
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
 
@@ -357,8 +315,9 @@ def load_trade_log(csv_path, validate_header=True):
             header_line = f.readline().strip()
         header = header_line.split(",") if header_line else []
         if header != TRADE_LOG_COLUMNS:
+            # ✅ تغییر پیام خطا برای هماهنگی دقیق با تست
             raise ValueError(
-                f"Invalid CSV header. Expected {TRADE_LOG_COLUMNS}, got {header}"
+                f"CSV header mismatch. Expected {TRADE_LOG_COLUMNS}, got {header}"
             )
 
     return _read_trade_log_rows(csv_path)
