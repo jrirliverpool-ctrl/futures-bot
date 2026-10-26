@@ -51,8 +51,6 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
 
     engine_config = get_engine_config()
     engine_config["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
-    
-    # غیرفعال کردن Funding در بک‌تست
     engine_config["funding_rates"] = {}
     
     fee_cfg = get_fee_config()
@@ -77,7 +75,7 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
         mtm_curve.append(compute_mtm_equity(state, close_price, specs))
         realized_curve.append(state["equity"])
 
-    # ✅ بستن اجباری هر پوزیشن باز در پایان بک‌تست (حل اختلاف 0.084 دلاری)
+    # بستن اجباری هر پوزیشن باز در پایان بک‌تست
     if state.get("position") is not None:
         last_close = float(klines[-1][4])
         result = close_position(state, state["position"], last_close, specs, engine_config)
@@ -93,7 +91,7 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
         })
         seq += 1
         state["position"] = None
-        realized_curve[-1] = state["equity"]  # بروزرسانی آخرین نقطه منحنی
+        realized_curve[-1] = state["equity"]
 
     metrics = compute_metrics(
         mtm_curve, all_events, initial_equity,
@@ -219,3 +217,96 @@ def compute_metrics(equity_curve, events, initial_equity, realized_final=None):
         "total_events": len(events),
         "commission_cost_usd": float(commission_cost_usd),
     }
+
+
+def format_metrics(metrics):
+    lines = []
+    lines.append("=" * 60)
+    lines.append("📊 BACKTEST METRICS")
+    lines.append("=" * 60)
+    lines.append("💰 Equity")
+    lines.append(f"  initial              : {metrics.get('initial_equity', 0.0):.2f}")
+    lines.append(f"  final (realized)     : {metrics.get('final_equity_realized', 0.0):.2f}")
+    lines.append(f"  final (mark-to-mkt)  : {metrics.get('final_equity_mtm', 0.0):.2f}")
+    lines.append(f"  net return (mtm)     : {metrics.get('net_return_pct', 0.0):+.2f}%")
+    lines.append(f"  max drawdown (mtm)   : {metrics.get('max_drawdown_pct', 0.0):.2f}%")
+    lines.append(f"  commission cost      : {metrics.get('commission_cost_usd', 0.0):.4f}")
+    lines.append("")
+    lines.append("📈 Trades")
+    lines.append(f"  total                : {metrics.get('total_trades', 0)}")
+    lines.append(f"  wins/losses          : {metrics.get('wins', 0)} / {metrics.get('losses', 0)}")
+    lines.append(f"  win rate             : {metrics.get('win_rate', 0.0) * 100:.1f}%")
+    lines.append(f"  gross profit         : {metrics.get('gross_profit', 0.0):.2f}")
+    lines.append(f"  gross loss           : {metrics.get('gross_loss', 0.0):.2f}")
+    pf = metrics.get('profit_factor', float('inf'))
+    pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
+    lines.append(f"  profit factor        : {pf_str}")
+    lines.append(f"  avg win              : {metrics.get('avg_win', 0.0):.2f}")
+    lines.append(f"  avg loss             : {metrics.get('avg_loss', 0.0):.2f}")
+    lines.append(f"  expectancy           : {metrics.get('expectancy', 0.0):.4f}")
+    lines.append("")
+    lines.append("🎯 Risk-adjusted")
+    lines.append(f"  sharpe_like_per_trade: {metrics.get('sharpe_like_per_trade', 0.0):.4f}")
+    calmar = metrics.get('calmar_like_simple', float('inf'))
+    calmar_str = f"{calmar:.2f}" if calmar != float("inf") else "inf"
+    lines.append(f"  calmar_like_simple   : {calmar_str}")
+    lines.append("")
+    lines.append("📋 Composition")
+    lines.append(f"  long entries         : {metrics.get('long_count', 0)}")
+    lines.append(f"  short entries        : {metrics.get('short_count', 0)}")
+    lines.append(f"  ambiguous exits      : {metrics.get('ambiguous_exit_count', 0)}")
+    lines.append("")
+    lines.append("🚪 Exit reasons")
+    for r, c in sorted(metrics.get("exit_reason_distribution", {}).items()):
+        lines.append(f"  {r:15s}: {c}")
+    lines.append("")
+    lines.append("🔔 Event counts")
+    for t, c in sorted(metrics.get("event_counts", {}).items()):
+        lines.append(f"  {t:20s}: {c}")
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def result_to_json(result):
+    out = {
+        "symbol": result.get("symbol", "UNKNOWN"),
+        "candle_count": result.get("candle_count", 0),
+        "start_index": result.get("start_index", 0),
+        "initial_equity": result.get("initial_equity", 0.0),
+        "metrics": result.get("metrics", {}),
+        "strategy_metadata": result.get("strategy_metadata", {}),
+        "event_count": len(result.get("events", [])),
+    }
+    return json.dumps(out, indent=2, sort_keys=True, default=str)
+
+
+def _cli_main():
+    import sys
+    from data_feed import fetch_closed_klines
+    from symbol_specs import get_symbol_specs
+
+    symbol = sys.argv[1] if len(sys.argv) > 1 else "BTC-SWAP-USDT"
+    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 500
+
+    print(f"🔍 Fetching {limit} closed candles for {symbol}...")
+    klines = fetch_closed_klines(symbol, "1h", limit)
+    print(f"✅ Received {len(klines)} candles")
+
+    print(f"🔍 Fetching symbol specs...")
+    specs = get_symbol_specs(symbol)
+    print(f"✅ contract_multiplier = {specs['contract_multiplier']}")
+
+    print("🚀 Running backtest...")
+    result = run_backtest(
+        klines, specs, initial_equity=1000.0, symbol=symbol,
+    )
+
+    print()
+    print(format_metrics(result["metrics"]))
+    print()
+    print("📄 Strategy metadata:")
+    print(json.dumps(result["strategy_metadata"], indent=2))
+
+
+if __name__ == "__main__":
+    _cli_main()
