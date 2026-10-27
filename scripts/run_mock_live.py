@@ -1,6 +1,6 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v3.3 - Strict Multi-Symbol Support & Error-Resilient State Management.
+v3.1 - Single-Symbol (BTC-SWAP-USDT), Strict three-state diagnostic monitor.
 """
 
 import json
@@ -79,7 +79,7 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=Non
             if not isinstance(active_val, bool):
                 ks_active = True; ks_reason = "fail-closed: kill_switch active flag not bool"
             elif active_val:
-                ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active"
+                ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active (no reason provided)"
             else:
                 ks_active = False; ks_reason = None
     except Exception as e:
@@ -113,11 +113,17 @@ def _write_paper_status_atomic(state_dir, status):
 
 def _create_order_from_event(ev, symbol, leverage=1):
     intent = ev.get("intent")
-    if intent is None: raise ValueError(f"Missing 'intent' in event: {ev}")
+    if intent is None:
+        raise ValueError(f"Missing 'intent' in event: {ev}")
+
     order_intent = "EXIT" if intent == "TP1_HIT" else intent
+
     qty = ev.get("qty")
-    if qty is None: raise ValueError(f"Missing 'qty' in event: {ev}")
+    if qty is None:
+        raise ValueError(f"Missing 'qty' in event: {ev}")
+
     price = ev.get("price", 0.0)
+
     req = OrderRequest(
         symbol=symbol, side=ev["side"], order_type="MARKET",
         qty=qty, price=None, leverage=leverage, intent=order_intent
@@ -126,6 +132,7 @@ def _create_order_from_event(ev, symbol, leverage=1):
 
 
 def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor_status):
+    """Build a read-only diagnostic reflecting exact strategy conditions."""
     closes = indicators["closes"]
     ema_fast = indicators["ema_fast"]
     ema_slow = indicators["ema_slow"]
@@ -142,36 +149,45 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
         "conditions": {}
     }
 
-    if index < 0 or index >= len(closes): return result
+    if index < 0 or index >= len(closes):
+        return result
 
     ts = timestamps[index]
     result["candle_time_utc"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
     close = closes[index]
     fast = ema_fast[index]
     slow = ema_slow[index]
-    result["close"] = close; result["ema_fast"] = fast; result["ema_slow"] = slow
+    result["close"] = close
+    result["ema_fast"] = fast
+    result["ema_slow"] = slow
 
+    # --- ارزیابی دقیق شروط (سه‌حالته: True/False/None) ---
     conds = {}
     if fast is not None and slow is not None and close is not None:
         conds["ema_bullish"] = (fast > slow)
         conds["ema_bearish"] = (fast < slow)
         conds["price_above_ema200"] = (close > slow)
         conds["price_below_ema200"] = (close < slow)
+
         if fast > slow: result["ema_alignment"] = "BULLISH"
         elif fast < slow: result["ema_alignment"] = "BEARISH"
         else: result["ema_alignment"] = "EQUAL"
+
         if close > slow: result["close_vs_ema_slow"] = "ABOVE"
         elif close < slow: result["close_vs_ema_slow"] = "BELOW"
         else: result["close_vs_ema_slow"] = "EQUAL"
     else:
-        conds["ema_bullish"] = None; conds["ema_bearish"] = None
-        conds["price_above_ema200"] = None; conds["price_below_ema200"] = None
+        conds["ema_bullish"] = None
+        conds["ema_bearish"] = None
+        conds["price_above_ema200"] = None
+        conds["price_below_ema200"] = None
 
     if index >= 1:
         dh = donchian_high[index - 1]
         dl = donchian_low[index - 1]
         result["donchian_high_prev"] = dh
         result["donchian_low_prev"] = dl
+
         if dh is not None and dl is not None and close is not None:
             conds["breakout_up"] = (close > dh)
             conds["breakdown_down"] = (close < dl)
@@ -179,17 +195,22 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
             elif close < dl: result["breakout"] = "DOWN"
             else: result["breakout"] = "NONE"
         else:
-            conds["breakout_up"] = None; conds["breakdown_down"] = None
+            conds["breakout_up"] = None
+            conds["breakdown_down"] = None
     else:
-        conds["breakout_up"] = None; conds["breakdown_down"] = None
+        conds["breakout_up"] = None
+        conds["breakdown_down"] = None
 
+    # نتیجه نهایی منطقی
     if conds.get("ema_bullish") and conds.get("price_above_ema200") and conds.get("breakout_up"):
         conds["final_long"] = True
-    else: conds["final_long"] = False
+    else:
+        conds["final_long"] = False
 
     if conds.get("ema_bearish") and conds.get("price_below_ema200") and conds.get("breakdown_down"):
         conds["final_short"] = True
-    else: conds["final_short"] = False
+    else:
+        conds["final_short"] = False
 
     result["conditions"] = conds
     return result
@@ -197,8 +218,7 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
 
 def main() -> int:
     state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
-    symbols_env = os.environ.get("SYMBOLS", "BTC-SWAP-USDT,ETH-SWAP-USDT,SOL-SWAP-USDT")
-    symbols_list = [s.strip() for s in symbols_env.split(",") if s.strip()]
+    symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
     interval = os.environ.get("INTERVAL", "1h")
     start_iso = datetime.now(timezone.utc).isoformat()
 
@@ -208,16 +228,39 @@ def main() -> int:
     last_processed = None; reconciler_status = None; reconciler_summary = None
     catchup_lag = 0
     strategy_monitor = None
-    symbol_errors = {}
 
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
+    def execution_callback(pending_info):
+        req, ref_price, original_intent = _create_order_from_event(
+            pending_info, symbol, engine_config.get("leverage", 1)
+        )
+
+        validation_state = copy.deepcopy(state)
+
+        if req.intent == "ENTRY":
+            if validation_state.get("pending_entry"):
+                if validation_state["pending_entry"].get("signal_candle_ts") == pending_info.get("signal_candle_ts"):
+                    validation_state["pending_entry"] = None
+                else:
+                    print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: Stale pending_entry.")
+                    return False
+
+        decision = em.execute(req, specs, validation_state, engine_config, ref_price=ref_price)
+
+        if decision.accepted:
+            print(f"    🛡️ [MOCK_LIVE] {original_intent} ACCEPTED. Size: {req.qty}")
+            return True
+        else:
+            print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: {decision.reason}")
+            return False
+
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN (MULTI-SYMBOL)")
+        print("🛡️  MOCK LIVE TRADING RUN (STRICT MONITOR)")
         print("=" * 70)
         print(f"  STATE_DIR : {state_dir}")
-        print(f"  SYMBOLS   : {symbols_list}")
+        print(f"  SYMBOL    : {symbol}")
         print(f"  INTERVAL  : {interval}")
         print(f"  strategy  : {compute_strategy_hash()}")
         print("=" * 70)
@@ -232,28 +275,10 @@ def main() -> int:
                 print(f"❌ State hash mismatch: {e}")
                 raise _RunComplete(1, "aborted", str(e))
         else:
-            state = init_state(state_dir, initial_equity=1000.0, symbol=symbols_list[0])
+            state = init_state(state_dir, initial_equity=1000.0, symbol=symbol)
             print("✅ State initialized")
 
-        # ✅ مهاجرت خودکار پوزیشن‌های قدیمی (اگر symbol نداشته باشند)
-        if state.get("position") and "symbol" not in state["position"]:
-            state["position"]["symbol"] = "BTC-SWAP-USDT"
-            print("⚠️ Migrated old position: assumed BTC-SWAP-USDT")
-        
-        if state.get("pending_entry") and "symbol" not in state["pending_entry"]:
-            state["pending_entry"]["symbol"] = "BTC-SWAP-USDT"
-
-        active_position_symbol = None
-        if state.get("position"):
-            active_position_symbol = state["position"].get("symbol")
-        
-        if active_position_symbol:
-            symbols_to_process = [active_position_symbol]
-            print(f"🎯 Open position detected on {active_position_symbol}. Managing only this symbol.")
-        else:
-            symbols_to_process = symbols_list
-            print(f"🔍 No open position. Scanning symbols for signals: {symbols_list}")
-
+        last_processed = state.get("last_processed_candle_ts")
         equity = state["equity"]
         peak_equity = state["peak_equity"]
         has_position = state["position"] is not None
@@ -262,164 +287,134 @@ def main() -> int:
             print("⚠️ Telegram event baseline unavailable; notifications paused.")
         else:
             sent = notify_pending_events(state_dir)
-            if sent: print(f"📨 Telegram confirmed {sent} pending notification(s) on startup.")
+            if sent:
+                print(f"📨 Telegram confirmed {sent} pending notification(s) on startup.")
 
-        for symbol in symbols_to_process:
-            print(f"\n" + "-" * 50)
-            print(f"📊 Processing Symbol: {symbol}")
-            print("-" * 50)
-            
+        print(f"  last_processed_candle_ts : {last_processed}")
+        print(f"  equity                   : {equity}")
+        print(f"  has_position             : {has_position}")
+        print()
+
+        print("📋 Fetching symbol specs...")
+        specs = get_symbol_specs(symbol)
+
+        print(f"📥 Fetching closed {interval} candles...")
+        klines = fetch_closed_klines(symbol, interval, limit=300)
+
+        if len(klines) < 250:
+            print(f"⚠️  کندل کافی نیست ({len(klines)} < 250) — exit")
+            raise _RunComplete(0, "insufficient_data")
+
+        print("🧠 Computing indicators...")
+        indicators = _build_indicators(klines)
+        new_indices = _find_new_candles(klines, last_processed)
+
+        # ✅ Preview last candle for diagnostics
+        latest_idx = len(klines) - 1
+        preview = evaluate_signal(indicators, latest_idx)
+
+        if not new_indices:
+            print(f"⏭  No new closed candle. Last = {last_processed}")
+            strategy_monitor = _build_strategy_monitor(
+                indicators=indicators, signal=preview, index=latest_idx,
+                symbol=symbol, interval=interval, monitor_status="NO_NEW_CANDLES"
+            )
+            raise _RunComplete(0, "no_op")
+
+        total_new = len(new_indices)
+        if total_new > MAX_CATCHUP_CANDLES:
+            to_process = new_indices[:MAX_CATCHUP_CANDLES]
+            catchup_lag = total_new - MAX_CATCHUP_CANDLES
+        else:
+            to_process = new_indices
+            catchup_lag = 0
+
+        print("🔍 Reconciler check...")
+        now_ms = int(time.time() * 1000)
+        rec = reconcile_with_data(state, klines, interval, now_ms)
+        reconciler_status = rec["status"]
+        reconciler_summary = rec["summary"]
+        if reconciler_status == "ERROR":
+            print(f"❌ reconciler reported ERROR: {reconciler_summary}")
+            raise _RunComplete(1, "aborted", f"reconciler: {reconciler_summary}")
+
+        engine_config = _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=os.getcwd())
+        strategy_hash = compute_strategy_hash()
+
+        print(f"⚙️  Processing {len(to_process)} candle(s)...")
+        total_events_generated = 0
+
+        for n, idx in enumerate(to_process, start=1):
+            candle_ts = int(klines[idx][0])
+            sig = evaluate_signal(indicators, idx)
+            signal_label = sig.get("signal", "NO_TRADE")
+
+            # ✅ Update monitor for actual processed candle
+            strategy_monitor = _build_strategy_monitor(
+                indicators=indicators, signal=sig, index=idx,
+                symbol=symbol, interval=interval, monitor_status="SUCCESS"
+            )
+
             try:
-                specs = get_symbol_specs(symbol)
-                klines = fetch_closed_klines(symbol, interval, limit=300)
-
-                if len(klines) < 250:
-                    print(f"⚠️  کندل کافی نیست ({len(klines)} < 250) — skip {symbol}")
-                    symbol_errors[symbol] = "insufficient_candles"
-                    continue
-
-                indicators = _build_indicators(klines)
-                
-                if not isinstance(state.get("last_processed_candle_ts"), dict):
-                    state["last_processed_candle_ts"] = {}
-                last_processed_for_symbol = state["last_processed_candle_ts"].get(symbol)
-                new_indices = _find_new_candles(klines, last_processed_for_symbol)
-
-                latest_idx = len(klines) - 1
-                preview = evaluate_signal(indicators, latest_idx)
-
-                if not new_indices:
-                    print(f"⏭  No new closed candle for {symbol}. Last = {last_processed_for_symbol}")
-                    strategy_monitor = _build_strategy_monitor(
-                        indicators=indicators, signal=preview, index=latest_idx,
-                        symbol=symbol, interval=interval, monitor_status="NO_NEW_CANDLES"
-                    )
-                    continue
-
-                total_new += len(new_indices)
-                if len(new_indices) > MAX_CATCHUP_CANDLES:
-                    to_process = new_indices[:MAX_CATCHUP_CANDLES]
-                    catchup_lag = len(new_indices) - MAX_CATCHUP_CANDLES
-                else:
-                    to_process = new_indices
-                    catchup_lag = 0
-
-                print("🔍 Reconciler check...")
-                now_ms = int(time.time() * 1000)
-                rec = reconcile_with_data(state, klines, interval, now_ms, symbol=symbol)
-                reconciler_status = rec["status"]
-                reconciler_summary = rec["summary"]
-                if reconciler_status == "ERROR":
-                    print(f"❌ reconciler reported ERROR: {reconciler_summary}")
-                    raise _RunComplete(1, "aborted", f"reconciler on {symbol}: {reconciler_summary}")
-
-                engine_config = _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=os.getcwd())
-                engine_config["current_symbol"] = symbol # ✅ پاس دادن سیمبل جاری به موتور
-
-                strategy_hash = compute_strategy_hash()
-                print(f"⚙️  Processing {len(to_process)} candle(s)...")
-                
-                for n, idx in enumerate(to_process, start=1):
-                    candle_ts = int(klines[idx][0])
-                    sig = evaluate_signal(indicators, idx)
-                    signal_label = sig.get("signal", "NO_TRADE")
-
-                    strategy_monitor = _build_strategy_monitor(
-                        indicators=indicators, signal=sig, index=idx,
-                        symbol=symbol, interval=interval, monitor_status="SUCCESS"
-                    )
-
-                    def execution_callback(pending_info):
-                        req, ref_price, original_intent = _create_order_from_event(
-                            pending_info, symbol, engine_config.get("leverage", 1)
-                        )
-                        validation_state = copy.deepcopy(state)
-                        if req.intent == "ENTRY":
-                            if validation_state.get("pending_entry"):
-                                if validation_state["pending_entry"].get("signal_candle_ts") == pending_info.get("signal_candle_ts"):
-                                    validation_state["pending_entry"] = None
-                                else:
-                                    print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: Stale pending_entry.")
-                                    return False
-                        decision = em.execute(req, specs, validation_state, engine_config, ref_price=ref_price)
-                        if decision.accepted:
-                            print(f"    🛡️ [MOCK_LIVE] {original_intent} ACCEPTED. Size: {req.qty}")
-                            return True
-                        else:
-                            print(f"    ⛔ [MOCK_LIVE] {original_intent} REJECTED: {decision.reason}")
-                            return False
-
-                    try:
-                        state, events = process_candle(
-                            state, klines, indicators, idx, specs, engine_config, 
-                            signal=sig, execution_callback=execution_callback, exit_callback=execution_callback
-                        )
-                    except Exception as e:
-                        print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
-                        traceback.print_exc()
-                        raise _RunComplete(1, "failed", f"paper_engine on {symbol} at idx={idx}: {type(e).__name__}: {e}")
-
-                    # ✅ ترتیب صحیح: ابتدا State ذخیره شود، سپس رویدادها
-                    try:
-                        save_state(state_dir, state)
-                        if events:
-                            appended, skipped = append_events(state_dir, events, strategy_hash=strategy_hash)
-                            if appended > 0:
-                                print(f"    📨 Telegram confirmed {appended} event notification(s).")
-                    except Exception as e:
-                        print(f"  [{n}/{len(to_process)}] → ERROR in save/append: {type(e).__name__}: {e}")
-                        traceback.print_exc()
-                        raise _RunComplete(1, "failed", f"save failed on {symbol} at idx={idx}: {type(e).__name__}: {e}")
-
-                    candles_processed += 1
-                    print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} signal={signal_label} events={len(events)}")
-
-                # ✅ بعد از اتمام تمام کندل‌های این نماد، بررسی می‌کنیم آیا پوزیشن باز است
-                if state.get("position") is not None and state["position"].get("symbol") == symbol:
-                    print(f"  🛑 Position opened on {symbol}. Breaking symbol loop to prevent multiple trades.")
-                    break
-
+                state, events = process_candle(
+                    state, klines, indicators, idx, specs, engine_config,
+                    signal=sig, execution_callback=execution_callback, exit_callback=execution_callback
+                )
             except Exception as e:
-                print(f"❌ Error processing {symbol}: {type(e).__name__}: {e}")
-                if isinstance(e, _RunComplete):
-                    raise e
-                symbol_errors[symbol] = str(e)
-                continue
+                print(f"  [{n}/{len(to_process)}] → ERROR in engine: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                raise _RunComplete(1, "failed", f"paper_engine at idx={idx}: {type(e).__name__}: {e}")
+
+            # ✅ ترتیب صحیح: ابتدا state ذخیره شود، سپس رویدادها
+            try:
+                save_state(state_dir, state)
+                if events:
+                    appended, skipped = append_events(state_dir, events, strategy_hash=strategy_hash)
+                    total_events_generated += appended
+            except Exception as e:
+                print(f"  [{n}/{len(to_process)}] → ERROR in append/save: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                raise _RunComplete(1, "failed", f"save failed at idx={idx}: {type(e).__name__}: {e}")
+
+            try:
+                sent = notify_pending_events(state_dir)
+                if sent:
+                    print(f"  📨 Telegram confirmed {sent} event notification(s).")
+            except Exception as e:
+                print(f"  ⚠️ Telegram notification issue: {type(e).__name__}")
+
+            candles_processed += 1
+            print(f"  [{n}/{len(to_process)}] idx={idx} ts={candle_ts} signal={signal_label} events={len(events)}")
 
         equity = state["equity"]
         peak_equity = state["peak_equity"]
         has_position = state["position"] is not None
-        
-        last_processed_map = state.get("last_processed_candle_ts", {})
-        last_processed = list(last_processed_map.values())[0] if last_processed_map else None
-
+        last_processed = state.get("last_processed_candle_ts")
         total_events_count = events_count(state_dir)
 
         print("=" * 70)
         print("📌 MOCK LIVE RUN SUMMARY")
-        print(f"  symbols_processed  : {len(symbols_to_process)}")
         print(f"  candles_processed  : {candles_processed}")
         print(f"  catchup_lag        : {catchup_lag}")
+        print(f"  events_generated   : {total_events_generated}")
         print(f"  total_events       : {total_events_count}")
         print(f"  equity             : {equity}")
         print(f"  has_position       : {has_position}")
-        if symbol_errors:
-            print(f"  errors             : {symbol_errors}")
         print("=" * 70)
-        
-        if len(symbol_errors) == len(symbols_to_process) and len(symbols_to_process) > 0:
-            run_status = "failed"
-            exit_code = 1
-            print("❌ ALL SYMBOLS FAILED")
-        else:
-            run_status = "success"
-            exit_code = 0
-            print("✅ MOCK LIVE RUN COMPLETED")
+        print("✅ MOCK LIVE RUN COMPLETED")
+
+        run_status = "success"
+        exit_code = 0
 
     except _RunComplete as rc:
-        exit_code = rc.exit_code; run_status = rc.run_status; error_message = rc.error_message
-        if exit_code != 0: print(f"\n❌ RUN FAILED: {error_message}")
-        else: print(f"\n⏸️ RUN FINISHED: {run_status}")
+        exit_code = rc.exit_code
+        run_status = rc.run_status
+        error_message = rc.error_message
+
+        if exit_code != 0:
+            print(f"\n❌ RUN FAILED: {error_message}")
+        else:
+            print(f"\n⏸️ RUN FINISHED: {run_status}")
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
         print(f"❌ FATAL: {error_message}")
@@ -432,14 +427,13 @@ def main() -> int:
             "run_finished_at_iso": datetime.now(timezone.utc).isoformat(),
             "run_status": run_status, "run_exit_code": exit_code,
             "strategy_hash": compute_strategy_hash(),
-            "state_dir": state_dir, "symbol": str(symbols_list), "interval": interval,
+            "state_dir": state_dir, "symbol": symbol, "interval": interval,
             "reconciler_status": reconciler_status, "reconciler_summary": reconciler_summary,
             "last_processed_candle_ts": last_processed,
             "candles_processed_this_run": candles_processed,
             "catchup_lag": catchup_lag, "total_new_detected": total_new,
             "equity": equity, "peak_equity": peak_equity, "has_position": has_position,
             "error_message": error_message,
-            "symbol_errors": symbol_errors,
         }
         try:
             _write_paper_status_atomic(state_dir, status)
@@ -451,13 +445,15 @@ def main() -> int:
         try:
             if not notify_run_status(status):
                 print("⚠️ Telegram status notification was not confirmed.")
-        except Exception: pass
+        except Exception:
+            pass
 
         if strategy_monitor is not None:
             try:
                 if not notify_strategy_monitor(strategy_monitor):
                     print("⚠️ Strategy monitor notification was not confirmed.")
-            except Exception: pass
+            except Exception:
+                print("⚠️ Strategy monitor notification failed.")
 
     return exit_code
 
