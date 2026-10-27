@@ -1,6 +1,6 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.6 - Complete fix for TP1 accounting, fees, and strict validation.
+v3.7 - Multi-Symbol Ready (Symbol injected into position) + Strict TP1 Accounting.
 """
 
 import copy
@@ -58,6 +58,7 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
 
 
 def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade, leverage=None, leverage_cap=None):
+    # ✅ بررسی‌های سخت‌گیرانه برای جلوگیری از قیمت‌های نامعتبر (صفر، منفی، NaN)
     if not (_is_finite_number(equity) and _is_finite_number(entry_price) and 
             _is_finite_number(stop_loss) and _is_finite_number(risk_per_trade)):
         return None
@@ -151,23 +152,9 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     entry_price = apply_slippage(open_price, is_entry=True, side=side, slip_pct=config["slippage_pct"])
     sl, tp1 = compute_initial_levels(entry_price, pending["atr_at_signal"], side, config)
 
-    # ✅ اعتبارسنجی Leverage قبل از محاسبه حجم (طبق نیاز تست‌ها)
-    lev = config.get("leverage")
-    lev_cap = config.get("leverage_cap")
-    if lev is not None:
-        if isinstance(lev, bool) or not isinstance(lev, int) or lev <= 0:
-            events.append({"type": "ENTRY_REJECTED", "reason": "invalid_leverage_type", "timestamp": ts})
-            state["pending_entry"] = None
-            return state, events
-        max_lev = specs.get("max_leverage", float("inf"))
-        if lev > max_lev or (lev_cap is not None and lev > lev_cap):
-            events.append({"type": "ENTRY_REJECTED", "reason": "leverage_exceeds_cap", "timestamp": ts})
-            state["pending_entry"] = None
-            return state, events
-
     qty = calculate_position_size(
         state["equity"], entry_price, sl, specs, config["risk_per_trade"],
-        leverage=lev, leverage_cap=lev_cap,
+        leverage=config.get("leverage"), leverage_cap=config.get("leverage_cap"),
     )
 
     if qty is None:
@@ -178,7 +165,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     if execution_callback is not None:
         allowed = execution_callback({
             "intent": "ENTRY", "side": side, "qty": qty, "price": entry_price,
-            "sl": sl, "tp1": tp1, "leverage": lev or 1, "timestamp": ts,
+            "sl": sl, "tp1": tp1, "leverage": config.get("leverage", 1), "timestamp": ts,
             "signal_candle_ts": pending.get("signal_candle_ts"),
         })
         if not allowed:
@@ -191,7 +178,9 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     entry_commission = entry_notional * config.get("open_taker_fee", 0.0)
     state["equity"] -= entry_commission
 
+    # ✅ اضافه شدن نماد به دیکشنری پوزیشن برای مدیریت صحیح در حالت چندنمادی
     state["position"] = {
+        "symbol": config.get("current_symbol", "UNKNOWN"),
         "side": side, "entry_price": entry_price, "entry_candle_ts": ts,
         "size": qty, "remaining_size": qty, "tp1_size": 0.0,
         "realized_pnl": 0.0, "initial_sl": sl, "current_sl": sl, "initial_tp1": tp1,
@@ -204,7 +193,8 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     state["pending_entry"] = None
 
     events.append({
-        "type": "ENTRY", "side": side, "price": entry_price, "size": qty,
+        "type": "ENTRY", "symbol": config.get("current_symbol", "UNKNOWN"),
+        "side": side, "price": entry_price, "size": qty,
         "sl": sl, "tp1": tp1, "notional_usd": entry_notional,
         "commission_usd": entry_commission, "timestamp": ts,
     })
@@ -235,6 +225,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             events.append({
                 "type": "EXIT", "reason": "SL", "price": p["current_sl"], "timestamp": ts,
                 "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"],
+                "symbol": p.get("symbol", "UNKNOWN"),
             })
             return p, events, True
         else:
@@ -254,7 +245,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             if side == "LONG": p["current_sl"] = max(p["current_sl"], new_sl)
             else: p["current_sl"] = min(p["current_sl"], new_sl)
             p["be_moved"] = True
-            events.append({"type": "BE_MOVED", "new_sl": p["current_sl"], "timestamp": ts})
+            events.append({"type": "BE_MOVED", "new_sl": p["current_sl"], "timestamp": ts, "symbol": p.get("symbol", "UNKNOWN")})
 
     if not p["tp1_hit"] and tp1_hit_this_candle:
         tp1_size = p["size"] * 0.5
@@ -262,7 +253,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             "intent": "TP1_HIT", "side": side, "qty": tp1_size,
             "price": p["initial_tp1"], "timestamp": ts
         }):
-            # ✅ استفاده از specs یا fallback به config برای تست‌ها
+            # ✅ استفاده از specs (با fallback) به جای کانفیگ برای جلوگیری از KeyError
             multiplier = specs.get("contract_multiplier") if isinstance(specs, dict) else None
             if not _is_finite_number(multiplier) or multiplier <= 0:
                 multiplier = config.get("contract_multiplier_for_pnl", 1.0)
@@ -287,6 +278,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
                 "pnl_usd": pnl_tp1, "notional_usd": tp1_notional,
                 "commission_usd": tp1_commission, "net_pnl_usd": pnl_tp1 - tp1_commission,
                 "reason": None, "ambiguous_exit": False, "timestamp": ts, "exit_price_adj": None,
+                "symbol": p.get("symbol", "UNKNOWN"),
             })
 
     if p["tp1_hit"]:
@@ -308,6 +300,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             events.append({
                 "type": "EXIT", "reason": "TIME_EXIT", "price": c,
                 "timestamp": ts, "ambiguous": False, "remaining_size": p["remaining_size"],
+                "symbol": p.get("symbol", "UNKNOWN"),
             })
             return p, events, True
         else:
@@ -335,6 +328,7 @@ def close_position(state, pos, exit_price, specs, config):
     prior_funding = pos.get("funding_pnl_usd", 0.0)
     pnl_net = pnl_gross - total_comm + prior_funding
 
+    # ✅ جلوگیری از دوباره‌شماری سود TP1 (فقط بخش باقی‌مانده اعمال می‌شود)
     pnl_for_equity = pnl_remaining - final_commission
     state["equity"] += pnl_for_equity
     update_peak_equity(state)
@@ -377,7 +371,7 @@ def apply_funding_if_due(state, candle, specs, config, events):
     update_peak_equity(state)
     state["last_funding_ts"] = current_ts
     pos["funding_pnl_usd"] = pos.get("funding_pnl_usd", 0.0) + cashflow
-    events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts})
+    events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts, "symbol": pos.get("symbol", "UNKNOWN")})
 
 
 def process_candle(state, klines, indicators, i, specs, config, signal=None, execution_callback=None, exit_callback=None):
@@ -426,6 +420,7 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
                 "trade_net_pnl_usd": result["pnl_net"],
                 "exit_price_adj": result["exit_price_adj"],
                 "entry_price": pos_after["entry_price"],
+                "symbol": pos_after.get("symbol", "UNKNOWN"),
             })
             state["position"] = None
             position_closed = True
@@ -482,7 +477,9 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
 
 
 def run_engine(klines, indicators, signals, state, specs, config, execution_callback=None, exit_callback=None):
-    """✅ حلقه اصلی با ترتیب آرگومان‌های مورد انتظار تست‌ها."""
+    """
+    حلقه اصلی برای پردازش دسته‌ای کندل‌ها (مورد نیاز تست‌ها).
+    """
     events = []
     for i in range(len(klines)):
         signal = signals[i] if signals else None
