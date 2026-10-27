@@ -13,6 +13,7 @@ Exit codes:
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -48,8 +49,37 @@ REQUIRED_NUMERIC_FIELDS = (
 SOURCE_URL = "https://api.toobit.com/api/v1/exchangeInfo"
 
 
+def _is_finite_positive(value) -> bool:
+    """True if value is a finite number strictly greater than zero (not bool)."""
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    if not math.isfinite(value):
+        return False
+    return value > 0
+
+
+def _is_finite_non_negative(value) -> bool:
+    """True if value is a finite number >= 0 (not bool)."""
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    if not math.isfinite(value):
+        return False
+    return value >= 0
+
+
 def validate_contract(contract):
-    """Return (specs | None, errors:list, warnings:list) for one raw contract."""
+    """Return (specs | None, errors:list, warnings:list) for one raw contract.
+
+    If any error is found, `specs` is returned as None. This makes the
+    caller's contract explicit: either the contract is fully valid, or it
+    is rejected with a list of reasons.
+
+    NaN and Infinity are explicitly rejected in all numeric fields.
+    """
 
     errors = []
     warnings = []
@@ -92,19 +122,23 @@ def validate_contract(contract):
     if specs.get("margin_token") != "USDT":
         errors.append("margin_token must be USDT")
 
+    # ✅ NaN/Infinity explicitly rejected for every required numeric field
     for field in REQUIRED_NUMERIC_FIELDS:
         value = specs.get(field)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            errors.append(f"{field} must be a positive number")
+        if not _is_finite_positive(value):
+            errors.append(f"{field} must be a finite positive number")
 
+    # ✅ NaN/Infinity explicitly rejected for min_notional
     min_notional = specs.get("min_notional")
-    if isinstance(min_notional, bool) or not isinstance(min_notional, (int, float)):
-        errors.append("min_notional must be a number")
-    elif min_notional < 0:
-        errors.append("min_notional must be non-negative")
+    if not _is_finite_non_negative(min_notional):
+        errors.append("min_notional must be a finite non-negative number")
 
     if specs.get("max_leverage") is None:
         warnings.append("Maximum leverage is unavailable")
+
+    # ✅ If any error exists, specs must NOT be returned as valid
+    if errors:
+        return None, errors, warnings
 
     return specs, errors, warnings
 
