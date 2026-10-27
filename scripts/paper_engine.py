@@ -1,6 +1,6 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.8 - Strict Multi-Symbol Support & Error-Resilient State Management.
+v3.6 - Complete fix for TP1 accounting, fees, and strict validation.
 """
 
 import copy
@@ -49,7 +49,7 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
         raise ValueError("entry_price and ATR must be finite numbers")
     if entry_price <= 0 or atr_at_signal <= 0:
         raise ValueError("entry_price and ATR must be > 0")
-    
+
     sl_dist = config["sl_atr_mult"] * atr_at_signal
     tp_dist = config["tp1_atr_mult"] * atr_at_signal
     if side == "LONG": return entry_price - sl_dist, entry_price + tp_dist
@@ -58,10 +58,10 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
 
 
 def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade, leverage=None, leverage_cap=None):
-    if not (_is_finite_number(equity) and _is_finite_number(entry_price) and 
+    if not (_is_finite_number(equity) and _is_finite_number(entry_price) and
             _is_finite_number(stop_loss) and _is_finite_number(risk_per_trade)):
         return None
-        
+
     if equity <= 0 or entry_price <= 0 or stop_loss <= 0 or risk_per_trade <= 0:
         return None
 
@@ -71,18 +71,18 @@ def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trad
         max_lev = specs.get("max_leverage", float("inf"))
         if leverage > max_lev: return None
         if leverage_cap is not None and leverage > leverage_cap: return None
-        
+
     stop_distance = abs(entry_price - stop_loss)
     if stop_distance <= 0: return None
-    
+
     multiplier = specs.get("contract_multiplier")
     if not _is_finite_number(multiplier) or multiplier <= 0:
         return None
-        
+
     qty_step = specs.get("qty_step")
     min_qty = specs.get("min_qty")
     max_qty = specs.get("max_qty")
-    
+
     if not _is_finite_number(qty_step) or qty_step <= 0: return None
     if not _is_finite_number(min_qty) or min_qty < 0: return None
     if not _is_finite_number(max_qty) or max_qty <= 0: return None
@@ -134,22 +134,17 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     pending = state.get("pending_entry")
     if pending is None: return state, events
 
-    # ✅ بررسی اینکه آیا این سیگنال متعلق به نماد در حال پردازش است
-    symbol = config.get("current_symbol", "UNKNOWN")
-    if pending.get("symbol") != symbol:
-        return state, events
-
     ts = int(candle[0])
 
     if config.get("kill_switch_active", False):
-        events.append({"type": "KILL_SWITCH_BLOCKED", "stage": "entry_execution", "reason": config.get("kill_switch_reason"), "side": pending.get("side"), "timestamp": ts, "symbol": symbol})
+        events.append({"type": "KILL_SWITCH_BLOCKED", "stage": "entry_execution", "reason": config.get("kill_switch_reason"), "side": pending.get("side"), "timestamp": ts})
         state["pending_entry"] = None
         return state, events
 
     side = pending["side"]
     open_price = float(candle[1])
     if not math.isfinite(open_price) or open_price <= 0:
-        events.append({"type": "ENTRY_REJECTED", "reason": "invalid_open_price", "timestamp": ts, "symbol": symbol})
+        events.append({"type": "ENTRY_REJECTED", "reason": "invalid_open_price", "timestamp": ts})
         state["pending_entry"] = None
         return state, events
 
@@ -162,7 +157,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     )
 
     if qty is None:
-        events.append({"type": "ENTRY_REJECTED", "reason": "invalid_size", "timestamp": ts, "symbol": symbol})
+        events.append({"type": "ENTRY_REJECTED", "reason": "invalid_size", "timestamp": ts})
         state["pending_entry"] = None
         return state, events
 
@@ -173,7 +168,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
             "signal_candle_ts": pending.get("signal_candle_ts"),
         })
         if not allowed:
-            events.append({"type": "ENTRY_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts, "symbol": symbol})
+            events.append({"type": "ENTRY_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts})
             state["pending_entry"] = None
             return state, events
 
@@ -183,7 +178,6 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     state["equity"] -= entry_commission
 
     state["position"] = {
-        "symbol": symbol,
         "side": side, "entry_price": entry_price, "entry_candle_ts": ts,
         "size": qty, "remaining_size": qty, "tp1_size": 0.0,
         "realized_pnl": 0.0, "initial_sl": sl, "current_sl": sl, "initial_tp1": tp1,
@@ -196,8 +190,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     state["pending_entry"] = None
 
     events.append({
-        "type": "ENTRY", "symbol": symbol,
-        "side": side, "price": entry_price, "size": qty,
+        "type": "ENTRY", "side": side, "price": entry_price, "size": qty,
         "sl": sl, "tp1": tp1, "notional_usd": entry_notional,
         "commission_usd": entry_commission, "timestamp": ts,
     })
@@ -228,11 +221,10 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             events.append({
                 "type": "EXIT", "reason": "SL", "price": p["current_sl"], "timestamp": ts,
                 "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"],
-                "symbol": p.get("symbol", "UNKNOWN"),
             })
             return p, events, True
         else:
-            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts, "symbol": p.get("symbol")}], False
+            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
 
     if side == "LONG": p["highest_high_since_entry"] = max(p["highest_high_since_entry"], h)
     else: p["lowest_low_since_entry"] = min(p["lowest_low_since_entry"], l)
@@ -248,7 +240,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             if side == "LONG": p["current_sl"] = max(p["current_sl"], new_sl)
             else: p["current_sl"] = min(p["current_sl"], new_sl)
             p["be_moved"] = True
-            events.append({"type": "BE_MOVED", "new_sl": p["current_sl"], "timestamp": ts, "symbol": p.get("symbol")})
+            events.append({"type": "BE_MOVED", "new_sl": p["current_sl"], "timestamp": ts})
 
     if not p["tp1_hit"] and tp1_hit_this_candle:
         tp1_size = p["size"] * 0.5
@@ -280,7 +272,6 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
                 "pnl_usd": pnl_tp1, "notional_usd": tp1_notional,
                 "commission_usd": tp1_commission, "net_pnl_usd": pnl_tp1 - tp1_commission,
                 "reason": None, "ambiguous_exit": False, "timestamp": ts, "exit_price_adj": None,
-                "symbol": p.get("symbol", "UNKNOWN"),
             })
 
     if p["tp1_hit"]:
@@ -302,11 +293,10 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             events.append({
                 "type": "EXIT", "reason": "TIME_EXIT", "price": c,
                 "timestamp": ts, "ambiguous": False, "remaining_size": p["remaining_size"],
-                "symbol": p.get("symbol", "UNKNOWN"),
             })
             return p, events, True
         else:
-            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts, "symbol": p.get("symbol")}], False
+            return p, [{"type": "EXIT_REJECTED", "reason": "execution_manager_rejected", "timestamp": ts}], False
 
     return p, events, False
 
@@ -349,16 +339,16 @@ def apply_funding_if_due(state, candle, specs, config, events):
 
     funding_rates = config.get("funding_rates") or {}
     if not funding_rates: return
-    if current_ts not in funding_rates: 
+    if current_ts not in funding_rates:
         raise ValueError(f"Missing funding rate for timestamp {current_ts}")
     if state.get("last_funding_ts") == current_ts: return
-    
+
     rate = funding_rates[current_ts]
-    if isinstance(rate, bool) or not isinstance(rate, (int, float)): 
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
         raise ValueError(f"Invalid funding rate type: {type(rate).__name__}")
-    if rate != rate: 
+    if rate != rate:
         raise ValueError(f"Funding rate is NaN at timestamp {current_ts}")
-    if rate == float("inf") or rate == float("-inf"): 
+    if rate == float("inf") or rate == float("-inf"):
         raise ValueError(f"Funding rate is infinite at timestamp {current_ts}")
 
     size = pos["remaining_size"]
@@ -367,12 +357,12 @@ def apply_funding_if_due(state, candle, specs, config, events):
     notional = size * close_price * mult
     s = 1 if pos["side"] == "LONG" else -1
     cashflow = -s * notional * rate
-    
+
     state["equity"] += cashflow
     update_peak_equity(state)
     state["last_funding_ts"] = current_ts
     pos["funding_pnl_usd"] = pos.get("funding_pnl_usd", 0.0) + cashflow
-    events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts, "symbol": pos.get("symbol")})
+    events.append({"type": "FUNDING", "cashflow_usd": cashflow, "timestamp": current_ts})
 
 
 def process_candle(state, klines, indicators, i, specs, config, signal=None, execution_callback=None, exit_callback=None):
@@ -380,7 +370,6 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
     events = []
     candle = klines[i]
     ts = int(candle[0])
-    symbol = config.get("current_symbol", "UNKNOWN")
 
     reset_period_losses_if_needed(state, ts)
 
@@ -391,7 +380,7 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
     position_closed = False
     if state.get("position") is not None:
         atr_current = indicators["atr"][i]
-        
+
         pos_after, pos_events, exited = manage_position_on_candle(
             state["position"], candle, atr_current, config, exit_callback=exit_callback, specs=specs
         )
@@ -421,31 +410,26 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
                 "trade_net_pnl_usd": result["pnl_net"],
                 "exit_price_adj": result["exit_price_adj"],
                 "entry_price": pos_after["entry_price"],
-                "symbol": pos_after.get("symbol", "UNKNOWN"),
             })
             state["position"] = None
             position_closed = True
-            
-            # ✅ ثبت cooldown در دیکشنری برای نماد جاری
-            if not isinstance(state.get("cooldown_until_index"), dict):
-                state["cooldown_until_index"] = {}
-            state["cooldown_until_index"][symbol] = i + config["cooldown_candles"] + 1
+            state["cooldown_until_index"] = i + config["cooldown_candles"] + 1
         else:
             state["position"] = pos_after
 
     if not state.get("circuit_breaker_active", False):
         if state["daily_loss"] >= state["initial_equity"] * config["daily_loss_limit"]:
             state["circuit_breaker_active"] = True
-            events.append({"type": "CIRCUIT_BREAKER", "reason": "DAILY_LOSS", "equity": state["equity"], "timestamp": ts, "symbol": symbol})
+            events.append({"type": "CIRCUIT_BREAKER", "reason": "DAILY_LOSS", "equity": state["equity"], "timestamp": ts})
         elif state["weekly_loss"] >= state["initial_equity"] * config["weekly_loss_limit"]:
             state["circuit_breaker_active"] = True
-            events.append({"type": "CIRCUIT_BREAKER", "reason": "WEEKLY_LOSS", "equity": state["equity"], "timestamp": ts, "symbol": symbol})
+            events.append({"type": "CIRCUIT_BREAKER", "reason": "WEEKLY_LOSS", "equity": state["equity"], "timestamp": ts})
         elif current_total_drawdown(state) >= config["total_dd_limit"]:
             state["circuit_breaker_active"] = True
             events.append({
                 "type": "CIRCUIT_BREAKER", "reason": "TOTAL_DD",
                 "equity": state["equity"], "peak_equity": state["peak_equity"],
-                "drawdown": current_total_drawdown(state), "timestamp": ts, "symbol": symbol,
+                "drawdown": current_total_drawdown(state), "timestamp": ts,
             })
 
     ks_active = config.get("kill_switch_active", False)
@@ -459,20 +443,14 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
                 events.append({
                     "type": "KILL_SWITCH_BLOCKED", "stage": "signal_acceptance",
                     "reason": config.get("kill_switch_reason"),
-                    "side": signal["signal"], "timestamp": ts, "symbol": symbol,
+                    "side": signal["signal"], "timestamp": ts,
                 })
         else:
-            cooldown_dict = state.get("cooldown_until_index", {})
-            if isinstance(cooldown_dict, dict):
-                cooldown_until = cooldown_dict.get(symbol)
-            else:
-                cooldown_until = cooldown_dict
-
+            cooldown_until = state.get("cooldown_until_index")
             if cooldown_until is not None and i < cooldown_until:
-                events.append({"type": "COOLDOWN_SKIP", "until_index": cooldown_until, "timestamp": ts, "symbol": symbol})
+                events.append({"type": "COOLDOWN_SKIP", "until_index": cooldown_until, "timestamp": ts})
             elif signal.get("signal") in ("LONG", "SHORT"):
                 state["pending_entry"] = {
-                    "symbol": symbol,
                     "side": signal["signal"],
                     "signal_candle_ts": signal["signal_candle_ts"],
                     "atr_at_signal": signal["atr_at_signal"],
@@ -480,14 +458,10 @@ def process_candle(state, klines, indicators, i, specs, config, signal=None, exe
                 }
                 events.append({
                     "type": "SIGNAL", "signal": signal["signal"],
-                    "reason": signal.get("reason"), "timestamp": ts, "symbol": symbol,
+                    "reason": signal.get("reason"), "timestamp": ts,
                 })
 
-    # ✅ ذخیره صحیح last_processed_candle_ts برای نماد جاری
-    if not isinstance(state.get("last_processed_candle_ts"), dict):
-        state["last_processed_candle_ts"] = {}
-    state["last_processed_candle_ts"][symbol] = ts
-
+    state["last_processed_candle_ts"] = ts
     return state, events
 
 
@@ -515,7 +489,7 @@ DEFAULT_CONFIG = {
 
 DEFAULT_STATE = {
     "version": "1.0.0", "initial_equity": 1000.0, "equity": 1000.0, "peak_equity": 1000.0,
-    "last_processed_candle_ts": {}, "position": None, "pending_entry": None, "cooldown_until_index": {},
+    "last_processed_candle_ts": None, "position": None, "pending_entry": None, "cooldown_until_index": None,
     "daily_loss": 0.0, "weekly_loss": 0.0, "loss_day_key": None, "loss_week_key": None,
     "circuit_breaker_active": False, "last_funding_ts": None,
 }
