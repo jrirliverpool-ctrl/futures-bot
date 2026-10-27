@@ -63,3 +63,13 @@ jobs:
           python-version: '3.11'
       - run: pip install requests pytest
       - run: pytest -q tests/test_reconciler.py tests/test_reconcile_with_data.py tests/test_paper_status.py tests/test_nan_validation.py
+
+  v2-state-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests pytest
+      - run: pytest -q tests/test_state_manager_v2.py
