@@ -1,7 +1,5 @@
 """
 reconciler.py — Public Dry-Run Reconciliation.
-
-هدف: بررسی سلامت داده‌ی عمومی و سازگاری state ذخیره‌شده.
 """
 
 import os
@@ -74,22 +72,14 @@ def _check_last_candle_closed(klines: list, interval: str, now_ms: int) -> dict:
 def _check_last_processed_vs_latest(klines: list, state: dict, symbol: str) -> dict:
     if not klines:
         return _check("last_processed_vs_latest", False, "no klines")
-    
     last_candle_ts = int(klines[-1][0])
-    
-    # ✅ استخراج از دیکشنری (پشتیبانی از ساختار جدید)
-    lpct_dict = state.get("last_processed_candle_ts", {})
-    if not isinstance(lpct_dict, dict):
-        lpct_dict = {"BTC-SWAP-USDT": lpct_dict} # سازگاری با state های بسیار قدیمی
 
-    lpct = lpct_dict.get(symbol)
+    if "last_processed_candle_ts" not in state:
+        return _check("last_processed_vs_latest", False, "last_processed_candle_ts missing in state", level="warning")
 
+    lpct = state["last_processed_candle_ts"]
     if lpct is None:
-        return _check(
-            "last_processed_vs_latest", False, 
-            f"last_processed for {symbol} is None (never processed)", 
-            level="warning"
-        )
+        return _check("last_processed_vs_latest", False, "last_processed_candle_ts is None (state never processed a candle)", level="warning")
 
     if lpct > last_candle_ts:
         return _check("last_processed_vs_latest", False, f"last_processed={lpct} > latest_candle={last_candle_ts}")
@@ -101,14 +91,9 @@ def _check_missing_candles(klines: list, state: dict, interval: str, symbol: str
     if not klines or interval not in INTERVAL_MS:
         return _check("no_missing_candles", False, "insufficient data to compute gap", level="warning")
 
-    lpct_dict = state.get("last_processed_candle_ts", {})
-    if not isinstance(lpct_dict, dict):
-        lpct_dict = {"BTC-SWAP-USDT": lpct_dict}
-
-    lpct = lpct_dict.get(symbol)
-
+    lpct = state.get("last_processed_candle_ts")
     if lpct is None:
-        return _check("no_missing_candles", False, f"last_processed for {symbol} is None", level="warning")
+        return _check("no_missing_candles", False, "last_processed_candle_ts is None", level="warning")
 
     interval_ms = INTERVAL_MS[interval]
     last_candle_ts = int(klines[-1][0])
@@ -121,7 +106,7 @@ def _check_missing_candles(klines: list, state: dict, interval: str, symbol: str
     if missing < 0: missing = 0
 
     if missing >= GAP_WARNING_THRESHOLD:
-        return _check("no_missing_candles", False, f"{missing} candle(s) missing for {symbol} between lpct={lpct} and last={last_candle_ts}", level="warning")
+        return _check("no_missing_candles", False, f"{missing} candle(s) missing between lpct={lpct} and last={last_candle_ts}", level="warning")
 
     return _check("no_missing_candles", True, f"no significant gap (missing={missing})")
 
@@ -134,10 +119,6 @@ def _check_hash_match(state: dict) -> dict:
     return _check("hash_match", actual == expected, f"state={actual[:16]}... expected={expected[:16]}...")
 
 
-# ============================================================
-# Pure API
-# ============================================================
-
 def reconcile_with_data(state: dict, klines: list, interval: str, now_ms: int, symbol: str = "BTC-SWAP-USDT") -> dict:
     checks = []
     checks.append(_check_hash_match(state))
@@ -149,10 +130,6 @@ def reconcile_with_data(state: dict, klines: list, interval: str, now_ms: int, s
     status = _aggregate_status(checks)
     return _result(status, checks, _summarize(checks))
 
-
-# ============================================================
-# Public API
-# ============================================================
 
 def reconcile_public(state_dir: str, symbol: str = "BTC-SWAP-USDT", interval: str = "1h") -> dict:
     checks = []
