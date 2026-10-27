@@ -7,6 +7,7 @@ Tests verify:
   4. Circuit breaker reason sync
   5. Full entry cycle through REAL V1 (signal → pending → position)
   6. Multi-symbol capacity enforcement
+  7. _specs() fixture compatibility with V1's calculate_position_size
 """
 
 import copy
@@ -35,9 +36,16 @@ def state_v2():
 
 
 def _specs():
+    """Specs matching what get_symbol_specs() returns for BTC.
+
+    All fields below are required by V1's calculate_position_size.
+    If V1 adds a new required field, test_specs_fixture_satisfies_v1_requirements
+    will fail and alert us to update this fixture.
+    """
     return {
         "contract_multiplier": 0.001,
         "min_qty": 0.0001,
+        "max_qty": 1000.0,
         "qty_step": 0.0001,
         "min_notional": 0.0,
         "max_leverage": 20,
@@ -57,7 +65,7 @@ def _config():
         "daily_loss_limit": 0.03,
         "weekly_loss_limit": 0.07,
         "total_dd_limit": 0.15,
-        "slippage_pct": 0.0,  # Disable slippage for deterministic tests
+        "slippage_pct": 0.0,
         "open_taker_fee": 0.0,
         "close_taker_fee": 0.0,
         "leverage": None,
@@ -86,6 +94,31 @@ def _next_candle():
 
 
 # ============================================================
+# Fixture sanity (defensive — catches V1 requirement drift)
+# ============================================================
+
+def test_specs_fixture_satisfies_v1_requirements():
+    """Verify _specs() provides all fields V1's calculate_position_size requires.
+
+    If V1 adds a new required field (e.g. max_qty), this test fails loudly
+    instead of silently causing downstream test failures.
+    """
+    from paper_engine import calculate_position_size
+
+    qty = calculate_position_size(
+        equity=984.67,
+        entry_price=85000.0,
+        stop_loss=84000.0,
+        specs=_specs(),
+        risk_per_trade=0.01,
+    )
+    assert qty is not None, (
+        "_specs() is missing a field required by V1's calculate_position_size"
+    )
+    assert qty > 0
+
+
+# ============================================================
 # _count_portfolio_reservations
 # ============================================================
 
@@ -104,9 +137,7 @@ def test_count_reservations_with_pending(state_v2):
 
 
 def test_count_reservations_position_and_pending_same_symbol_counts_once(state_v2):
-    # A symbol with position should NOT also count its pending (enforced by validation)
     state_v2["symbols"]["ETH-SWAP-USDT"]["position"] = {"side": "LONG"}
-    # Even if pending somehow exists, count as 1 (defensive)
     assert bridge._count_portfolio_reservations(state_v2, exclude_symbol="BTC-SWAP-USDT") == 1
 
 
@@ -169,7 +200,6 @@ def test_blocks_entry_when_other_has_position(state_v2):
 
 
 def test_blocks_entry_when_other_has_pending(state_v2):
-    """Defense in depth: even if pre-check missed, don't let 2 pendings become 2 positions."""
     state_v2["symbols"]["BTC-SWAP-USDT"]["pending_entry"] = {"side": "LONG"}
     assert bridge._portfolio_allows_entry(state_v2, "ETH-SWAP-USDT") is False
 
@@ -285,9 +315,7 @@ def test_process_rejects_symbol_not_in_whitelist(state_v2):
 
 
 def test_process_accepts_symbol_in_whitelist(state_v2):
-    # Should not raise for state lookup — may fail later on V1 inputs,
-    # but whitelist check is what we're testing
-    with pytest.raises(Exception):  # V1 will fail on empty klines
+    with pytest.raises(Exception):
         bridge.process_symbol_candle(
             state_v2, "BTC-SWAP-USDT", [], {}, 0, {}, {},
             allowed_symbols={"BTC-SWAP-USDT"},
@@ -330,7 +358,6 @@ def test_multi_symbol_only_one_gets_pending(state_v2):
     signal = _signal("LONG")
     candle = _long_signal_candle()
 
-    # BTC gets pending
     state_v2, events_btc = bridge.process_symbol_candle(
         state_v2, "BTC-SWAP-USDT",
         [candle], {"atr": [500.0]}, 0, _specs(), _config(),
@@ -338,7 +365,6 @@ def test_multi_symbol_only_one_gets_pending(state_v2):
     )
     assert state_v2["symbols"]["BTC-SWAP-USDT"]["pending_entry"] is not None
 
-    # ETH signal must be suppressed
     state_v2, events_eth = bridge.process_symbol_candle(
         state_v2, "ETH-SWAP-USDT",
         [candle], {"atr": [500.0]}, 0, _specs(), _config(),
@@ -349,24 +375,26 @@ def test_multi_symbol_only_one_gets_pending(state_v2):
 
 
 def test_multi_symbol_only_one_opens_position(state_v2):
-    """Both get pending, but only one opens position at execution."""
+    """Only BTC gets pending; ETH is blocked by portfolio capacity."""
     signal = _signal("LONG")
     candle1 = _long_signal_candle()
     candle2 = _next_candle()
 
-    # BTC pending created
+    # BTC gets pending
     state_v2, _ = bridge.process_symbol_candle(
         state_v2, "BTC-SWAP-USDT",
         [candle1], {"atr": [500.0]}, 0, _specs(), _config(),
         signal=signal,
     )
-    # ETH pending suppressed (can't verify in state, but events from prev test)
-    state_v2, _ = bridge.process_symbol_candle(
+
+    # ETH is blocked by capacity (BTC already has pending)
+    state_v2, events_eth = bridge.process_symbol_candle(
         state_v2, "ETH-SWAP-USDT",
         [candle1], {"atr": [500.0]}, 0, _specs(), _config(),
         signal=signal,
     )
     assert state_v2["symbols"]["ETH-SWAP-USDT"]["pending_entry"] is None
+    assert any(e["type"] == "SIGNAL_BLOCKED_PORTFOLIO" for e in events_eth)
 
     # BTC pending executes → position opens
     state_v2, _ = bridge.process_symbol_candle(
@@ -376,8 +404,6 @@ def test_multi_symbol_only_one_opens_position(state_v2):
     )
     assert state_v2["symbols"]["BTC-SWAP-USDT"]["position"] is not None
 
-    # ETH had no pending anyway, but even if it did, this would be blocked
-
 
 def test_circuit_breaker_blocks_entry(state_v2):
     """If CB is active, entry must be blocked."""
@@ -385,7 +411,6 @@ def test_circuit_breaker_blocks_entry(state_v2):
     signal = _signal("LONG")
     candle = _long_signal_candle()
 
-    # Pre-check should suppress signal because CB is active
     state_v2, events = bridge.process_symbol_candle(
         state_v2, "BTC-SWAP-USDT",
         [candle], {"atr": [500.0]}, 0, _specs(), _config(),
