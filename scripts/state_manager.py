@@ -48,8 +48,8 @@ def default_state(initial_equity=1000.0):
         "symbol": "UNKNOWN",
         "position": None,
         "pending_entry": None,
-        "last_processed_candle_ts": {},  # ✅ دیکشنری برای چندنمادی
-        "cooldown_until_index": {},      # ✅ دیکشنری برای چندنمادی
+        "last_processed_candle_ts": None,
+        "cooldown_until_index": None,
         "daily_loss": 0.0,
         "weekly_loss": 0.0,
         "loss_day_key": None,
@@ -57,21 +57,6 @@ def default_state(initial_equity=1000.0):
         "circuit_breaker_active": False,
         "last_funding_ts": None,
     }
-
-
-def _migrate_state(state: dict) -> dict:
-    """✅ تبدیل ساختار تک‌نمادی به چندنمادی (مهاجرت خودکار)"""
-    if not isinstance(state.get("last_processed_candle_ts"), dict):
-        old_ts = state.get("last_processed_candle_ts")
-        old_symbol = state.get("symbol", "BTC-SWAP-USDT")
-        state["last_processed_candle_ts"] = {old_symbol: old_ts}
-        
-    if not isinstance(state.get("cooldown_until_index"), dict):
-        old_cooldown = state.get("cooldown_until_index")
-        old_symbol = state.get("symbol", "BTC-SWAP-USDT")
-        state["cooldown_until_index"] = {old_symbol: old_cooldown if old_cooldown is not None else 0}
-        
-    return state
 
 
 def validate_state(state: dict) -> None:
@@ -101,21 +86,13 @@ def validate_state(state: dict) -> None:
     if state.get("pending_entry") is not None and not isinstance(state["pending_entry"], dict):
         raise ValueError("pending_entry must be None or dict")
 
-    # ✅ اعتبارسنجی دیکشنری برای last_processed_candle_ts
     lpc = state.get("last_processed_candle_ts")
-    if not isinstance(lpc, dict):
-        raise ValueError("last_processed_candle_ts must be a dict")
-    for sym, ts in lpc.items():
-        if ts is not None and (isinstance(ts, bool) or not isinstance(ts, int)):
-            raise ValueError(f"last_processed_candle_ts[{sym}] must be None or int")
+    if lpc is not None and (isinstance(lpc, bool) or not isinstance(lpc, int)):
+        raise ValueError("last_processed_candle_ts must be None or int")
 
-    # ✅ اعتبارسنجی دیکشنری برای cooldown_until_index
     cdi = state.get("cooldown_until_index")
-    if not isinstance(cdi, dict):
-        raise ValueError("cooldown_until_index must be a dict")
-    for sym, idx in cdi.items():
-        if idx is not None and (isinstance(idx, bool) or not isinstance(idx, int)):
-            raise ValueError(f"cooldown_until_index[{sym}] must be None or int")
+    if cdi is not None and (isinstance(cdi, bool) or not isinstance(cdi, int)):
+        raise ValueError("cooldown_until_index must be None or int")
 
 
 def _check_finite_values(obj, path):
@@ -157,8 +134,6 @@ def load_state(path, strict=True):
         raise FileNotFoundError(f"State not found at {target}")
     with open(target, "r", encoding="utf-8") as f:
         state = json.load(f)
-        
-    state = _migrate_state(state)
     validate_state(state)
 
     if strict:
@@ -279,7 +254,6 @@ def append_trade_events(csv_path, events, strategy_metadata=None):
             existing_ids.add(evid)
 
     start_seq = _last_valid_seq(existing_rows) + 1
-
     file_exists = os.path.exists(csv_path)
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
 
