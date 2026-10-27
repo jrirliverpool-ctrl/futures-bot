@@ -1,6 +1,6 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.6 - Complete fix for TP1 accounting, fees, and strict validation.
+v3.7 - Single-symbol + specific leverage rejection reasons.
 """
 
 import copy
@@ -151,9 +151,23 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     entry_price = apply_slippage(open_price, is_entry=True, side=side, slip_pct=config["slippage_pct"])
     sl, tp1 = compute_initial_levels(entry_price, pending["atr_at_signal"], side, config)
 
+    # ✅ اعتبارسنجی صریح Leverage قبل از محاسبه حجم (طبق نیاز تست‌ها)
+    lev = config.get("leverage")
+    lev_cap = config.get("leverage_cap")
+    if lev is not None:
+        if isinstance(lev, bool) or not isinstance(lev, int) or lev <= 0:
+            events.append({"type": "ENTRY_REJECTED", "reason": "invalid_leverage_type", "timestamp": ts})
+            state["pending_entry"] = None
+            return state, events
+        max_lev = specs.get("max_leverage", float("inf"))
+        if lev > max_lev or (lev_cap is not None and lev > lev_cap):
+            events.append({"type": "ENTRY_REJECTED", "reason": "leverage_exceeds_cap", "timestamp": ts})
+            state["pending_entry"] = None
+            return state, events
+
     qty = calculate_position_size(
         state["equity"], entry_price, sl, specs, config["risk_per_trade"],
-        leverage=config.get("leverage"), leverage_cap=config.get("leverage_cap"),
+        leverage=lev, leverage_cap=lev_cap,
     )
 
     if qty is None:
@@ -164,7 +178,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     if execution_callback is not None:
         allowed = execution_callback({
             "intent": "ENTRY", "side": side, "qty": qty, "price": entry_price,
-            "sl": sl, "tp1": tp1, "leverage": config.get("leverage", 1), "timestamp": ts,
+            "sl": sl, "tp1": tp1, "leverage": lev if lev is not None else 1, "timestamp": ts,
             "signal_candle_ts": pending.get("signal_candle_ts"),
         })
         if not allowed:
