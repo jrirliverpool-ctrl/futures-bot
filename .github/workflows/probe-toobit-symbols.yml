@@ -1,0 +1,90 @@
+name: Probe Toobit Symbols (Manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run read-only symbol probe
+        run: |
+          python -c "
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from probe_all_symbols import main
+          raise SystemExit(main(Path('probe-output/symbols_whitelist.json')))
+          "
+
+      - name: Show probe summary
+        if: always()
+        run: |
+          FILE="probe-output/symbols_whitelist.json"
+
+          echo "## Toobit Symbol Probe" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ! -f "$FILE" ]; then
+            echo "**Status:** Probe output was NOT generated." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Check the failed step logs for the API or validation error." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "V1 state and \`config/symbols_whitelist.json\` were NOT modified." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "**Status:** Probe output generated." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          python3 <<'PYEOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          with open("probe-output/symbols_whitelist.json") as f:
+              d = json.load(f)
+          print(f"- **Accepted:** {d.get('count', 0)}")
+          print(f"- **Rejected:** {d.get('rejected_count', 0)}")
+          print(f"- **Generated at (UTC):** {d.get('generated_at_utc', 'N/A')}")
+          print()
+          print("### Accepted symbols")
+          print()
+          print("| Symbol | Min qty | Qty step | Multiplier | Max lev |")
+          print("|---|---:|---:|---:|---:|")
+          for s in d.get("symbols", []):
+              print(f"| {s.get('symbol')} | {s.get('min_qty')} | {s.get('qty_step')} | {s.get('contract_multiplier')} | {s.get('max_leverage', 'N/A')} |")
+          rejected = d.get("rejected", [])
+          if rejected:
+              print()
+              print("### Rejected symbols")
+              for item in rejected[:30]:
+                  errors = "; ".join(item.get("errors", []))
+                  print(f"- `{item.get('symbol')}`: {errors}")
+              if len(rejected) > 30:
+                  print(f"- ... and {len(rejected) - 30} more")
+          PYEOF
+
+      - name: Upload probe output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: symbols-whitelist
+          path: probe-output/symbols_whitelist.json
+          if-no-files-found: ignore
+          retention-days: 30
