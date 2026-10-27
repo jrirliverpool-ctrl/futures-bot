@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Candidate crypto perpetual symbols for ApexQuant V2 (review stage)",
+  "note": "Presence here means 'eligible for Probe review', NOT 'approved for trading'. Activation requires backtest + data-quality + cost review per symbol.",
+  "symbols": [
+    "BTC-SWAP-USDT",
+    "ETH-SWAP-USDT",
+    "SOL-SWAP-USDT",
+    "BNB-SWAP-USDT",
+    "XRP-SWAP-USDT",
+    "ADA-SWAP-USDT",
+    "DOGE-SWAP-USDT",
+    "AVAX-SWAP-USDT",
+    "LINK-SWAP-USDT",
+    "DOT-SWAP-USDT"
+  ]
+}
