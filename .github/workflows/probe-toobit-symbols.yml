@@ -44,7 +44,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           if [ ! -f "$FILE" ]; then
-            echo "**Status:** Probe output was NOT generated." >> "$GITHUB_STEP_SUMMARY"
+            echo "**Status:** ❌ Probe output was NOT generated." >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "Check the failed step logs for the API or validation error." >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -52,32 +52,51 @@ jobs:
             exit 0
           fi
 
-          echo "**Status:** Probe output generated." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
           python3 <<'PYEOF' >> "$GITHUB_STEP_SUMMARY"
           import json
           with open("probe-output/symbols_whitelist.json") as f:
               d = json.load(f)
+
+          status = d.get("status", "unknown")
+          emoji = "✅" if status == "complete" else "⚠️"
+
+          print(f"**Status:** {emoji} `{status}`")
+          print()
+          print(f"- **Filter:** `{d.get('filter', 'none')}`")
+          print(f"- **Whitelist size:** {d.get('whitelist_size', 0)}")
           print(f"- **Accepted:** {d.get('count', 0)}")
           print(f"- **Rejected:** {d.get('rejected_count', 0)}")
+          print(f"- **Excluded (not in whitelist):** {d.get('excluded_not_allowlisted_count', 0)}")
+          print(f"- **Missing from API:** {d.get('missing_from_api_count', 0)}")
           print(f"- **Generated at (UTC):** {d.get('generated_at_utc', 'N/A')}")
           print()
-          print("### Accepted symbols")
+          print("### Accepted crypto symbols")
           print()
           print("| Symbol | Min qty | Qty step | Multiplier | Max lev |")
           print("|---|---:|---:|---:|---:|")
           for s in d.get("symbols", []):
               print(f"| {s.get('symbol')} | {s.get('min_qty')} | {s.get('qty_step')} | {s.get('contract_multiplier')} | {s.get('max_leverage', 'N/A')} |")
+
+          missing = d.get("missing_from_api", [])
+          if missing:
+              print()
+              print("### ⚠️ Missing from API (in whitelist but not returned)")
+              for sym in missing:
+                  print(f"- `{sym}`")
+
           rejected = d.get("rejected", [])
           if rejected:
               print()
-              print("### Rejected symbols")
+              print("### Rejected symbols (parse/validation failed)")
               for item in rejected[:30]:
                   errors = "; ".join(item.get("errors", []))
                   print(f"- `{item.get('symbol')}`: {errors}")
-              if len(rejected) > 30:
-                  print(f"- ... and {len(rejected) - 30} more")
+
+          if status != "complete":
+              print()
+              print("### Action required")
+              print("Do NOT proceed to Bridge/V2 engine until this probe is `complete`.")
+              print("Investigate missing/rejected symbols, fix whitelist or parser, then re-run.")
           PYEOF
 
       - name: Upload probe output
