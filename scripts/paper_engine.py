@@ -1,6 +1,7 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
 v3.8 - Circuit Breaker fix: propagate losses to daily/weekly trackers.
+Research modification: Trailing stop is gated behind be_moved to isolate BE test.
 """
 
 import copy
@@ -287,7 +288,8 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
                 "reason": None, "ambiguous_exit": False, "timestamp": ts, "exit_price_adj": None,
             })
 
-    if p["tp1_hit"]:
+    # ✅ RESEARCH MODIFICATION: Trailing stop gated behind be_moved to isolate BE test.
+    if p["tp1_hit"] and p["be_moved"]:
         p["trailing_active"] = True
         trailing_distance = config["trailing_atr_mult"] * atr_current
         if side == "LONG":
@@ -337,16 +339,6 @@ def close_position(state, pos, exit_price, specs, config):
     state["equity"] += pnl_for_equity
     update_peak_equity(state)
 
-    # ✅ v3.8 BUG FIX: propagate realized losses to period trackers.
-    # Without this, daily_loss/weekly_loss stay at 0 forever and
-    # Circuit Breaker can never fire (even after cumulative losses
-    # far exceed configured thresholds).
-    #
-    # Semantics: GROSS-LOSS — accumulate only the absolute value of
-    # losing trades. Winning trades do NOT reduce this counter.
-    # (Conservative: CB fires as soon as cumulative losses exceed
-    # the threshold, regardless of wins — appropriate for risk
-    # protection on a strategy that mostly loses.)
     if pnl_net < 0:
         loss = abs(pnl_net)
         state["daily_loss"] = state.get("daily_loss", 0.0) + loss
