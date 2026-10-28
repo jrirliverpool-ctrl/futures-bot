@@ -5,9 +5,14 @@ Tests verify:
   2. Portfolio gating (positions AND pendings) for both pre-check and execution
   3. Whitelist enforcement
   4. Circuit breaker reason sync
-  5. Full entry cycle through REAL V1 (signal → pending → position)
+  5. Full lifecycle through REAL V1: signal → pending → entry → TP1 → exit
   6. Multi-symbol capacity enforcement
   7. _specs() fixture compatibility with V1's calculate_position_size
+
+All lifecycle tests:
+  - read actual prices from state (not hardcoded),
+  - assert each stage explicitly (no silent returns),
+  - verify equity transitions and cooldown.
 """
 
 import copy
@@ -331,7 +336,6 @@ def test_full_entry_cycle_via_real_v1(state_v2):
     signal = _signal("LONG")
     candle1 = _long_signal_candle()
 
-    # Step 1: signal → pending_entry created
     state_v2, events1 = bridge.process_symbol_candle(
         state_v2, "BTC-SWAP-USDT",
         [candle1], {"atr": [500.0]}, 0, _specs(), _config(),
@@ -341,7 +345,6 @@ def test_full_entry_cycle_via_real_v1(state_v2):
     assert state_v2["symbols"]["BTC-SWAP-USDT"]["pending_entry"]["side"] == "LONG"
     assert state_v2["symbols"]["BTC-SWAP-USDT"]["position"] is None
 
-    # Step 2: next candle, pending executes → position opens
     candle2 = _next_candle()
     state_v2, events2 = bridge.process_symbol_candle(
         state_v2, "BTC-SWAP-USDT",
@@ -380,14 +383,12 @@ def test_multi_symbol_only_one_opens_position(state_v2):
     candle1 = _long_signal_candle()
     candle2 = _next_candle()
 
-    # BTC gets pending
     state_v2, _ = bridge.process_symbol_candle(
         state_v2, "BTC-SWAP-USDT",
         [candle1], {"atr": [500.0]}, 0, _specs(), _config(),
         signal=signal,
     )
 
-    # ETH is blocked by capacity (BTC already has pending)
     state_v2, events_eth = bridge.process_symbol_candle(
         state_v2, "ETH-SWAP-USDT",
         [candle1], {"atr": [500.0]}, 0, _specs(), _config(),
@@ -396,7 +397,6 @@ def test_multi_symbol_only_one_opens_position(state_v2):
     assert state_v2["symbols"]["ETH-SWAP-USDT"]["pending_entry"] is None
     assert any(e["type"] == "SIGNAL_BLOCKED_PORTFOLIO" for e in events_eth)
 
-    # BTC pending executes → position opens
     state_v2, _ = bridge.process_symbol_candle(
         state_v2, "BTC-SWAP-USDT",
         [candle1, candle2], {"atr": [500.0, 500.0]}, 1, _specs(), _config(),
@@ -418,6 +418,197 @@ def test_circuit_breaker_blocks_entry(state_v2):
     )
     assert state_v2["symbols"]["BTC-SWAP-USDT"]["pending_entry"] is None
     assert any(e["type"] == "SIGNAL_BLOCKED_PORTFOLIO" for e in events)
+
+
+# ============================================================
+# Full lifecycle via Bridge (real V1, no silent returns)
+# ============================================================
+
+def test_full_trade_lifecycle_via_bridge(state_v2):
+    """End-to-end: signal → pending → entry → TP1 → exit, all via Bridge.
+
+    Design principles:
+      - Reads ACTUAL prices from state after each stage (not hardcoded).
+      - Every stage has its own assertion; no silent returns.
+      - Candles for TP1 and exit are constructed from the ACTUAL current_sl
+        and initial_tp1 values read from position, so they always trigger
+        the expected event regardless of how V1 adjusts prices internally.
+    """
+    BTC = "BTC-SWAP-USDT"
+    atr = 5.0
+    specs = _specs()
+    cfg = _config()
+    cfg["slippage_pct"] = 0.0
+    cfg["open_taker_fee"] = 0.0
+    cfg["close_taker_fee"] = 0.0
+
+    # --- Candle 0: signal candle ---
+    # OHLC only needs to be valid; signal dict drives pending creation.
+    c0 = [1_000_000, "100", "102", "98", "101", "1000"]
+    signal = {
+        "signal": "LONG",
+        "signal_candle_ts": 1_000_000,
+        "atr_at_signal": atr,
+        "close": 101.0,
+        "reason": "lifecycle test",
+    }
+
+    state_v2, ev0 = bridge.process_symbol_candle(
+        state_v2, BTC, [c0], {"atr": [atr]}, 0, specs, cfg,
+        signal=signal,
+    )
+
+    # === STAGE 1: signal → pending_entry ===
+    pending = state_v2["symbols"][BTC]["pending_entry"]
+    assert pending is not None, (
+        f"STAGE 1 FAIL: pending_entry not created. Events: {ev0}"
+    )
+    assert pending["side"] == "LONG"
+    assert state_v2["symbols"][BTC]["position"] is None
+
+    # --- Candle 1: entry candle ---
+    c1 = [1_003_600_000, "100", "102", "99", "101", "1000"]
+
+    state_v2, ev1 = bridge.process_symbol_candle(
+        state_v2, BTC, [c0, c1], {"atr": [atr, atr]}, 1, specs, cfg,
+        signal=None,
+    )
+
+    # === STAGE 2: pending → entry ===
+    assert state_v2["symbols"][BTC]["pending_entry"] is None, (
+        f"STAGE 2 FAIL: pending_entry not cleared. Events: {ev1}"
+    )
+
+    entry_events = [e for e in ev1 if e.get("type") == "ENTRY"]
+    assert len(entry_events) == 1, (
+        f"STAGE 2 FAIL: expected 1 ENTRY, got {len(entry_events)}. "
+        f"All events: {ev1}"
+    )
+
+    pos = state_v2["symbols"][BTC]["position"]
+    assert pos is not None, f"STAGE 2 FAIL: position not opened. Events: {ev1}"
+    assert pos["side"] == "LONG"
+    assert pos["tp1_hit"] is False
+    assert pos["remaining_size"] > 0
+
+    # Read ACTUAL levels from state for building subsequent candles
+    entry_price = pos["entry_price"]
+    initial_tp1 = pos["initial_tp1"]
+    initial_sl = pos["initial_sl"]
+    current_sl = pos["current_sl"]
+    assert initial_tp1 > entry_price > initial_sl, (
+        f"STAGE 2 sanity: expected initial_sl < entry < initial_tp1, "
+        f"got sl={initial_sl} entry={entry_price} tp1={initial_tp1}"
+    )
+    assert current_sl == initial_sl
+
+    equity_after_entry = state_v2["equity"]
+    remaining_before_tp1 = pos["remaining_size"]
+
+    # --- Candle 2: TP1 candle (constructed from actual tp1 and sl) ---
+    c2_high = initial_tp1 + 5.0     # definitely exceeds TP1
+    c2_low = current_sl + 1.0       # definitely above SL (won't trigger SL first)
+    c2_close = c2_high - 1.0
+    c2 = [
+        1_007_200_000,
+        str(entry_price),
+        str(c2_high),
+        str(c2_low),
+        str(c2_close),
+        "1000",
+    ]
+
+    state_v2, ev2 = bridge.process_symbol_candle(
+        state_v2, BTC, [c0, c1, c2],
+        {"atr": [atr, atr, atr]}, 2, specs, cfg,
+        signal=None,
+    )
+
+    # === STAGE 3: TP1 fires ===
+    tp1_events = [e for e in ev2 if e.get("type") == "TP1_HIT"]
+    assert len(tp1_events) == 1, (
+        f"STAGE 3 FAIL: expected 1 TP1_HIT, got {len(tp1_events)}. "
+        f"Candle: {c2}, initial_tp1={initial_tp1}, current_sl={current_sl}. "
+        f"All events: {ev2}"
+    )
+
+    pos = state_v2["symbols"][BTC]["position"]
+    assert pos is not None, "STAGE 3 FAIL: position gone after TP1"
+    assert pos["tp1_hit"] is True, "STAGE 3 FAIL: tp1_hit flag not set"
+    assert pos["remaining_size"] < remaining_before_tp1, (
+        f"STAGE 3 FAIL: remaining_size not reduced. "
+        f"before={remaining_before_tp1} after={pos['remaining_size']}"
+    )
+    assert pos["realized_pnl"] > 0, (
+        f"STAGE 3 FAIL: realized_pnl={pos['realized_pnl']} not positive"
+    )
+
+    equity_after_tp1 = state_v2["equity"]
+    assert equity_after_tp1 > equity_after_entry, (
+        f"STAGE 3 FAIL: equity didn't increase after TP1. "
+        f"before={equity_after_entry} after={equity_after_tp1}"
+    )
+
+    # Read updated SL after TP1 (moved up due to BE + trailing)
+    current_sl_after_tp1 = pos["current_sl"]
+    assert current_sl_after_tp1 > initial_sl, (
+        f"STAGE 3 FAIL: SL not moved up after TP1. "
+        f"initial_sl={initial_sl} current_sl={current_sl_after_tp1}"
+    )
+
+    # --- Candle 3: exit candle (constructed from actual current_sl) ---
+    c3_low = current_sl_after_tp1 - 5.0     # definitely below SL
+    c3_open = current_sl_after_tp1 + 1.0
+    c3_high = c3_open + 2.0
+    c3_close = c3_low + 1.0
+    c3 = [
+        1_010_800_000,
+        str(c3_open),
+        str(c3_high),
+        str(c3_low),
+        str(c3_close),
+        "1000",
+    ]
+
+    state_v2, ev3 = bridge.process_symbol_candle(
+        state_v2, BTC, [c0, c1, c2, c3],
+        {"atr": [atr, atr, atr, atr]}, 3, specs, cfg,
+        signal=None,
+    )
+
+    # === STAGE 4: Exit fires ===
+    exit_events = [e for e in ev3 if e.get("type") == "EXIT"]
+    assert len(exit_events) == 1, (
+        f"STAGE 4 FAIL: expected 1 EXIT, got {len(exit_events)}. "
+        f"Candle: {c3}, current_sl={current_sl_after_tp1}. "
+        f"All events: {ev3}"
+    )
+
+    assert state_v2["symbols"][BTC]["position"] is None, (
+        "STAGE 4 FAIL: position not cleared after exit"
+    )
+    assert state_v2["symbols"][BTC]["pending_entry"] is None, (
+        "STAGE 4 FAIL: pending_entry appeared unexpectedly"
+    )
+    assert state_v2["symbols"][BTC]["cooldown_until_index"] is not None, (
+        "STAGE 4 FAIL: cooldown_until_index not set after exit"
+    )
+    assert state_v2["symbols"][BTC]["last_processed_candle_ts"] == 1_010_800_000, (
+        f"STAGE 4 FAIL: last_processed not updated. "
+        f"got {state_v2['symbols'][BTC]['last_processed_candle_ts']}"
+    )
+
+    # Equity after exit must not have gone negative or nonsensical
+    equity_after_exit = state_v2["equity"]
+    assert equity_after_exit > 0, (
+        f"STAGE 4 FAIL: equity non-positive after exit: {equity_after_exit}"
+    )
+    # The total PnL of the trade = equity_after_exit - initial_equity
+    # We don't assert its sign (SL could hit below entry under some configs),
+    # but we do assert it's finite and reasonable.
+    assert abs(equity_after_exit - 984.67) < 100.0, (
+        f"STAGE 4 sanity: equity {equity_after_exit} far from initial 984.67"
+    )
 
 
 # ============================================================
