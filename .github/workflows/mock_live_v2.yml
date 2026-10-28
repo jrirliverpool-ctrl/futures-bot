@@ -1,0 +1,90 @@
+name: Mock Live V2 (Manual — Single Run)
+
+# MANUAL ONLY.
+# This workflow performs ONE validation cycle. It does NOT persist state
+# between runs: each execution starts from scratch (or from whatever was
+# committed in the repo).
+#
+# DO NOT add `schedule:` to this workflow. Before cron can be enabled,
+# state persistence must be designed and tested:
+#   - Option A: commit state.json back to repo (needs contents: write)
+#   - Option B: use actions/cache with restore-keys
+#   - Option C: external durable storage
+# None of these are implemented yet.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest
+
+      - name: Run V2 multi-symbol cycle
+        id: run_v2
+        env:
+          STATE_DIR: ./multi_symbol_state_dir
+          INTERVAL: "1h"
+        run: |
+          python scripts/run_multi_symbol.py
+
+      - name: Upload state + events (for inspection)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-state-${{ github.run_id }}
+          path: |
+            multi_symbol_state_dir/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Show result summary
+        if: always()
+        run: |
+          echo "## Mock Live V2 Run" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Note:** This is a single validation cycle. State does NOT persist between manual runs." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f multi_symbol_state_dir/state.json ]; then
+            python3 <<'PYEOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          with open("multi_symbol_state_dir/state.json") as f:
+              s = json.load(f)
+          print(f"- **Equity:** {s.get('equity')}")
+          positions = [(k, v['position']) for k, v in s.get('symbols', {}).items() if v.get('position')]
+          pendings = [(k, v['pending_entry']) for k, v in s.get('symbols', {}).items() if v.get('pending_entry')]
+          print(f"- **Open positions:** {len(positions)}")
+          for sym, p in positions:
+              print(f"  - `{sym}`: {p.get('side')} size={p.get('size')}")
+          print(f"- **Pending entries:** {len(pendings)}")
+          for sym, p in pendings:
+              print(f"  - `{sym}`: {p.get('side')}")
+          print(f"- **Symbols tracked:** {len(s.get('symbols', {}))}")
+          print()
+          print("### Last processed per symbol")
+          print("| Symbol | last_processed_candle_ts |")
+          print("|---|---|")
+          for sym, ss in s.get("symbols", {}).items():
+              print(f"| {sym} | {ss.get('last_processed_candle_ts')} |")
+          PYEOF
+          else
+            echo "No state.json generated — check run logs above." >> "$GITHUB_STEP_SUMMARY"
+          fi
