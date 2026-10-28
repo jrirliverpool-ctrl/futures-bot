@@ -1,0 +1,112 @@
+name: Strategy Backtest V2 (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Candles"
+        default: "500"
+        required: true
+      interval:
+        description: "Timeframe"
+        default: "1h"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        symbol:
+          - BTC-SWAP-USDT
+          - ETH-SWAP-USDT
+          - SOL-SWAP-USDT
+          - BNB-SWAP-USDT
+          - XRP-SWAP-USDT
+          - ADA-SWAP-USDT
+          - DOGE-SWAP-USDT
+          - AVAX-SWAP-USDT
+          - LINK-SWAP-USDT
+          - DOT-SWAP-USDT
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest
+
+      - name: Run backtest for ${{ matrix.symbol }}
+        id: run
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+          INTERVAL: ${{ inputs.interval }}
+          LIMIT: ${{ inputs.limit }}
+          INITIAL_EQUITY: "1000"
+        run: |
+          mkdir -p backtest-out
+          set +e
+          python scripts/run_real_backtest.py 2>&1 | tee "backtest-out/${SYMBOL}.log"
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect outputs
+        if: always()
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+        run: |
+          mkdir -p backtest-out
+          if [ -d reports ]; then cp -r reports "backtest-out/${SYMBOL}__reports" || true; fi
+          if [ -f backtest_state.json ]; then cp backtest_state.json "backtest-out/${SYMBOL}__state.json" || true; fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest-${{ matrix.symbol }}
+          path: backtest-out/
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+        run: |
+          {
+            echo "## Backtest: ${SYMBOL}"
+            echo ""
+            echo "- Exit code: \`${{ steps.run.outputs.exit_code }}\`"
+            echo ""
+            if [ -f "backtest-out/${SYMBOL}.log" ]; then
+              python3 <<'PYEOF'
+          import os, re
+          sym = os.environ["SYMBOL"]
+          text = open(f"backtest-out/{sym}.log", encoding="utf-8", errors="replace").read()
+          def grab(p, d="—"):
+              m = re.search(p, text)
+              return m.group(1).strip() if m else d
+          keys = {
+              "net_return": r"net return \(mtm\)\s+:\s+([\-+\d\.]+)%",
+              "max_dd": r"max drawdown \(mtm\)\s+:\s+([\d\.]+)%",
+              "trades": r"total\s+:\s+(\d+)",
+              "win": r"win rate\s+:\s+([\d\.]+)%",
+              "pf": r"profit factor\s+:\s+([\w\d\.\-]+)",
+              "expectancy": r"expectancy\s+:\s+([\-\d\.]+)",
+              "commission": r"commission cost\s+:\s+([\d\.]+)",
+          }
+          print("| Metric | Value |")
+          print("|---|---:|")
+          for k, p in keys.items():
+              print(f"| {k} | {grab(p)} |")
+          if "PASSED" not in text and "❌" in text:
+              print("\n⚠️ Log contains error markers")
+          PYEOF
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
