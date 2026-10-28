@@ -55,3 +55,14 @@ Thumbs.db
 
 *.tmp
 .state_*.tmp
+
+# ============================================
+# ApexQuant V2 — Multi-symbol State
+# ============================================
+# NOTE: `state.json` is blocked globally above. Both V1 and V2 workflows
+# MUST force-add it (`git add -f`) because it is the runtime state that
+# must persist across runs.
+#
+# Only backups are permanently blocked here — they accumulate rapidly
+# (one per save_state_v2() call, ~10 per cycle) and would bloat the repo.
+multi_symbol_state_dir/state.json.bak.*
