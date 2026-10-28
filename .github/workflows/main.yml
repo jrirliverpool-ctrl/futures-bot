@@ -52,7 +52,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests pytest
-      - run: pytest -q tests/test_backtest.py tests/test_chain_integration.py tests/test_strategy_to_execution.py tests/test_performance.py
+      - run: pytest -q tests/test_backtest.py tests/test_backtest_accounting.py tests/test_chain_integration.py tests/test_strategy_to_execution.py tests/test_performance.py
 
   reconciler-and-status:
     runs-on: ubuntu-latest
