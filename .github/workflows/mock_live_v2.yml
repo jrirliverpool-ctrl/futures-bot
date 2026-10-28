@@ -1,26 +1,24 @@
 name: Mock Live V2 (Manual — with persistence)
 
 # PERSISTENCE DESIGN:
-#   - Always operates on `main` (checkout with ref: main, verified at runtime).
-#   - Reads V2 state from `multi_symbol_state_dir/` in the repo.
-#   - Runs one validation cycle.
-#   - If successful AND state is valid AND push succeeds → commits back.
-#   - If ANY of (run fail, validation fail, push fail) → workflow fails;
-#     state advances ONLY inside the runner; artifact is kept for inspection,
-#     but the repo is NOT updated. Next run starts from the committed state.
-#   - V1 (`paper_state_dir/`) is NEVER staged, committed, or touched.
-#   - Concurrency group prevents overlapping V2 runs.
+#   - Always operates on `main`.
+#   - After checkout, force-syncs with origin/main (git reset --hard).
+#   - `git add -f state.json` overrides .gitignore (V1 does the same with -f).
+#   - Backups (state.json.bak.*) are blocked by .gitignore.
+#   - No git pull --rebase: if push conflicts, FAIL LOUDLY. The next run
+#     will start from the newly-committed origin/main state.
+#   - V1 (paper_state_dir/) is NEVER staged, committed, or touched.
 #
 # CRON IS DISABLED. Enable only after:
-#   1. Two consecutive manual runs prove state advances correctly.
-#   2. Failure modes verified (save fail, push fail → no silent advance).
-#   3. User explicitly approves.
+#   1. Two consecutive manual runs (>=60s gap) prove state advances.
+#   2. state.json is verified present in main after first run.
+#   3. Failure modes verified (push fail → no silent advance).
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # required for state commit-back
+  contents: write
 
 concurrency:
   group: mock-live-v2
@@ -32,20 +30,31 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      # === 0. Enforce running on main ===
       - name: Verify branch is main
         run: |
           if [ "${GITHUB_REF_NAME}" != "main" ]; then
-            echo "❌ This workflow must run on 'main'. Got: ${GITHUB_REF_NAME}"
+            echo "❌ Must run on 'main'. Got: ${GITHUB_REF_NAME}"
             exit 1
           fi
-          echo "✅ Running on branch: main"
 
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 1
+          fetch-depth: 0
+
+      - name: Sync with origin/main
+        run: |
+          git fetch origin main
+          local_sha=$(git rev-parse HEAD)
+          remote_sha=$(git rev-parse origin/main)
+          echo "Local HEAD:  $local_sha"
+          echo "origin/main: $remote_sha"
+          if [ "$local_sha" != "$remote_sha" ]; then
+            echo "⚠️  Local != origin/main — resetting"
+            git reset --hard origin/main
+          fi
+          echo "✅ HEAD: $(git rev-parse --short HEAD)"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -57,7 +66,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pytest
 
-      # === 1. Capture pre-run snapshot ===
       - name: Capture pre-run snapshot
         id: pre
         run: |
@@ -65,14 +73,10 @@ jobs:
             echo "STATE_PRESENT=true" >> "$GITHUB_OUTPUT"
             python3 <<'PYEOF' >> "$GITHUB_OUTPUT"
           import json
-          with open("multi_symbol_state_dir/state.json") as f:
-              s = json.load(f)
+          s = json.loads(open("multi_symbol_state_dir/state.json").read())
           print(f"PRE_EQUITY={s.get('equity')}")
-          lpcts = [
-              v.get("last_processed_candle_ts")
-              for v in s.get("symbols", {}).values()
-              if v.get("last_processed_candle_ts") is not None
-          ]
+          lpcts = [v.get("last_processed_candle_ts") for v in s.get("symbols", {}).values()
+                   if v.get("last_processed_candle_ts") is not None]
           if lpcts:
               print(f"PRE_MIN_LPCT={min(lpcts)}")
               print(f"PRE_MAX_LPCT={max(lpcts)}")
@@ -85,26 +89,20 @@ jobs:
             echo "PRE_EQUITY=absent" >> "$GITHUB_OUTPUT"
             echo "PRE_MIN_LPCT=None" >> "$GITHUB_OUTPUT"
             echo "PRE_MAX_LPCT=None" >> "$GITHUB_OUTPUT"
-            echo "⚠️  No state.json in repo — V2 will initialize FRESH state."
           fi
 
-      # === 2. Run V2 cycle ===
-      - name: Run V2 multi-symbol cycle
+      - name: Run V2 cycle
         id: run
         env:
           STATE_DIR: ./multi_symbol_state_dir
           INTERVAL: "1h"
-        run: |
-          python scripts/run_multi_symbol.py
+        run: python scripts/run_multi_symbol.py
 
-      # === 3. Strict state validation (before any commit) ===
       - name: Validate state — strict
         id: validate
         run: |
           python3 <<'PYEOF'
-          import json
-          import math
-          import sys
+          import json, math, sys
           from pathlib import Path
 
           STATE_PATH = Path("multi_symbol_state_dir/state.json")
@@ -114,155 +112,118 @@ jobs:
               print(f"❌ VALIDATION FAIL: {msg}")
               sys.exit(1)
 
-          # 1. File exists
-          if not STATE_PATH.exists():
-              fail("state.json missing after run")
+          if not STATE_PATH.exists(): fail("state.json missing")
+          try: s = json.loads(STATE_PATH.read_text())
+          except json.JSONDecodeError as e: fail(f"invalid JSON: {e}")
+          try: expected = set(json.loads(WL_PATH.read_text())["symbols"])
+          except Exception as e: fail(f"whitelist: {e}")
 
-          # 2. Load
-          try:
-              with open(STATE_PATH) as f:
-                  s = json.load(f)
-          except json.JSONDecodeError as e:
-              fail(f"state.json not valid JSON: {e}")
+          if s.get("version") != "2.0.0": fail(f"version={s.get('version')}")
+          if s.get("schema") != "multi_symbol_v1": fail(f"schema={s.get('schema')}")
 
-          # 3. Load whitelist for symbol expectation
-          try:
-              with open(WL_PATH) as f:
-                  wl = json.load(f)
-              expected_symbols = set(wl["symbols"])
-          except Exception as e:
-              fail(f"cannot load whitelist: {e}")
-
-          # 4. Schema
-          if s.get("version") != "2.0.0":
-              fail(f"version != 2.0.0 (got {s.get('version')})")
-          if s.get("schema") != "multi_symbol_v1":
-              fail(f"schema != multi_symbol_v1 (got {s.get('schema')})")
-
-          # 5. Equity invariants
           for k in ("initial_equity", "equity", "peak_equity"):
               v = s.get(k)
-              if isinstance(v, bool) or not isinstance(v, (int, float)):
-                  fail(f"{k} not a number: {v!r}")
-              if not math.isfinite(v):
-                  fail(f"{k} not finite: {v}")
-              if v < 0:
-                  fail(f"{k} < 0: {v}")
-          if s["peak_equity"] < s["initial_equity"]:
-              fail(f"peak < initial: {s['peak_equity']} < {s['initial_equity']}")
+              if isinstance(v, bool) or not isinstance(v, (int, float)): fail(f"{k} type")
+              if not math.isfinite(v): fail(f"{k} not finite")
+              if v < 0: fail(f"{k} negative")
+          if s["peak_equity"] < s["initial_equity"]: fail("peak < initial")
 
-          # 6. Symbols: exact match to whitelist
           syms = s.get("symbols")
-          if not isinstance(syms, dict):
-              fail(f"symbols not a dict: {type(syms).__name__}")
-          got = set(syms.keys())
-          if got != expected_symbols:
-              missing = expected_symbols - got
-              extra = got - expected_symbols
-              fail(f"symbol mismatch. Missing: {sorted(missing)}, Extra: {sorted(extra)}")
+          if not isinstance(syms, dict): fail("symbols not dict")
+          if set(syms.keys()) != expected: fail(f"symbol mismatch: {set(syms.keys()) ^ expected}")
 
-          # 7. Per-symbol required fields
-          required = {"last_processed_candle_ts", "cooldown_until_index",
-                      "pending_entry", "position", "last_funding_ts"}
+          req = {"last_processed_candle_ts", "cooldown_until_index",
+                 "pending_entry", "position", "last_funding_ts"}
           for sym, ss in syms.items():
-              if not isinstance(ss, dict):
-                  fail(f"{sym}: state not dict")
-              missing = required - set(ss.keys())
-              if missing:
-                  fail(f"{sym}: missing fields {sorted(missing)}")
-              pos = ss.get("position")
-              pend = ss.get("pending_entry")
-              if pos is not None and pend is not None:
-                  fail(f"{sym}: has BOTH position and pending_entry")
+              if not isinstance(ss, dict): fail(f"{sym} not dict")
+              if req - set(ss.keys()): fail(f"{sym} missing: {req - set(ss.keys())}")
+              if ss.get("position") is not None and ss.get("pending_entry") is not None:
+                  fail(f"{sym} position+pending")
 
-          # 8. Capacity invariant
           mcp = s.get("max_concurrent_positions")
-          if isinstance(mcp, bool) or not isinstance(mcp, int) or mcp < 1:
-              fail(f"max_concurrent_positions invalid: {mcp!r}")
-          reserved = sum(
-              1 for ss in syms.values()
-              if ss.get("position") is not None or ss.get("pending_entry") is not None
-          )
-          if reserved > mcp:
-              fail(f"capacity exceeded: {reserved} > {mcp}")
+          if isinstance(mcp, bool) or not isinstance(mcp, int) or mcp < 1: fail(f"mcp={mcp!r}")
+          reserved = sum(1 for ss in syms.values()
+                        if ss.get("position") is not None or ss.get("pending_entry") is not None)
+          if reserved > mcp: fail(f"capacity {reserved}>{mcp}")
 
           print(f"✅ State valid: {len(syms)} symbols, equity={s['equity']}")
           PYEOF
 
-      # === 4. Non-regression check vs pre-run (if state existed before) ===
       - name: Verify no LPCT regression
         if: steps.pre.outputs.STATE_PRESENT == 'true'
         run: |
           python3 <<'PYEOF'
-          import json
-          import subprocess
-          import sys
+          import json, subprocess, sys
+          try:
+              pre_raw = subprocess.check_output(
+                  ["git", "show", "HEAD:multi_symbol_state_dir/state.json"],
+                  stderr=subprocess.DEVNULL,
+              ).decode()
+              pre = json.loads(pre_raw)
+          except subprocess.CalledProcessError:
+              print("⚠️  No committed state.json at HEAD — skipping regression check")
+              sys.exit(0)
 
-          # Load pre-run state from git (the one committed before this run)
-          pre_raw = subprocess.check_output(
-              ["git", "show", "HEAD:multi_symbol_state_dir/state.json"]
-          ).decode()
-          pre = json.loads(pre_raw)
-
-          with open("multi_symbol_state_dir/state.json") as f:
-              post = json.load(f)
-
+          post = json.loads(open("multi_symbol_state_dir/state.json").read())
           regressions = []
-          for sym in pre.get("symbols", {}):
-              pre_lpct = pre["symbols"][sym].get("last_processed_candle_ts")
-              post_lpct = post["symbols"].get(sym, {}).get("last_processed_candle_ts")
-              if pre_lpct is not None and post_lpct is not None:
-                  if post_lpct < pre_lpct:
-                      regressions.append((sym, pre_lpct, post_lpct))
-
+          for sym, ps in pre.get("symbols", {}).items():
+              pl = ps.get("last_processed_candle_ts")
+              ql = post.get("symbols", {}).get(sym, {}).get("last_processed_candle_ts")
+              if pl is not None and ql is not None and ql < pl:
+                  regressions.append((sym, pl, ql))
           if regressions:
-              print("❌ LPCT regression detected:")
-              for sym, p, q in regressions:
-                  print(f"   {sym}: {p} → {q}")
+              for r in regressions: print(f"❌ regression {r}")
               sys.exit(1)
-
           print("✅ No LPCT regression")
           PYEOF
 
-      # === 5. Commit state back to main ===
       - name: Commit state
         id: commit
         run: |
           git config user.name "ApexQuant Bot"
           git config user.email "apexquant-bot@users.noreply.github.com"
 
-          # Only stage V2 state — V1 (paper_state_dir/) is untouched
+          # Stage all V2 files, BUT force-add state.json to override .gitignore.
+          # This is the exact same pattern V1 uses: `git add -f`.
           git add multi_symbol_state_dir/
+          git add -f multi_symbol_state_dir/state.json
+
+          # Defensive: unstage any .bak that somehow got staged
+          git reset -q -- multi_symbol_state_dir/state.json.bak.* 2>/dev/null || true
 
           if git diff --cached --quiet; then
-            echo "No state changes to commit."
             echo "COMMITTED=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "chore(v2): auto-update multi-symbol state [skip ci]"
             echo "COMMITTED=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # === 6. Push with explicit failure handling ===
-      - name: Push to main (fail-closed)
+      - name: Push to main (fail-closed, no rebase)
         if: steps.commit.outputs.COMMITTED == 'true'
         run: |
-          # Ensure we're on main
-          current_branch=$(git rev-parse --abbrev-ref HEAD)
-          if [ "$current_branch" != "main" ]; then
-            echo "❌ Refusing to push: current branch is '$current_branch', not 'main'"
-            exit 1
+          if [ "$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then
+            echo "❌ Not on main — aborting"; exit 1
           fi
 
           if ! git push origin main; then
-            echo "❌ PUSH FAILED — state NOT persisted to repo."
-            echo "   This run's state exists only in the artifact below."
-            echo "   Next run will start from the last COMMITTED state."
+            echo "❌ PUSH FAILED — state NOT persisted."
+            echo "   Local state exists only in artifact below."
+            echo "   Next run will start from last committed state on origin/main."
             exit 1
           fi
           echo "✅ State pushed to main"
 
-      # === 7. Artifact (always, even on failure) ===
-      - name: Upload artifact (always)
+      - name: Verify state.json is tracked in HEAD
+        if: steps.commit.outputs.COMMITTED == 'true'
+        run: |
+          if git ls-tree -r HEAD --name-only | grep -q "^multi_symbol_state_dir/state.json$"; then
+            echo "✅ state.json is tracked in HEAD"
+          else
+            echo "❌ state.json NOT in HEAD tree — persistence is broken"
+            exit 1
+          fi
+
+      - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -271,58 +232,39 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # === 8. Summary ===
       - name: Show summary
         if: always()
         run: |
           echo "## Mock Live V2 Run" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Branch:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### Pre-run snapshot" >> "$GITHUB_STEP_SUMMARY"
-          echo "- State existed in repo: \`${{ steps.pre.outputs.STATE_PRESENT }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Pre-run" >> "$GITHUB_STEP_SUMMARY"
+          echo "- State existed: \`${{ steps.pre.outputs.STATE_PRESENT }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Equity: \`${{ steps.pre.outputs.PRE_EQUITY }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Min LPCT: \`${{ steps.pre.outputs.PRE_MIN_LPCT }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Max LPCT: \`${{ steps.pre.outputs.PRE_MAX_LPCT }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### Outcome" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Run step: \`${{ steps.run.outcome }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Validate step: \`${{ steps.validate.outcome }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Commit step: \`${{ steps.commit.outcome }}\` (\`${{ steps.commit.outputs.COMMITTED }}\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Steps" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Run: \`${{ steps.run.outcome }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Validate: \`${{ steps.validate.outcome }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`${{ steps.commit.outputs.COMMITTED }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-
           if [ -f multi_symbol_state_dir/state.json ]; then
-            echo "### Post-run state" >> "$GITHUB_STEP_SUMMARY"
             python3 <<'PYEOF' >> "$GITHUB_STEP_SUMMARY"
           import json
-          with open("multi_symbol_state_dir/state.json") as f:
-              s = json.load(f)
-          print(f"- **Equity:** {s.get('equity')}")
-          positions = [(k, v['position']) for k, v in s.get('symbols', {}).items() if v.get('position')]
-          pendings = [(k, v['pending_entry']) for k, v in s.get('symbols', {}).items() if v.get('pending_entry')]
-          print(f"- **Open positions:** {len(positions)}")
-          for sym, p in positions:
-              print(f"  - `{sym}`: {p.get('side')} size={p.get('size')}")
-          print(f"- **Pending entries:** {len(pendings)}")
-          for sym, p in pendings:
-              print(f"  - `{sym}`: {p.get('side')}")
+          s = json.loads(open("multi_symbol_state_dir/state.json").read())
+          print(f"### Post-run equity: {s['equity']}")
           print()
-          print("### Per-symbol progress")
-          print("| Symbol | last_processed_candle_ts |")
+          print("| Symbol | last_processed |")
           print("|---|---|")
           for sym, ss in s.get("symbols", {}).items():
               print(f"| {sym} | {ss.get('last_processed_candle_ts')} |")
-          lpcts = [v.get('last_processed_candle_ts') for v in s.get('symbols', {}).values() if v.get('last_processed_candle_ts')]
+          lpcts = [v.get('last_processed_candle_ts') for v in s['symbols'].values()
+                   if v.get('last_processed_candle_ts')]
           if lpcts:
               print()
-              print(f"- **Post Min LPCT:** {min(lpcts)}")
-              print(f"- **Post Max LPCT:** {max(lpcts)}")
+              print(f"- Min LPCT: {min(lpcts)}")
+              print(f"- Max LPCT: {max(lpcts)}")
           PYEOF
-          else
-            echo "⚠️ No state.json generated." >> "$GITHUB_STEP_SUMMARY"
           fi
-
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Cron:** disabled. Verify two consecutive runs before enabling." >> "$GITHUB_STEP_SUMMARY"
+          echo "**Cron:** disabled." >> "$GITHUB_STEP_SUMMARY"
