@@ -1,6 +1,6 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.7 - Single-symbol + specific leverage rejection reasons.
+v3.8 - Circuit Breaker fix: propagate losses to daily/weekly trackers.
 """
 
 import copy
@@ -151,7 +151,6 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     entry_price = apply_slippage(open_price, is_entry=True, side=side, slip_pct=config["slippage_pct"])
     sl, tp1 = compute_initial_levels(entry_price, pending["atr_at_signal"], side, config)
 
-    # ✅ اعتبارسنجی صریح Leverage قبل از محاسبه حجم (طبق نیاز تست‌ها)
     lev = config.get("leverage")
     lev_cap = config.get("leverage_cap")
     if lev is not None:
@@ -337,6 +336,21 @@ def close_position(state, pos, exit_price, specs, config):
     pnl_for_equity = pnl_remaining - final_commission
     state["equity"] += pnl_for_equity
     update_peak_equity(state)
+
+    # ✅ v3.8 BUG FIX: propagate realized losses to period trackers.
+    # Without this, daily_loss/weekly_loss stay at 0 forever and
+    # Circuit Breaker can never fire (even after cumulative losses
+    # far exceed configured thresholds).
+    #
+    # Semantics: GROSS-LOSS — accumulate only the absolute value of
+    # losing trades. Winning trades do NOT reduce this counter.
+    # (Conservative: CB fires as soon as cumulative losses exceed
+    # the threshold, regardless of wins — appropriate for risk
+    # protection on a strategy that mostly loses.)
+    if pnl_net < 0:
+        loss = abs(pnl_net)
+        state["daily_loss"] = state.get("daily_loss", 0.0) + loss
+        state["weekly_loss"] = state.get("weekly_loss", 0.0) + loss
 
     return {
         "pnl_gross": pnl_gross, "final_commission": final_commission,
