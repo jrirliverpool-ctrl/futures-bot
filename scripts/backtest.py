@@ -1,6 +1,13 @@
 """
-backtest.py — Historical backtest engine (v2.2).
+backtest.py — Historical backtest engine (v2.3).
+
+v2.3 fixes:
+  - compute_mtm_equity no longer double-counts TP1 (already in equity)
+  - compute_metrics prefers trade_net_pnl_usd (net) over pnl_usd (gross)
+  - forced-close at end emits trade_net_pnl_usd for metric consistency
+  - forced-close updates both mtm_curve[-1] and realized_curve[-1]
 """
+
 import json
 from indicators import compute_all
 from strategy import evaluate_signal
@@ -11,6 +18,14 @@ from state_manager import default_state
 
 
 def compute_mtm_equity(state, close_price, specs):
+    """
+    Mark-to-market equity = realized equity + unrealized PnL of remaining leg.
+
+    IMPORTANT: `state["equity"]` ALREADY includes TP1 realized PnL (net of
+    TP1 commission) — paper_engine.process_candle adds it on TP1_HIT.
+    Therefore we MUST NOT add `pos["realized_pnl"]` again (that would
+    double-count the TP1 leg in MTM).
+    """
     realized = state["equity"]
     pos = state.get("position")
     if pos is None:
@@ -20,9 +35,8 @@ def compute_mtm_equity(state, close_price, specs):
     remaining = pos["remaining_size"]
     side = pos["side"]
     dir_sign = 1 if side == "LONG" else -1
-    tp1_realized = pos.get("realized_pnl", 0.0)
     unrealized = remaining * (close_price - entry) * mult * dir_sign
-    return realized + tp1_realized + unrealized
+    return realized + unrealized
 
 
 def generate_signals(klines):
@@ -52,7 +66,7 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
     engine_config = get_engine_config()
     engine_config["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
     engine_config["funding_rates"] = {}
-    
+
     fee_cfg = get_fee_config()
     engine_config["open_taker_fee"] = fee_cfg["open_taker_fee"]
     engine_config["close_taker_fee"] = fee_cfg["close_taker_fee"]
@@ -75,23 +89,32 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
         mtm_curve.append(compute_mtm_equity(state, close_price, specs))
         realized_curve.append(state["equity"])
 
-    # بستن اجباری هر پوزیشن باز در پایان بک‌تست
+    # Force-close any open position at the last candle so all trades are
+    # realized and MTM == equity at end-of-backtest.
     if state.get("position") is not None:
         last_close = float(klines[-1][4])
-        result = close_position(state, state["position"], last_close, specs, engine_config)
+        pos_before_close = state["position"]
+        result = close_position(state, pos_before_close, last_close, specs, engine_config)
         all_events.append({
             "type": "EXIT",
             "reason": "BACKTEST_END",
             "price": last_close,
             "pnl_usd": result["pnl_gross"],
+            "pnl_gross": result["pnl_gross"],
             "commission_usd": result["final_commission"],
+            "total_commission_usd": result["total_commission"],
+            "trade_net_pnl_usd": result["pnl_net"],
+            "exit_price_adj": result["exit_price_adj"],
+            "entry_price": pos_before_close["entry_price"],
             "timestamp": int(klines[-1][0]),
             "seq": seq,
             "candle_index": len(klines) - 1,
         })
         seq += 1
         state["position"] = None
+        # Both curves must reflect the post-close state at the last index
         realized_curve[-1] = state["equity"]
+        mtm_curve[-1] = state["equity"]
 
     metrics = compute_metrics(
         mtm_curve, all_events, initial_equity,
@@ -134,11 +157,14 @@ def compute_metrics(equity_curve, events, initial_equity, realized_final=None):
     max_dd_pct = max_dd * 100.0
 
     exit_events = [e for e in events if e.get("type") == "EXIT"]
+
+    # Prefer net PnL (after ALL costs) for performance metrics.
+    # Fallback to gross for synthetic tests that provide only `pnl_usd`.
     trade_pnls = []
     for e in exit_events:
-        pnl = e.get("pnl_usd")
+        pnl = e.get("trade_net_pnl_usd")
         if pnl is None:
-            pnl = e.get("trade_net_pnl_usd", 0.0)
+            pnl = e.get("pnl_usd", 0.0)
         trade_pnls.append(float(pnl))
 
     total_trades = len(trade_pnls)
@@ -178,7 +204,9 @@ def compute_metrics(equity_curve, events, initial_equity, realized_final=None):
     else:
         sharpe_like_per_trade = 0.0
 
-    calmar_like_simple = (net_return_pct / max_dd_pct) if max_dd_pct > 0 else (float("inf") if net_return_pct > 0 else 0.0)
+    calmar_like_simple = (net_return_pct / max_dd_pct) if max_dd_pct > 0 else (
+        float("inf") if net_return_pct > 0 else 0.0
+    )
 
     event_counts = {}
     for e in events:
