@@ -1,20 +1,5 @@
 """
 strategy_config.py — Single Source of Truth برای پارامترهای ApexQuant V1.
-
-تغییرات نسبت به 1.0.0:
-  - افزودن leverage_per_trade (V1 clarification)
-  - get_engine_config اکنون leverage و leverage_cap را پاس می‌دهد
-
-v1.0.1 (policy v2.2.3):
-  - get_engine_config اکنون be_trigger_at_r را نیز پاس می‌دهد.
-
-v1.0.1 (B1):
-  - get_fee_config() اضافه شد — نرخ‌های کارمزد Toobit.
-    ⚠️ این تابع بخشی از STRATEGY_CONFIG نیست. hash استراتژی
-    تغییر نمی‌کند.
-
-تغییر هر پارامتر در این فایل → strategy_hash عوض می‌شود.
-Spec: docs/strategy_v1.md
 """
 
 STRATEGY_CONFIG = {
@@ -26,7 +11,7 @@ STRATEGY_CONFIG = {
     "atr_period": 14,
     "sl_atr_mult": 1.5,
     "tp1_atr_mult": 2.0,
-    "be_trigger_at_r": 1.0,
+    "be_trigger_at_r": 3.0,  # ✅ آزمایش A: تغییر از 1.0 به 3.0
     "be_sl_offset_atr": 0.1,
     "trailing_atr_mult": 1.5,
     "time_exit_candles": 48,
@@ -40,7 +25,6 @@ STRATEGY_CONFIG = {
     "slippage_pct": 0.0005,
 }
 
-
 DEFAULT_SYMBOL = "BTC-SWAP-USDT"
 
 INTERVAL_MS_MAP = {
@@ -49,7 +33,6 @@ INTERVAL_MS_MAP = {
 }
 
 CANONICAL_KEYS = tuple(sorted(STRATEGY_CONFIG.keys()))
-
 
 def get_strategy_config(overrides: dict = None) -> dict:
     config = dict(STRATEGY_CONFIG)
@@ -62,7 +45,6 @@ def get_strategy_config(overrides: dict = None) -> dict:
         config.update(overrides)
     return config
 
-
 def get_indicator_params() -> dict:
     return {
         "ema_fast_p": STRATEGY_CONFIG["ema_fast_period"],
@@ -70,7 +52,6 @@ def get_indicator_params() -> dict:
         "donchian_p": STRATEGY_CONFIG["donchian_period"],
         "atr_p": STRATEGY_CONFIG["atr_period"],
     }
-
 
 def get_engine_config() -> dict:
     interval_label = STRATEGY_CONFIG["timeframe"]
@@ -96,31 +77,13 @@ def get_engine_config() -> dict:
         "interval_ms": INTERVAL_MS_MAP[interval_label],
     }
 
-
 def get_timeframe_interval_ms() -> int:
     tf = STRATEGY_CONFIG["timeframe"]
     if tf not in INTERVAL_MS_MAP:
         raise ValueError(f"Unknown timeframe: {tf}")
     return INTERVAL_MS_MAP[tf]
 
-
 def get_fee_config() -> dict:
-    """
-    نرخ‌های کارمزد صرافی (Toobit) برای B1.
-
-    ⚠️ این تابع بخشی از STRATEGY_CONFIG نیست. hash استراتژی
-    تغییر نمی‌کند.
-
-    منبع: probe_toobit_commission.py — 2026-10-18
-    نرخ‌های واقعی حساب apextest2 روی BTC-SWAP-USDT.
-
-    قرارداد محاسبه:
-      - open_taker_fee × entry_notional = commission ورود
-      - close_taker_fee × tp1_notional = commission TP1 (partial)
-      - close_taker_fee × final_notional = commission خروج نهایی
-
-    مقادیر به صورت fraction از notional هستند (0.0005 = 0.05%).
-    """
     return {
         "open_taker_fee": 0.0005,
         "close_taker_fee": 0.0005,
