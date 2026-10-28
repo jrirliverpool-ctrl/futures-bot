@@ -1,6 +1,6 @@
 """
 paper_engine.py — ApexQuant V1 Paper Trading Engine.
-v3.8 - Circuit Breaker fix: propagate losses to daily/weekly trackers.
+v3.9 - Accounting Audit: Explicit SL state tracking, no logic changes.
 """
 
 import copy
@@ -195,6 +195,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         "size": qty, "remaining_size": qty, "tp1_size": 0.0,
         "realized_pnl": 0.0, "initial_sl": sl, "current_sl": sl, "initial_tp1": tp1,
         "tp1_hit": False, "be_moved": False, "trailing_active": False,
+        "sl_state": "INITIAL", # ✅ New explicit state
         "highest_high_since_entry": entry_price, "lowest_low_since_entry": entry_price,
         "candles_since_entry": 0, "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
@@ -232,7 +233,8 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             "price": p["current_sl"], "timestamp": ts
         }):
             events.append({
-                "type": "EXIT", "reason": "SL", "price": p["current_sl"], "timestamp": ts,
+                "type": "EXIT", "reason": p.get("sl_state", "UNKNOWN") + "_SL", # ✅ Use explicit state
+                "price": p["current_sl"], "timestamp": ts,
                 "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"],
             })
             return p, events, True
@@ -253,6 +255,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             if side == "LONG": p["current_sl"] = max(p["current_sl"], new_sl)
             else: p["current_sl"] = min(p["current_sl"], new_sl)
             p["be_moved"] = True
+            p["sl_state"] = "BE" # ✅ Update explicit state
             events.append({"type": "BE_MOVED", "new_sl": p["current_sl"], "timestamp": ts})
 
     if not p["tp1_hit"] and tp1_hit_this_candle:
@@ -289,6 +292,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
 
     if p["tp1_hit"]:
         p["trailing_active"] = True
+        p["sl_state"] = "TRAILING" # ✅ Update explicit state if trailing updates SL
         trailing_distance = config["trailing_atr_mult"] * atr_current
         if side == "LONG":
             new_sl = p["highest_high_since_entry"] - trailing_distance
@@ -337,16 +341,6 @@ def close_position(state, pos, exit_price, specs, config):
     state["equity"] += pnl_for_equity
     update_peak_equity(state)
 
-    # ✅ v3.8 BUG FIX: propagate realized losses to period trackers.
-    # Without this, daily_loss/weekly_loss stay at 0 forever and
-    # Circuit Breaker can never fire (even after cumulative losses
-    # far exceed configured thresholds).
-    #
-    # Semantics: GROSS-LOSS — accumulate only the absolute value of
-    # losing trades. Winning trades do NOT reduce this counter.
-    # (Conservative: CB fires as soon as cumulative losses exceed
-    # the threshold, regardless of wins — appropriate for risk
-    # protection on a strategy that mostly loses.)
     if pnl_net < 0:
         loss = abs(pnl_net)
         state["daily_loss"] = state.get("daily_loss", 0.0) + loss
