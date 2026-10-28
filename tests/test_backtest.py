@@ -6,6 +6,11 @@ test_backtest.py — Unit tests for backtest.py.
 v1.1 (B1 — Commission):
   - test_realized_equity_consistency: حالا commission را در expected
     لحاظ می‌کند: equity = initial + Σ(pnl_gross) − Σ(commission)
+
+v1.2 (MTM fix):
+  - test_mtm_includes_tp1_realized → test_mtm_does_not_double_count_tp1_realized
+    دلیل: از v3.6، paper_engine هنگام TP1، سود خالص را به equity اضافه
+    می‌کند. بنابراین realized_pnl نباید دوباره به MTM اضافه شود.
 """
 
 import os
@@ -262,7 +267,25 @@ def test_mtm_includes_unrealized_short():
     assert abs(mtm - (1000.0 + 0.005)) < 1e-12
 
 
-def test_mtm_includes_tp1_realized():
+def test_mtm_does_not_double_count_tp1_realized():
+    """
+    MTM must NOT re-add pos["realized_pnl"].
+
+    Why this test changed:
+      - v3.2 behavior: TP1 credit was NOT applied to state["equity"] in
+        paper_engine; MTM had to add pos["realized_pnl"] itself.
+      - v3.6+ behavior: paper_engine.process_candle (TP1_HIT branch) does
+        `state["equity"] += pnl_tp1 - commission_tp1`. So state["equity"]
+        ALREADY includes TP1 net.
+      - Old test (`test_mtm_includes_tp1_realized`) asserted the v3.2
+        semantics (equity + realized_pnl + unrealized), which now
+        DOUBLE-COUNTS TP1. That was a bug the test was locking in.
+
+    Given: equity=1000 (already post-TP1-net), remaining=0.5 units,
+           entry=100, close=110, mult=0.001
+    Unrealized = 0.5 * (110-100) * 0.001 = 0.005
+    MTM = 1000 + 0.005 = 1000.005
+    """
     state = {
         "equity": 1000.0,
         "position": {
@@ -273,7 +296,7 @@ def test_mtm_includes_tp1_realized():
         },
     }
     mtm = compute_mtm_equity(state, close_price=110.0, specs=SPECS)
-    assert abs(mtm - 1000.009) < 1e-12
+    assert abs(mtm - 1000.005) < 1e-12
 
 
 def test_mtm_no_position():
@@ -469,7 +492,7 @@ if __name__ == "__main__":
         test_mtm_equals_realized_when_no_position,
         test_mtm_includes_unrealized_long,
         test_mtm_includes_unrealized_short,
-        test_mtm_includes_tp1_realized,
+        test_mtm_does_not_double_count_tp1_realized,
         test_mtm_no_position,
         test_one_trade_per_exit_event,
         test_exit_reason_count_matches_trades,
