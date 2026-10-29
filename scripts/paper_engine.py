@@ -291,16 +291,21 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
                 "reason": None, "ambiguous_exit": False, "timestamp": ts, "exit_price_adj": None,
             })
 
+    # ✅ FIX 1: Only set TRAILING if the SL actually improves
     if p["tp1_hit"]:
         p["trailing_active"] = True
-        p["sl_state"] = "TRAILING" # ✅ Update state
         trailing_distance = config["trailing_atr_mult"] * atr_current
+        old_sl = p["current_sl"]
         if side == "LONG":
             new_sl = p["highest_high_since_entry"] - trailing_distance
             p["current_sl"] = max(p["current_sl"], new_sl)
         else:
             new_sl = p["lowest_low_since_entry"] + trailing_distance
             p["current_sl"] = min(p["current_sl"], new_sl)
+
+        # Only update state to TRAILING if the stop loss actually moved forward
+        if (side == "LONG" and p["current_sl"] > old_sl) or (side == "SHORT" and p["current_sl"] < old_sl):
+            p["sl_state"] = "TRAILING"
 
     p["candles_since_entry"] += 1
     if p["candles_since_entry"] >= config["time_exit_candles"]:
