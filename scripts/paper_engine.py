@@ -195,7 +195,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         "size": qty, "remaining_size": qty, "tp1_size": 0.0,
         "realized_pnl": 0.0, "initial_sl": sl, "current_sl": sl, "initial_tp1": tp1,
         "tp1_hit": False, "be_moved": False, "trailing_active": False,
-        "sl_state": "INITIAL", # ✅ New explicit state
+        "sl_state": "INITIAL", # ✅ Explicit state
         "highest_high_since_entry": entry_price, "lowest_low_since_entry": entry_price,
         "candles_since_entry": 0, "atr_at_entry": pending["atr_at_signal"],
         "signal_candle_ts": pending["signal_candle_ts"],
@@ -232,8 +232,9 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             "intent": "EXIT", "side": side, "qty": p["remaining_size"],
             "price": p["current_sl"], "timestamp": ts
         }):
+            exit_reason = f"{p.get('sl_state', 'UNKNOWN')}_SL"
             events.append({
-                "type": "EXIT", "reason": p.get("sl_state", "UNKNOWN") + "_SL", # ✅ Use explicit state
+                "type": "EXIT", "reason": exit_reason, # ✅ Explicit state used here
                 "price": p["current_sl"], "timestamp": ts,
                 "ambiguous": tp1_hit_this_candle, "remaining_size": p["remaining_size"],
             })
@@ -255,7 +256,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
             if side == "LONG": p["current_sl"] = max(p["current_sl"], new_sl)
             else: p["current_sl"] = min(p["current_sl"], new_sl)
             p["be_moved"] = True
-            p["sl_state"] = "BE" # ✅ Update explicit state
+            p["sl_state"] = "BE" # ✅ Update state
             events.append({"type": "BE_MOVED", "new_sl": p["current_sl"], "timestamp": ts})
 
     if not p["tp1_hit"] and tp1_hit_this_candle:
@@ -292,7 +293,7 @@ def manage_position_on_candle(pos, candle, atr_current, config, exit_callback=No
 
     if p["tp1_hit"]:
         p["trailing_active"] = True
-        p["sl_state"] = "TRAILING" # ✅ Update explicit state if trailing updates SL
+        p["sl_state"] = "TRAILING" # ✅ Update state
         trailing_distance = config["trailing_atr_mult"] * atr_current
         if side == "LONG":
             new_sl = p["highest_high_since_entry"] - trailing_distance
