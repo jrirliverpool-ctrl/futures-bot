@@ -1,12 +1,11 @@
 """
-run_real_backtest.py — CLI entry point for running a smoke backtest against real Toobit data.
+scripts/run_real_backtest.py — CLI entry point for running a smoke backtest against real Toobit data.
 Generates: reports/trades.csv, reports/equity_curve.csv, and prints Summary.
 """
 
-import argparse
+import os
 import csv
 import json
-import os
 from datetime import datetime, timezone
 from data_feed import fetch_closed_klines
 from symbol_specs import get_symbol_specs
@@ -30,13 +29,13 @@ def generate_trades_csv(events, klines, specs, filepath):
             initial_sl = entry_event["sl"]
             risk_dist = abs(entry_price - initial_sl)
             
-            # ✅ FIX 2: Use contract multiplier for exact Risk and R-multiple
+            # ✅ Use contract multiplier for exact Risk and R-multiple
             risk_usd = risk_dist * size * mult
             pnl_gross = e.get("pnl_usd", 0.0)
             pnl_net = e.get("trade_net_pnl_usd", pnl_gross)
             r_multiple = pnl_gross / risk_usd if risk_usd > 0 else 0.0
             
-            # ✅ FIX 3: Extract exact timestamps from klines
+            # ✅ Extract exact timestamps from klines
             entry_ts = klines[entry_event["candle_index"]][0] if entry_event.get("candle_index") is not None else ""
             exit_ts = klines[e["candle_index"]][0] if e.get("candle_index") is not None else ""
             
@@ -89,7 +88,7 @@ def generate_equity_curve_csv(result, klines, filepath):
             if eq_mtm > peak: peak = eq_mtm
             dd = (peak - eq_mtm) / peak * 100 if peak > 0 else 0.0
             
-            # ✅ FIX 3: Extract actual timestamps
+            # ✅ Extract actual timestamps
             ts_ms = klines[i][0] if i < len(klines) else ""
             ts_iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat() if ts_ms != "" else ""
             
@@ -97,40 +96,39 @@ def generate_equity_curve_csv(result, klines, filepath):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol", default="BTC-SWAP-USDT")
-    parser.add_argument("--interval", default="1h")
-    parser.add_argument("--limit", type=int, default=1000)
-    parser.add_argument("--initial_equity", type=float, default=1000.0)
-    args = parser.parse_args()
+    # ✅ Read from environment variables (matches GitHub Actions)
+    symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
+    interval = os.environ.get("INTERVAL", "1h")
+    limit = int(os.environ.get("LIMIT", "500"))
+    initial_equity = float(os.environ.get("INITIAL_EQUITY", "1000.0"))
 
     print("=" * 70)
     print("🚀 REAL TOOBIT SMOKE BACKTEST (ACCOUNTING AUDIT)")
     print("=" * 70)
-    print(f"  symbol         : {args.symbol}")
-    print(f"  interval       : {args.interval}")
-    print(f"  limit          : {args.limit}")
-    print(f"  initial_equity : {args.initial_equity}")
+    print(f"  symbol         : {symbol}")
+    print(f"  interval       : {interval}")
+    print(f"  limit          : {limit}")
+    print(f"  initial_equity : {initial_equity}")
     print("=" * 70)
 
     print("\n📋 Fetching symbol specs...")
-    specs = get_symbol_specs(args.symbol)
+    specs = get_symbol_specs(symbol)
     print(f"  contract_multiplier : {specs.get('contract_multiplier')}")
 
-    print(f"\n📥 Fetching {args.limit} closed candles...")
-    klines = fetch_closed_klines(args.symbol, args.interval, args.limit)
+    print(f"\n📥 Fetching {limit} closed candles...")
+    klines = fetch_closed_klines(symbol, interval, limit)
     print(f"  received {len(klines)} closed candles")
 
     print("\n🧠 Running backtest...")
-    result = run_backtest(klines, specs, initial_equity=args.initial_equity, symbol=args.symbol)
+    result = run_backtest(klines, specs, initial_equity=initial_equity, symbol=symbol)
     print("✅ Backtest completed\n")
 
-    # Print Metrics to stdout
+    # Print Metrics to stdout (Matches regex in Workflow)
     print(format_metrics(result["metrics"]))
     
-    # Generate CSVs
-    trades_path = f"backtest-out/{args.symbol}_trades.csv"
-    equity_path = f"backtest-out/{args.symbol}_equity_curve.csv"
+    # ✅ Save to 'reports/' directory as expected by Workflow
+    trades_path = f"reports/trades.csv"
+    equity_path = f"reports/equity_curve.csv"
     
     num_trades = generate_trades_csv(result["events"], klines, specs, trades_path)
     generate_equity_curve_csv(result, klines, equity_path)
