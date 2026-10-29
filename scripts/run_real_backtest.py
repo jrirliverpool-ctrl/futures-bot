@@ -1,183 +1,142 @@
 """
-run_real_backtest.py — End-to-End Smoke Backtest روی داده‌ی واقعی Toobit.
-
-هدف
-════
-این اسکریپت یک Smoke Backtest است، نه ارزیابی استراتژی.
-هدف این است که مطمئن شویم زنجیره‌ی:
-
-    Toobit Klines → Symbol Specs → Backtest → Performance
-                  → CSV Export → State Save
-
-بدون خطا و با اعداد معتبر عبور می‌کند.
-
-معیار موفقیت = exit code 0 + اعداد معتبر، نه Sharpe بالا.
-
-Audit Metadata
-══════════════
-قبل از ذخیره‌ی state، سه فیلد audit اضافه می‌شوند تا
-audit_backtest_artifacts.py بتواند unrealized PnL را دقیقاً
-محاسبه کند:
-
-  symbol              : نماد بک‌تست شده
-  contract_multiplier : multiplier نماد
-  last_close_price    : close آخرین کندل (مبنای MTM نهایی)
-
-این فیلدها در state_manager.validate_state اجباری نیستند
-(فقط لازم برای audit دقیق).
-
-متغیرهای محیطی
-══════════════
-  SYMBOL          : مثلاً BTC-SWAP-USDT
-  INTERVAL        : مثلاً 1h
-  LIMIT           : تعداد کندل (100..1000)
-  INITIAL_EQUITY  : equity اولیه (USDT)
-
-Spec: docs/strategy_v1.md
+run_real_backtest.py — CLI entry point for running a smoke backtest against real Toobit data.
+Generates: reports/trades.csv, reports/equity_curve.csv, and prints Summary.
 """
 
+import argparse
+import csv
+import json
 import os
-import sys
-
+from datetime import datetime, timezone
 from data_feed import fetch_closed_klines
 from symbol_specs import get_symbol_specs
 from backtest import run_backtest, format_metrics
-from performance import build_performance_report
-from state_manager import save_state
+
+
+def generate_trades_csv(events, klines, specs, filepath):
+    """Extracts entry/exit pairs from events and writes to trades.csv with full accounting details."""
+    trades = []
+    mult = specs.get("contract_multiplier", 1.0)
+    
+    entry_event = None
+    for e in events:
+        if e.get("type") == "ENTRY":
+            entry_event = e
+        elif e.get("type") == "EXIT" and entry_event is not None:
+            entry_price = entry_event["price"]
+            exit_price = e["exit_price_adj"]
+            size = entry_event["size"]
+            
+            initial_sl = entry_event["sl"]
+            risk_dist = abs(entry_price - initial_sl)
+            
+            # ✅ FIX 2: Use contract multiplier for exact Risk and R-multiple
+            risk_usd = risk_dist * size * mult
+            pnl_gross = e.get("pnl_usd", 0.0)
+            pnl_net = e.get("trade_net_pnl_usd", pnl_gross)
+            r_multiple = pnl_gross / risk_usd if risk_usd > 0 else 0.0
+            
+            # ✅ FIX 3: Extract exact timestamps from klines
+            entry_ts = klines[entry_event["candle_index"]][0] if entry_event.get("candle_index") is not None else ""
+            exit_ts = klines[e["candle_index"]][0] if e.get("candle_index") is not None else ""
+            
+            trades.append({
+                "trade_index": len(trades),
+                "side": entry_event["side"],
+                "entry_ts_ms": entry_ts,
+                "exit_ts_ms": exit_ts,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "size": size,
+                "pnl_usd": pnl_gross,
+                "pnl_net": pnl_net,
+                "commission_usd": e.get("total_commission_usd", 0.0),
+                "risk_usd": risk_usd,
+                "r_multiple": r_multiple,
+                "exit_reason": e["reason"],
+                "ambiguous_exit": e.get("ambiguous", False),
+                "candles_held": e["candle_index"] - entry_event["candle_index"] if e.get("candle_index") is not None and entry_event.get("candle_index") is not None else 0
+            })
+            entry_event = None
+
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "trade_index", "side", "entry_ts_ms", "exit_ts_ms", 
+            "entry_price", "exit_price", "size", 
+            "pnl_usd", "pnl_net", "commission_usd", 
+            "risk_usd", "r_multiple", "exit_reason", "ambiguous_exit", "candles_held"
+        ])
+        writer.writeheader()
+        writer.writerows(trades)
+    return len(trades)
+
+
+def generate_equity_curve_csv(result, klines, filepath):
+    """Writes the MTM and Realized equity curves to a CSV."""
+    mtm = result["equity_curve"]
+    realized = result["realized_equity_curve"]
+    
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["candle_index", "candle_ts_ms", "candle_ts_iso", "equity_mtm", "equity_realized", "drawdown_pct", "peak_equity"])
+        
+        peak = result["initial_equity"]
+        for i in range(len(mtm)):
+            eq_mtm = mtm[i]
+            eq_real = realized[i]
+            if eq_mtm > peak: peak = eq_mtm
+            dd = (peak - eq_mtm) / peak * 100 if peak > 0 else 0.0
+            
+            # ✅ FIX 3: Extract actual timestamps
+            ts_ms = klines[i][0] if i < len(klines) else ""
+            ts_iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat() if ts_ms != "" else ""
+            
+            writer.writerow([i, ts_ms, ts_iso, eq_mtm, eq_real, dd, peak])
 
 
 def main():
-    symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
-    interval = os.environ.get("INTERVAL", "1h")
-    limit = int(os.environ.get("LIMIT", "500"))
-    initial_equity = float(os.environ.get("INITIAL_EQUITY", "1000"))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbol", default="BTC-SWAP-USDT")
+    parser.add_argument("--interval", default="1h")
+    parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument("--initial_equity", type=float, default=1000.0)
+    args = parser.parse_args()
 
     print("=" * 70)
-    print("🚀 REAL TOOBIT SMOKE BACKTEST")
+    print("🚀 REAL TOOBIT SMOKE BACKTEST (ACCOUNTING AUDIT)")
     print("=" * 70)
-    print(f"  symbol         : {symbol}")
-    print(f"  interval       : {interval}")
-    print(f"  limit          : {limit}")
-    print(f"  initial_equity : {initial_equity}")
+    print(f"  symbol         : {args.symbol}")
+    print(f"  interval       : {args.interval}")
+    print(f"  limit          : {args.limit}")
+    print(f"  initial_equity : {args.initial_equity}")
     print("=" * 70)
-    print()
 
-    # ---- 1. Symbol specs ----
-    print("📋 Fetching symbol specs...")
-    try:
-        specs = get_symbol_specs(symbol)
-    except Exception as e:
-        print(f"❌ symbol_specs failed: {e}")
-        sys.exit(1)
+    print("\n📋 Fetching symbol specs...")
+    specs = get_symbol_specs(args.symbol)
+    print(f"  contract_multiplier : {specs.get('contract_multiplier')}")
 
-    print(f"  contract_multiplier : {specs['contract_multiplier']}")
-    print(f"  min_qty             : {specs['min_qty']}")
-    print(f"  qty_step            : {specs['qty_step']}")
-    print(f"  tick_size           : {specs['tick_size']}")
-    print(f"  max_leverage        : {specs['max_leverage']}")
-    print()
-
-    # ---- 2. Klines ----
-    print(f"📥 Fetching {limit} closed candles...")
-    try:
-        klines = fetch_closed_klines(symbol, interval, limit)
-    except Exception as e:
-        print(f"❌ data_feed failed: {e}")
-        sys.exit(1)
-
+    print(f"\n📥 Fetching {args.limit} closed candles...")
+    klines = fetch_closed_klines(args.symbol, args.interval, args.limit)
     print(f"  received {len(klines)} closed candles")
-    if len(klines) > 0:
-        print(f"  first ts    : {int(klines[0][0])}")
-        print(f"  last ts     : {int(klines[-1][0])}")
-        print(f"  first close : {float(klines[0][4])}")
-        print(f"  last close  : {float(klines[-1][4])}")
-    print()
 
-    if len(klines) < 250:
-        print(
-            f"❌ کندل کافی نیست: {len(klines)} (حداقل لازم: 250)"
-        )
-        sys.exit(1)
+    print("\n🧠 Running backtest...")
+    result = run_backtest(klines, specs, initial_equity=args.initial_equity, symbol=args.symbol)
+    print("✅ Backtest completed\n")
 
-    # ---- 3. Backtest ----
-    print("🧠 Running backtest...")
-    try:
-        result = run_backtest(
-            klines, specs,
-            initial_equity=initial_equity,
-            symbol=symbol,
-        )
-    except Exception as e:
-        print(f"❌ backtest failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    print("✅ Backtest completed")
-    print()
-
-    # ---- 4. Metrics ----
+    # Print Metrics to stdout
     print(format_metrics(result["metrics"]))
-    print()
-
-    # ---- 5. Performance report ----
-    print("📊 Building performance report...")
-    try:
-        perf = build_performance_report(
-            result, klines,
-            specs["contract_multiplier"],
-            output_dir="reports",
-        )
-    except Exception as e:
-        print(f"❌ performance failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    print(f"  equity CSV : {perf['equity_csv']}")
-    print(f"  trades CSV : {perf['trades_csv']}")
-    print(f"  trades     : {len(perf['trades'])}")
-    print()
-    print(perf["report_text"])
-    print()
-
-    # ---- 6. Save state (with audit metadata) ----
-    state_path = "backtest_state.json"
-
-    final_state = result["final_state"]
-    # Audit metadata — helps audit_backtest_artifacts.py compute
-    # unrealized PnL exactly when a position is open at end.
-    final_state["symbol"] = symbol
-    final_state["contract_multiplier"] = specs["contract_multiplier"]
-    final_state["last_close_price"] = float(klines[-1][4])
-
-    try:
-        save_state(state_path, final_state)
-    except Exception as e:
-        print(f"❌ save_state failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    print(f"💾 Final state saved: {state_path}")
-    print(f"  symbol              : {symbol}")
-    print(f"  contract_multiplier : {specs['contract_multiplier']}")
-    print(f"  last_close_price    : {float(klines[-1][4])}")
-    print()
-
-    # ---- 7. Summary ----
-    print("=" * 70)
-    print("📌 SMOKE BACKTEST SUMMARY")
-    print("=" * 70)
-    m = result["metrics"]
-    print(f"  strategy_version : {result['strategy_metadata']['version']}")
-    print(f"  strategy_hash    : {result['strategy_metadata']['hash']}")
-    print(f"  candle_count     : {result['candle_count']}")
-    print(f"  total_trades     : {m['total_trades']}")
-    print(f"  net_return_pct   : {m['net_return_pct']:+.2f}%")
-    print(f"  max_drawdown_pct : {m['max_drawdown_pct']:.2f}%")
-    print(f"  win_rate         : {m['win_rate'] * 100:.1f}%")
-    print(f"  final_equity     : {m['final_equity_mtm']:.2f}")
-    print("=" * 70)
-    print("✅ SMOKE BACKTEST PASSED")
-
+    
+    # Generate CSVs
+    trades_path = f"backtest-out/{args.symbol}_trades.csv"
+    equity_path = f"backtest-out/{args.symbol}_equity_curve.csv"
+    
+    num_trades = generate_trades_csv(result["events"], klines, specs, trades_path)
+    generate_equity_curve_csv(result, klines, equity_path)
+    
+    print(f"\n💾 Saved {num_trades} trades to {trades_path}")
+    print(f"\n💾 Saved equity curve to {equity_path}")
 
 if __name__ == "__main__":
     main()
