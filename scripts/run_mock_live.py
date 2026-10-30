@@ -1,6 +1,7 @@
 """
 run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v3.1 - Single-Symbol (BTC-SWAP-USDT), Strict three-state diagnostic monitor.
+v3.1.1 — Added structured logging + APEX_SAFE_MODE flag.
+v3.1 — Single-Symbol (BTC-SWAP-USDT), Strict three-state diagnostic monitor.
 """
 
 import json
@@ -10,6 +11,7 @@ import tempfile
 import time
 import copy
 import traceback
+import logging
 from datetime import datetime, timezone
 
 from paper_state_manager import (
@@ -36,6 +38,14 @@ from telegram_notifier import (
     notify_run_status,
     notify_strategy_monitor,
 )
+
+# v3.1.1: structured logging to stdout (captured by GitHub Actions)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("run_mock_live")
 
 MAX_CATCHUP_CANDLES = 100
 PAPER_STATUS_SCHEMA = "1.0.0"
@@ -73,25 +83,32 @@ def _build_engine_config_with_kill_switch(specs, state, state_dir, repo_root=Non
     try:
         result = is_kill_switch_active(state_dir, state=state, repo_root=repo_root)
         if not isinstance(result, tuple) or len(result) != 2:
-            ks_active = True; ks_reason = "fail-closed: invalid kill_switch output"
+            ks_active = True
+            ks_reason = "fail-closed: invalid kill_switch output"
         else:
             active_val, reason_val = result
             if not isinstance(active_val, bool):
-                ks_active = True; ks_reason = "fail-closed: kill_switch active flag not bool"
+                ks_active = True
+                ks_reason = "fail-closed: kill_switch active flag not bool"
             elif active_val:
-                ks_active = True; ks_reason = reason_val if reason_val is not None else "kill_switch active (no reason provided)"
+                ks_active = True
+                ks_reason = reason_val if reason_val is not None else "kill_switch active (no reason provided)"
             else:
-                ks_active = False; ks_reason = None
+                ks_active = False
+                ks_reason = None
     except Exception as e:
-        ks_active = True; ks_reason = f"fail-closed: kill_switch raised {type(e).__name__}: {e}"
+        ks_active = True
+        ks_reason = f"fail-closed: kill_switch raised {type(e).__name__}: {e}"
     cfg["kill_switch_active"] = ks_active
     cfg["kill_switch_reason"] = ks_reason
     return cfg
 
 
 def _find_new_candles(klines, last_processed_ts):
-    if not klines: return []
-    if last_processed_ts is None: return list(range(len(klines)))
+    if not klines:
+        return []
+    if last_processed_ts is None:
+        return list(range(len(klines)))
     return [i for i, c in enumerate(klines) if int(c[0]) > last_processed_ts]
 
 
@@ -102,12 +119,15 @@ def _write_paper_status_atomic(state_dir, status):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(status, f, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
-            f.flush(); os.fsync(f.fileno())
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, target)
     except Exception:
         if os.path.exists(tmp_path):
-            try: os.remove(tmp_path)
-            except OSError: pass
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
         raise
 
 
@@ -169,13 +189,19 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
         conds["price_above_ema200"] = (close > slow)
         conds["price_below_ema200"] = (close < slow)
 
-        if fast > slow: result["ema_alignment"] = "BULLISH"
-        elif fast < slow: result["ema_alignment"] = "BEARISH"
-        else: result["ema_alignment"] = "EQUAL"
+        if fast > slow:
+            result["ema_alignment"] = "BULLISH"
+        elif fast < slow:
+            result["ema_alignment"] = "BEARISH"
+        else:
+            result["ema_alignment"] = "EQUAL"
 
-        if close > slow: result["close_vs_ema_slow"] = "ABOVE"
-        elif close < slow: result["close_vs_ema_slow"] = "BELOW"
-        else: result["close_vs_ema_slow"] = "EQUAL"
+        if close > slow:
+            result["close_vs_ema_slow"] = "ABOVE"
+        elif close < slow:
+            result["close_vs_ema_slow"] = "BELOW"
+        else:
+            result["close_vs_ema_slow"] = "EQUAL"
     else:
         conds["ema_bullish"] = None
         conds["ema_bearish"] = None
@@ -191,9 +217,12 @@ def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor
         if dh is not None and dl is not None and close is not None:
             conds["breakout_up"] = (close > dh)
             conds["breakdown_down"] = (close < dl)
-            if close > dh: result["breakout"] = "UP"
-            elif close < dl: result["breakout"] = "DOWN"
-            else: result["breakout"] = "NONE"
+            if close > dh:
+                result["breakout"] = "UP"
+            elif close < dl:
+                result["breakout"] = "DOWN"
+            else:
+                result["breakout"] = "NONE"
         else:
             conds["breakout_up"] = None
             conds["breakdown_down"] = None
@@ -222,10 +251,23 @@ def main() -> int:
     interval = os.environ.get("INTERVAL", "1h")
     start_iso = datetime.now(timezone.utc).isoformat()
 
-    exit_code = 0; run_status = "failed"; error_message = None
-    candles_processed = 0; total_new = 0
-    equity = None; peak_equity = None; has_position = None
-    last_processed = None; reconciler_status = None; reconciler_summary = None
+    # v3.1.1: SAFE_MODE flag (default ON — explicit opt-in to disable)
+    safe_mode = os.environ.get("APEX_SAFE_MODE", "1") == "1"
+    if not safe_mode:
+        print("⚠️  SAFE_MODE disabled (APEX_SAFE_MODE=0). Orders will still be MOCK_LIVE only — "
+              "this flag controls additional future safety checks, not live trading.")
+
+    exit_code = 0
+    run_status = "failed"
+    error_message = None
+    candles_processed = 0
+    total_new = 0
+    equity = None
+    peak_equity = None
+    has_position = None
+    last_processed = None
+    reconciler_status = None
+    reconciler_summary = None
     catchup_lag = 0
     strategy_monitor = None
 
@@ -262,6 +304,7 @@ def main() -> int:
         print(f"  STATE_DIR : {state_dir}")
         print(f"  SYMBOL    : {symbol}")
         print(f"  INTERVAL  : {interval}")
+        print(f"  SAFE_MODE : {safe_mode}")
         print(f"  strategy  : {compute_strategy_hash()}")
         print("=" * 70)
         print()
@@ -419,20 +462,28 @@ def main() -> int:
         error_message = f"{type(e).__name__}: {e}"
         print(f"❌ FATAL: {error_message}")
         traceback.print_exc()
-        run_status = "failed"; exit_code = 1
+        run_status = "failed"
+        exit_code = 1
     finally:
         status = {
             "schema_version": PAPER_STATUS_SCHEMA,
             "run_started_at_iso": start_iso,
             "run_finished_at_iso": datetime.now(timezone.utc).isoformat(),
-            "run_status": run_status, "run_exit_code": exit_code,
+            "run_status": run_status,
+            "run_exit_code": exit_code,
             "strategy_hash": compute_strategy_hash(),
-            "state_dir": state_dir, "symbol": symbol, "interval": interval,
-            "reconciler_status": reconciler_status, "reconciler_summary": reconciler_summary,
+            "state_dir": state_dir,
+            "symbol": symbol,
+            "interval": interval,
+            "reconciler_status": reconciler_status,
+            "reconciler_summary": reconciler_summary,
             "last_processed_candle_ts": last_processed,
             "candles_processed_this_run": candles_processed,
-            "catchup_lag": catchup_lag, "total_new_detected": total_new,
-            "equity": equity, "peak_equity": peak_equity, "has_position": has_position,
+            "catchup_lag": catchup_lag,
+            "total_new_detected": total_new,
+            "equity": equity,
+            "peak_equity": peak_equity,
+            "has_position": has_position,
             "error_message": error_message,
         }
         try:
@@ -440,7 +491,8 @@ def main() -> int:
             print(f"\n📝 paper_status.json written (run_status={run_status})")
         except Exception as we:
             print(f"\n❌ failed to write paper_status.json: {type(we).__name__}: {we}")
-            if exit_code == 0: exit_code = 1
+            if exit_code == 0:
+                exit_code = 1
 
         try:
             if not notify_run_status(status):
