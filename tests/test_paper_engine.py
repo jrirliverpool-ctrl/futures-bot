@@ -399,7 +399,8 @@ def test_cooldown_blocks_signal():
         "close": 100.0,
         "reason": "test",
     }
-    state["cooldown_until_index"] = 10
+    # v3.9.1: cooldown is now timestamp-based (absolute ms), not array index
+    state["cooldown_until_index"] = 6000 + 3_600_000
     new_state, events = process_candle(
         state, klines, indicators, 5, SPECS, _cfg(), signal=signal,
     )
