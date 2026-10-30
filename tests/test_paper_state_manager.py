@@ -292,15 +292,23 @@ def test_jsonl_format_one_per_line():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_corrupted_line_skipped():
+def test_corrupted_line_raises():
+    """
+    v3.9.2: load_events now raises on corrupt lines (was: silent skip).
+    A corrupt events.jsonl means event order is unreliable.
+    """
     d = _tmp_dir()
     try:
         with open(events_file(d), "w") as f:
             f.write('{"event_id":"abc","seq":1}\n')
             f.write('not valid json\n')
             f.write('{"event_id":"def","seq":2}\n')
-        loaded = load_events(d)
-        assert len(loaded) == 2
+        
+        try:
+            load_events(d)
+            assert False, "Expected ValueError for corrupted line"
+        except ValueError as e:
+            assert "Corrupted events file" in str(e)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -442,7 +450,7 @@ if __name__ == "__main__":
         test_events_have_timestamp_iso,
         # JSONL format
         test_jsonl_format_one_per_line,
-        test_corrupted_line_skipped,
+        test_corrupted_line_raises,
         test_append_does_not_overwrite,
         # Contract tests
         test_fingerprint_covers_all_identity_fields,
