@@ -48,111 +48,97 @@ def _reject(gate: str, reason: str) -> Decision:
     return Decision(accepted=False, reason=reason, gate=gate, order=None)
 
 def _validate_specs(specs: dict) -> Decision | None:
-    if not isinstance(specs, dict):
-        return _reject("specs", "specs must be dict")
+    if not isinstance(specs, dict): return _reject("specs", "specs not dict")
+    
     for key in ("min_qty", "max_qty", "qty_step", "contract_multiplier", "tick_size", "max_leverage"):
-        if key in specs:
-            v = specs[key]
-            if v is not None:
-                if isinstance(v, bool) or not isinstance(v, (int, float)):
-                    return _reject("specs", f"specs.{key} not numeric")
-                if not math.isfinite(v) or v < 0:
-                    return _reject("specs", f"specs.{key} invalid value")
+        v = specs.get(key)
+        if v is None: return _reject("specs", f"specs.{key} is None")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return _reject("specs", f"specs.{key} not numeric")
+        if not math.isfinite(v) or v <= 0:
+            return _reject("specs", f"specs.{key} invalid value {v}")
+
+    mn = specs.get("min_notional", 0)
+    if mn is not None:
+        if isinstance(mn, bool) or not isinstance(mn, (int, float)):
+            return _reject("specs", "min_notional not numeric")
+        if not math.isfinite(mn) or mn < 0:
+            return _reject("specs", "min_notional negative")
+            
     return None
 
 def _validate_shape(req: OrderRequest) -> Decision | None:
     if not isinstance(req.symbol, str) or not req.symbol.strip():
-        return _reject("shape.symbol", "symbol must be non-empty")
-    if req.side not in VALID_SIDES:
-        return _reject("shape.side", f"invalid side: {req.side!r}")
-    if req.order_type not in VALID_ORDER_TYPES:
-        return _reject("shape.order_type", f"invalid order_type: {req.order_type!r}")
-    if req.intent not in VALID_INTENTS:
-        return _reject("shape.intent", f"invalid intent: {req.intent!r}")
+        return _reject("shape.symbol", "empty")
+    if req.side not in VALID_SIDES: return _reject("shape.side", f"bad {req.side}")
+    if req.order_type not in VALID_ORDER_TYPES: return _reject("shape.order_type", f"bad {req.order_type}")
+    if req.intent not in VALID_INTENTS: return _reject("shape.intent", f"bad {req.intent}")
     return None
 
 def _validate_qty(req: OrderRequest, specs: dict) -> Decision | None:
-    if not _is_finite_number(req.qty): return _reject("qty", "qty must be finite")
-    min_qty = specs.get("min_qty", 0)
-    max_qty = specs.get("max_qty", float("inf"))
-    step = specs.get("qty_step", 0)
-    if req.qty <= 0: return _reject("qty", "qty must be > 0")
-    if req.qty < min_qty: return _reject("qty", f"qty {req.qty} < min_qty {min_qty}")
-    if req.qty > max_qty: return _reject("qty", f"qty {req.qty} > max_qty {max_qty}")
-    if step > 0 and not _is_multiple_of(req.qty, step):
-        return _reject("qty", f"qty {req.qty} not multiple of step {step}")
+    if not _is_finite_number(req.qty) or req.qty <= 0:
+        return _reject("qty", f"invalid {req.qty}")
+    min_qty = specs["min_qty"]
+    max_qty = specs["max_qty"]
+    if req.qty < min_qty: return _reject("qty", f"< min_qty")
+    if req.qty > max_qty: return _reject("qty", f"> max_qty")
+    if not _is_multiple_of(req.qty, specs["qty_step"]): return _reject("qty", "not multiple of step")
     return None
 
 def _validate_price(req: OrderRequest, specs: dict) -> Decision | None:
     if req.order_type == "MARKET":
         if req.price is not None: return _reject("price", "MARKET must not have price")
         return None
-    if req.price is None: return _reject("price", "LIMIT requires price")
-    if not _is_finite_number(req.price): return _reject("price", "price must be finite")
-    if req.price <= 0: return _reject("price", "price must be > 0")
-    tick = specs.get("tick_size", 0)
-    if tick > 0 and not _is_multiple_of(req.price, tick):
-        return _reject("price", f"price not multiple of tick {tick}")
+    if req.price is None or not _is_finite_number(req.price) or req.price <= 0:
+        return _reject("price", "bad LIMIT price")
+    if not _is_multiple_of(req.price, specs["tick_size"]): return _reject("price", "not multiple of tick")
     return None
 
 def _validate_leverage(req: OrderRequest, specs: dict, config: dict) -> Decision | None:
-    if not _is_finite_int(req.leverage): return _reject("leverage", "leverage must be int")
-    if req.leverage <= 0: return _reject("leverage", "leverage must be > 0")
-    cap = config.get("leverage_cap", float("inf"))
-    if req.leverage > cap: return _reject("leverage", f"lev > cap {cap}")
-    max_lev = specs.get("max_leverage", float("inf"))
-    if max_lev is not None and req.leverage > max_lev:
-        return _reject("leverage", f"lev > exchange max {max_lev}")
+    if not _is_finite_int(req.leverage) or req.leverage <= 0:
+        return _reject("leverage", "must be positive int")
+    if req.leverage > config.get("leverage_cap", float("inf")): return _reject("leverage", "> cap")
+    if req.leverage > specs["max_leverage"]: return _reject("leverage", "> exchange max")
     return None
 
 def _validate_notional(req: OrderRequest, specs: dict, ref_price: float) -> Decision | None:
-    min_notional = specs.get("min_notional", 0)
+    min_notional = specs.get("min_notional", 0.0)
     if min_notional <= 0: return None
-    mult = specs.get("contract_multiplier", 1.0)
     price = req.price if req.price is not None else ref_price
-    if not _is_finite_number(price) or price <= 0:
-        return _reject("notional", "cannot compute notional")
-    notional = req.qty * mult * price
-    if notional < min_notional:
-        return _reject("notional", f"notional {notional:.6f} < min {min_notional}")
+    if not _is_finite_number(price) or price <= 0: return _reject("notional", "bad ref_price")
+    notional = req.qty * specs["contract_multiplier"] * price
+    if notional < min_notional: return _reject("notional", f"{notional} < {min_notional}")
     return None
 
 def _validate_kill_switch(req: OrderRequest, state: dict) -> Decision | None:
     if req.intent in ("EXIT", "TP1_HIT"): return None
-    if state.get("circuit_breaker_active", False): return _reject("kill_switch", "circuit breaker active")
-    if state.get("kill_switch", False): return _reject("kill_switch", "kill switch enabled")
-    if state.get("halt_trading", False): return _reject("halt_trading", "system halted")
+    if state.get("circuit_breaker_active", False): return _reject("kill_switch", "circuit breaker")
+    if state.get("kill_switch", False): return _reject("kill_switch", "kill switch")
+    if state.get("halt_trading", False): return _reject("halt_trading", "halted")
     return None
 
 def _validate_exit_qty_and_side(req: OrderRequest, state: dict) -> Decision | None:
     if req.intent not in ("EXIT", "TP1_HIT"): return None
     pos = state.get("position")
-    if pos is None: return _reject("exit", "cannot EXIT without position")
-    pos_side = pos.get("side")
-    if pos_side not in VALID_SIDES:
-        return _reject("exit", f"position.side invalid: {pos_side!r}")
-    if pos_side != req.side:
-        return _reject("exit", f"exit side {req.side} != position side {pos_side}")
+    if pos is None: return _reject("exit", "no position")
+    if pos.get("side") != req.side: return _reject("exit", "side mismatch")
     remaining = pos.get("remaining_size", 0.0)
-    if not _is_finite_number(remaining) or remaining < 0:
-        return _reject("exit", f"position.remaining_size invalid: {remaining!r}")
-    if req.qty > remaining + 1e-9:
-        return _reject("exit", f"exit qty {req.qty} > remaining {remaining}")
+    if not _is_finite_number(remaining) or remaining <= 0:
+        return _reject("exit", "bad remaining_size")
+    if req.qty > remaining + 1e-9: return _reject("exit", "> remaining")
     return None
 
 def _validate_no_duplicate(req: OrderRequest, state: dict) -> Decision | None:
     if req.intent != "ENTRY": return None
-    if state.get("position") is not None: return _reject("duplicate", "position already open")
-    if state.get("pending_entry") is not None: return _reject("duplicate", "pending entry exists")
-    if state.get("pending_order_id") is not None:
-        return _reject("duplicate", f"pending_order_id exists: {state.get('pending_order_id')}")
+    if state.get("position") is not None: return _reject("duplicate", "position open")
+    if state.get("pending_entry") is not None: return _reject("duplicate", "pending entry")
+    if state.get("pending_order_id") is not None: return _reject("duplicate", "pending order")
     return None
 
 def _validate_position_limit(req: OrderRequest, state: dict, config: dict) -> Decision | None:
     if req.intent != "ENTRY": return None
-    max_pos = config.get("max_concurrent_positions", 1)
-    open_count = 1 if state.get("position") is not None else 0
-    if open_count >= max_pos: return _reject("position_limit", "limit reached")
+    if state.get("position") is not None and config.get("max_concurrent_positions", 1) <= 1:
+        return _reject("position_limit", "limit reached")
     return None
 
 DEFAULT_CONFIG = {"max_concurrent_positions": 1, "leverage_cap": 3}
@@ -175,13 +161,6 @@ def evaluate(req: OrderRequest, specs: dict, state: dict, config: dict = None, r
     ]
     for v in validators:
         d = v()
-        if d is not None:
-            return d
+        if d is not None: return d
 
-    return Decision(
-        accepted=True, reason=None, gate=None,
-        order={
-            "symbol": req.symbol, "side": req.side, "order_type": req.order_type,
-            "qty": req.qty, "price": req.price, "leverage": req.leverage, "intent": req.intent,
-        },
-    )
+    return Decision(accepted=True, reason=None, gate=None, order={"symbol": req.symbol, "side": req.side, "order_type": req.order_type, "qty": req.qty, "price": req.price, "leverage": req.leverage, "intent": req.intent})
