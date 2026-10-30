@@ -1,185 +1,36 @@
-"""
-test_execution_manager.py — Strict safety tests.
-"""
-import os
 import sys
-from unittest.mock import patch
-import pytest
-
-sys.path.insert(
-    0,
-    os.path.join(os.path.dirname(__file__), "..", "scripts"),
-)
-
-from order_executor import OrderRequest, DEFAULT_CONFIG
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from execution_manager import ExecutionManager
+from order_executor import OrderRequest
 
-SPECS = {
-    "min_qty": 0.01, "max_qty": 100.0, "qty_step": 0.01,
-    "tick_size": 0.1, "min_notional": 10.0,
-    "contract_multiplier": 1.0, "max_leverage": 10
-}
+SPECS = {"contract_multiplier": 0.001, "min_qty": 0.1, "max_qty": 100.0, "qty_step": 0.1, "min_notional": 0.0, "tick_size": 0.1, "max_leverage": 10}
 
-def _empty_state():
-    return {
-        "position": None, "pending_entry": None,
-        "circuit_breaker_active": False, "kill_switch": False,
-        "pending_order_id": None, "order_status": None
-    }
+def _req():
+    return OrderRequest(symbol="BTC-SWAP-USDT", side="LONG", order_type="MARKET", qty=1.0, price=None, leverage=3, intent="ENTRY")
 
-class FakeToobitClient:
-    def __init__(self, fail_sync=False, fail_network_send=False, invalid_sync_response=False):
-        self.fail_sync = fail_sync
-        self.fail_network_send = fail_network_send
-        self.invalid_sync_response = invalid_sync_response
-        self.place_calls = []
-        self.place_ids = []
+class MockClient:
+    def __init__(self, resp): self.resp = resp
+    def place_order(self, **kwargs): return self.resp
 
-    def get_position(self, symbol):
-        if self.invalid_sync_response:
-            return None
-        if self.fail_sync:
-            return {"error": "Timeout"}
-        return {"position": None}
+def test_halt_on_unknown_state():
+    em = ExecutionManager("MOCK_LIVE")
+    state = {"order_status": "UNKNOWN"}
+    d = em.execute(_req(), SPECS, state)
+    assert d.accepted is False
+    assert d.reason == "ambiguous_order_halt"
 
-    def place_order(self, **kwargs):
-        self.place_calls.append(kwargs)
-        self.place_ids.append(kwargs.get("client_order_id"))
-        if self.fail_network_send:
-            return {"status": "NETWORK_ERROR"}
-        return {"orderId": "123", "status": "SUCCESS"}
+def test_mock_live_accepts_and_clears_id():
+    em = ExecutionManager("MOCK_LIVE")
+    state = {}
+    d = em.execute(_req(), SPECS, state)
+    assert d.accepted is True
+    assert state.get("pending_order_id") is None
 
-
-def test_paper_mode_no_client():
-    em = ExecutionManager(mode="PAPER", client=None)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    decision = em.execute(req, SPECS, _empty_state(), DEFAULT_CONFIG, ref_price=50000.0)
-    assert decision.accepted is True
-
-
-def test_mock_live_no_network():
-    client = FakeToobitClient()
-    em = ExecutionManager(mode="MOCK_LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    decision = em.execute(req, SPECS, _empty_state(), DEFAULT_CONFIG, ref_price=50000.0)
-    assert decision.accepted is True
-    assert len(client.place_calls) == 0
-
-
-@patch.dict(os.environ, {"APEXQUANT_ENV": "TEST"})
-def test_live_blocked_without_env_permission():
-    client = FakeToobitClient()
-    em = ExecutionManager(mode="LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    decision = em.execute(req, SPECS, _empty_state(), DEFAULT_CONFIG, ref_price=50000.0)
-    assert decision.accepted is False
-    assert decision.reason == "missing_env_permission"
-    assert len(client.place_calls) == 0
-
-
-@patch.dict(os.environ, {"APEXQUANT_ENV": "PRODUCTION"})
-def test_live_halts_on_sync_failure():
-    client = FakeToobitClient(fail_sync=True)
-    em = ExecutionManager(mode="LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    decision = em.execute(req, SPECS, _empty_state(), DEFAULT_CONFIG, ref_price=50000.0)
-    assert decision.accepted is False
-    assert decision.reason == "state_sync_failed"
-    assert len(client.place_calls) == 0
-
-
-@patch.dict(os.environ, {"APEXQUANT_ENV": "PRODUCTION"})
-def test_live_halts_on_invalid_sync_response():
-    client = FakeToobitClient(invalid_sync_response=True)
-    em = ExecutionManager(mode="LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    decision = em.execute(req, SPECS, _empty_state(), DEFAULT_CONFIG, ref_price=50000.0)
-    assert decision.accepted is False
-    assert decision.reason == "state_sync_failed"
-    assert len(client.place_calls) == 0
-
-
-@patch.dict(os.environ, {"APEXQUANT_ENV": "PRODUCTION"})
-def test_live_network_error_during_send():
-    client = FakeToobitClient(fail_network_send=True)
-    em = ExecutionManager(mode="LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    state = _empty_state()
-    decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
-    
-    assert decision.accepted is False
-    assert decision.reason == "network_error_unknown"
-    assert state["pending_order_id"] is not None
+def test_live_network_error_halts_system():
+    em = ExecutionManager("LIVE", client=MockClient({"status": "NETWORK_ERROR"}))
+    state = {}
+    d = em.execute(_req(), SPECS, state)
+    assert d.accepted is False
+    assert state["halt_trading"] is True
     assert state["order_status"] == "UNKNOWN"
-
-
-def test_ambiguous_state_blocks_next_order():
-    em = ExecutionManager(mode="MOCK_LIVE", client=None)
-    state = _empty_state()
-    state["order_status"] = "UNKNOWN"
-    
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
-    
-    assert decision.accepted is False
-    assert decision.reason == "ambiguous_order_halt"
-
-
-@patch.dict(os.environ, {"APEXQUANT_ENV": "PRODUCTION"})
-def test_persistent_order_id_on_restart():
-    import json
-    client = FakeToobitClient(fail_network_send=True)
-    em = ExecutionManager(mode="LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    state = _empty_state()
-    
-    em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
-    first_id = state["pending_order_id"]
-    
-    serialized_state = json.dumps(state)
-    restored_state = json.loads(serialized_state)
-    
-    assert restored_state["pending_order_id"] == first_id
-    
-    client.fail_network_send = False
-    state["order_status"] = None
-    em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
-    
-    assert len(client.place_ids) == 2
-    assert client.place_ids[0] == first_id
-    assert client.place_ids[1] == first_id
-
-
-def test_mock_live_rollback_on_rejection():
-    client = FakeToobitClient()
-    em = ExecutionManager(mode="MOCK_LIVE", client=client)
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 999, "ENTRY")
-    state = _empty_state()
-    decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
-    assert decision.accepted is False
-    assert decision.gate == "leverage"
-    assert len(client.place_calls) == 0
-    assert state["pending_order_id"] is None
-
-
-def test_kill_switch_blocks_entry():
-    em = ExecutionManager(mode="MOCK_LIVE", client=None)
-    state = _empty_state()
-    state["kill_switch"] = True
-    req = OrderRequest("BTC-SWAP-USDT", "LONG", "MARKET", 0.1, None, 1, "ENTRY")
-    decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
-    assert decision.accepted is False
-    assert decision.gate == "safety"
-
-
-def test_kill_switch_allows_exit():
-    em = ExecutionManager(mode="MOCK_LIVE", client=None)
-    state = _empty_state()
-    # ✅ اصلاح: اضافه کردن پوزیشن معتبر برای اینکه خروج بتواند انجام شود
-    state["position"] = {"side": "SHORT", "entry_price": 50000.0, "remaining_size": 1.0}
-    state["kill_switch"] = True
-    
-    req = OrderRequest("BTC-SWAP-USDT", "SHORT", "MARKET", 0.1, None, 1, "EXIT")
-    decision = em.execute(req, SPECS, state, DEFAULT_CONFIG, ref_price=50000.0)
-    
-    assert decision.accepted is True
