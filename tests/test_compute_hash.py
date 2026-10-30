@@ -112,7 +112,7 @@ def test_hash_changes_on_each_field():
         {"be_sl_offset_atr": 0.2},
         {"trailing_atr_mult": 2.0},
         {"time_exit_candles": 24},
-        {"risk_per_trade": 0.02},
+        {"risk_per_trade": 0.02}, # این مقدار با 0.001 جدید فرق دارد و تست را پاس می‌کند
         {"max_leverage": 5},
         {"leverage_per_trade": 5},
         {"daily_loss_limit": 0.05},
