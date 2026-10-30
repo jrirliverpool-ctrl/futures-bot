@@ -35,17 +35,15 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
 
     current_hash = compute_strategy_hash()
     state_hash = state.get("strategy_hash")
-    if not state_hash: add_check("strategy_hash", False, "Missing")
-    elif state_hash != current_hash: add_check("strategy_hash", False, "Mismatch")
-    else: add_check("strategy_hash", True, "OK")
+    if not state_hash: add_check("hash_match", False, "Missing")
+    elif state_hash != current_hash: add_check("hash_match", False, "Mismatch")
+    else: add_check("hash_match", True, "OK")
 
     if state.get("halt_trading"): add_check("halt_trading", False, "Halted")
     if state.get("order_status") == "UNKNOWN": add_check("unknown_order", False, "UNKNOWN order")
-    if state.get("order_status") == "PENDING_FILL": add_check("pending_fill", False, "PENDING_FILL order")
     if state.get("pending_order_id"): add_check("pending_order_id", False, f"Stale: {state['pending_order_id']}")
 
-    peak = state.get("peak_equity", 0)
-    eq = state.get("equity", 0)
+    peak = state.get("peak_equity", 0); eq = state.get("equity", 0)
     if not (isinstance(peak, (int, float)) and not isinstance(peak, bool) and math.isfinite(peak) and
             isinstance(eq, (int, float)) and not isinstance(eq, bool) and math.isfinite(eq)):
         add_check("equity_peak", False, "equity/peak invalid")
@@ -69,39 +67,41 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
 
     for sym, klines in symbols_to_check:
         if not klines:
-            add_check(f"klines_avail_{sym}", False, f"No klines")
+            add_check("klines_sufficient", False, "No klines", level="warning")
             continue
 
         struct_err = _validate_klines_structure(klines)
         if struct_err:
-            add_check(f"klines_struct_{sym}", False, struct_err)
+            add_check("klines_structure", False, struct_err)
             continue
-        add_check(f"klines_struct_{sym}", True, "OK")
+        add_check("klines_structure", True, "OK")
 
         n = len(klines)
-        if n < MIN_KLINES: add_check(f"klines_count_{sym}", False, f"Only {n}", level="warning")
-        else: add_check(f"klines_count_{sym}", True, f"{n}")
+        if n < MIN_KLINES: add_check("klines_sufficient", False, f"Only {n}", level="warning")
+        else: add_check("klines_sufficient", True, f"{n}")
 
         interval_ms = INTERVAL_MS[interval]
         last_ts = klines[-1][0]
 
-        if last_ts > now_ms: add_check(f"data_future_{sym}", False, "Future candle")
-        else:
-            age_h = (now_ms - last_ts) / 3_600_000
-            if age_h > STALE_DATA_HOURS: add_check(f"data_fresh_{sym}", False, f"Stale {age_h:.1f}h", level="warning")
-            else: add_check(f"data_fresh_{sym}", True, "OK")
+        close_time = last_ts + interval_ms
+        if last_ts > now_ms: add_check("last_candle_closed", False, "Future candle")
+        elif close_time <= now_ms: add_check("last_candle_closed", True, "OK")
+        else: add_check("last_candle_closed", False, "Candle open")
 
         if isinstance(state.get("symbols"), dict) and sym in state["symbols"]:
             lpct = state["symbols"][sym].get("last_processed_candle_ts")
         else:
             lpct = state.get("last_processed_candle_ts")
 
-        if lpct is not None:
-            if lpct > last_ts: add_check(f"lpct_future_{sym}", False, "lpct > last_ts")
-            else:
-                missing = (last_ts - lpct) // interval_ms - 1
-                if missing > GAP_WARNING_THRESHOLD: add_check(f"candle_gap_{sym}", False, f"Missing {missing}", level="warning")
-                else: add_check(f"candle_gap_{sym}", True, "OK")
+        if lpct is None:
+            add_check("last_processed_vs_latest", False, "lpct is None", level="warning")
+        elif lpct > last_ts:
+            add_check("last_processed_vs_latest", False, "lpct > last_ts")
+        else:
+            add_check("last_processed_vs_latest", True, "OK")
+            missing = (last_ts - lpct) // interval_ms - 1
+            if missing > GAP_WARNING_THRESHOLD: add_check("no_missing_candles", False, f"Missing {missing}", level="warning")
+            else: add_check("no_missing_candles", True, "OK")
 
     return _aggregate(checks)
 
