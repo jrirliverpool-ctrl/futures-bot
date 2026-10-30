@@ -30,7 +30,7 @@ STRATEGY_CONFIG = {
     "be_sl_offset_atr": 0.1,
     "trailing_atr_mult": 1.5,
     "time_exit_candles": 48,
-    "risk_per_trade": 0.01,
+    "risk_per_trade": 0.001,   # <--- تغییر یافت به 0.1 درصد برای تست امن
     "max_leverage": 3,
     "leverage_per_trade": 3,
     "daily_loss_limit": 0.03,
