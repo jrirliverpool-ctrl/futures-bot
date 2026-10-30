@@ -1,5 +1,6 @@
-import time
+
 import math
+import time
 
 from data_feed import fetch_klines, INTERVAL_MS
 from state_manager import load_state
@@ -28,22 +29,12 @@ def _is_valid_timestamp(value):
 
 
 def _validate_klines_structure(klines):
-    """
-    Validate candle structure, timestamps and OHLC relationships.
-
-    Kline timestamp is candle OPEN time in milliseconds.
-    """
-
     if not isinstance(klines, list):
         return "not a list"
-
-    if not klines:
-        return None
 
     previous_ts = None
 
     for i, candle in enumerate(klines):
-
         if not isinstance(candle, (list, tuple)):
             return f"candle[{i}] invalid type"
 
@@ -51,7 +42,6 @@ def _validate_klines_structure(klines):
             return f"candle[{i}] has fewer than 5 fields"
 
         ts = candle[0]
-
         if not _is_valid_timestamp(ts):
             return f"candle[{i}] timestamp invalid"
 
@@ -61,17 +51,11 @@ def _validate_klines_structure(klines):
         previous_ts = ts
 
         try:
-            o = float(candle[1])
-            h = float(candle[2])
-            l = float(candle[3])
-            c = float(candle[4])
+            o, h, l, c = map(float, candle[1:5])
         except (ValueError, TypeError, OverflowError):
             return f"candle[{i}] OHLC not numeric"
 
-        if not all(
-            math.isfinite(x) and x > 0
-            for x in (o, h, l, c)
-        ):
+        if not all(math.isfinite(x) and x > 0 for x in (o, h, l, c)):
             return f"candle[{i}] OHLC invalid values"
 
         if h < max(o, c):
@@ -88,13 +72,12 @@ def _validate_klines_structure(klines):
 
 def _aggregate(checks):
     has_error = any(
-        not check["ok"] and check["level"] == "error"
-        for check in checks
+        not c["ok"] and c["level"] == "error"
+        for c in checks
     )
-
     has_warning = any(
-        not check["ok"] and check["level"] == "warning"
-        for check in checks
+        not c["ok"] and c["level"] == "warning"
+        for c in checks
     )
 
     if has_error:
@@ -104,36 +87,21 @@ def _aggregate(checks):
     else:
         status = "OK"
 
-    failed = sum(
-        1 for check in checks
-        if not check["ok"]
-    )
-
-    summary = f"{len(checks)} checks: {failed} failed"
+    failed = sum(1 for c in checks if not c["ok"])
 
     return {
         "status": status,
         "checks": checks,
-        "summary": summary,
+        "summary": f"{len(checks)} checks: {failed} failed",
     }
 
 
 def reconcile_with_data(state, klines_data, interval, now_ms):
+    """Pure, deterministic, read-only reconciliation.
+
+    WARNING is not proof that market data or exchange state is safe.
+    ERROR must stop processing.
     """
-    Read-only safety reconciliation.
-
-    This function:
-    - Does not mutate state.
-    - Does not modify klines.
-    - Does not place orders.
-    - Returns ERROR for dangerous inconsistencies.
-    - Returns WARNING for non-critical issues.
-
-    IMPORTANT:
-    A caller must not interpret WARNING as proof that
-    market data is fresh or that exchange state is reconciled.
-    """
-
     checks = []
 
     def add_check(name, ok, detail, level="error"):
@@ -144,107 +112,57 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
             "detail": str(detail),
         })
 
-    # ---------------------------------------------------------
-    # 1. Input validation
-    # ---------------------------------------------------------
-
     if not isinstance(state, dict):
-        add_check(
-            "state_is_dict",
-            False,
-            "State is not a dictionary",
-        )
+        add_check("state_is_dict", False, "State is not a dictionary")
         return _aggregate(checks)
 
-    add_check(
-        "state_is_dict",
-        True,
-        "OK",
-    )
+    add_check("state_is_dict", True, "OK")
 
     if not _is_valid_timestamp(now_ms):
-        add_check(
-            "now_ms_valid",
-            False,
-            f"Invalid now_ms: {now_ms!r}",
-        )
+        add_check("now_ms_valid", False, f"Invalid now_ms: {now_ms!r}")
         return _aggregate(checks)
 
-    add_check(
-        "now_ms_valid",
-        True,
-        "OK",
-    )
+    add_check("now_ms_valid", True, "OK")
 
     if interval not in INTERVAL_MS:
-        add_check(
-            "interval",
-            False,
-            f"Unknown interval: {interval!r}",
-        )
+        add_check("interval", False, f"Unknown interval: {interval!r}")
         return _aggregate(checks)
 
     interval_ms = INTERVAL_MS[interval]
+    add_check("interval", True, interval)
 
-    add_check(
-        "interval",
-        True,
-        interval,
-    )
-
-    # ---------------------------------------------------------
-    # 2. Strategy identity
-    # ---------------------------------------------------------
-
+    # Strategy identity
     try:
         current_hash = compute_strategy_hash()
     except Exception as exc:
-        add_check(
-            "hash_match",
-            False,
-            f"Could not compute current hash: {exc}",
-        )
         current_hash = None
-
-    state_hash = state.get("strategy_hash")
-
-    if current_hash is None:
-        pass
-
-    elif not isinstance(state_hash, str) or not state_hash:
-        add_check(
-            "hash_match",
-            False,
-            "Missing or invalid strategy hash",
-        )
-
-    elif state_hash != current_hash:
-        add_check(
-            "hash_match",
-            False,
-            "Strategy hash mismatch",
-        )
-
+        add_check("hash_match", False, f"Hash computation failed: {exc}")
     else:
+        state_hash = state.get("strategy_hash")
         add_check(
             "hash_match",
-            True,
-            "OK",
+            isinstance(state_hash, str)
+            and bool(state_hash)
+            and state_hash == current_hash,
+            (
+                "OK"
+                if state_hash == current_hash
+                else "Missing, invalid, or mismatched strategy hash"
+            ),
         )
 
-    # ---------------------------------------------------------
-    # 3. Trading halt and unresolved order state
-    # ---------------------------------------------------------
-
+    # Trading safety state
     if state.get("halt_trading"):
+        add_check("halt_trading", False, "Trading halt is active")
+
+    if state.get("circuit_breaker_active"):
         add_check(
-            "halt_trading",
+            "circuit_breaker",
             False,
-            "Trading halt is active",
+            "Circuit breaker is active",
         )
 
     order_status = state.get("order_status")
-
     if order_status in ("UNKNOWN", "PENDING_FILL"):
         add_check(
             "order_status",
@@ -252,130 +170,60 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
             f"Unresolved order status: {order_status}",
         )
 
-    pending_order_id = state.get("pending_order_id")
-
-    if pending_order_id is not None:
+    if state.get("pending_order_id") is not None:
         add_check(
             "pending_order_id",
             False,
-            f"Unresolved pending order: {pending_order_id}",
+            "Unresolved pending exchange order",
         )
 
-    # ---------------------------------------------------------
-    # 4. Equity consistency
-    # ---------------------------------------------------------
-
+    # Equity checks
     equity = state.get("equity")
-    peak_equity = state.get("peak_equity")
-    initial_equity = state.get("initial_equity")
+    peak = state.get("peak_equity")
+    initial = state.get("initial_equity")
 
-    equity_valid = _is_finite_number(equity) and equity >= 0
-    peak_valid = (
-        _is_finite_number(peak_equity)
-        and peak_equity >= 0
-    )
+    equity_ok = _is_finite_number(equity) and equity >= 0
+    peak_ok = _is_finite_number(peak) and peak >= 0
 
-    if not equity_valid:
+    add_check("equity_valid", equity_ok, f"equity={equity!r}")
+    add_check("peak_equity_valid", peak_ok, f"peak_equity={peak!r}")
+
+    if equity_ok and peak_ok:
         add_check(
-            "equity_valid",
-            False,
-            f"Invalid equity: {equity!r}",
-        )
-    else:
-        add_check(
-            "equity_valid",
-            True,
-            "OK",
+            "equity_peak",
+            equity <= peak,
+            f"equity={equity}, peak_equity={peak}",
         )
 
-    if not peak_valid:
+    if initial is not None:
         add_check(
-            "peak_equity_valid",
-            False,
-            f"Invalid peak equity: {peak_equity!r}",
-        )
-    else:
-        add_check(
-            "peak_equity_valid",
-            True,
-            "OK",
+            "initial_equity_valid",
+            _is_finite_number(initial) and initial > 0,
+            f"initial_equity={initial!r}",
         )
 
-    if equity_valid and peak_valid:
-
-        if equity > peak_equity:
-            add_check(
-                "equity_peak",
-                False,
-                f"Equity {equity} exceeds peak {peak_equity}",
-            )
-        else:
-            add_check(
-                "equity_peak",
-                True,
-                "OK",
-            )
-
-    if initial_equity is not None:
-
-        if (
-            not _is_finite_number(initial_equity)
-            or initial_equity <= 0
-        ):
-            add_check(
-                "initial_equity_valid",
-                False,
-                f"Invalid initial equity: {initial_equity!r}",
-            )
-        else:
-            add_check(
-                "initial_equity_valid",
-                True,
-                "OK",
-            )
-
-    # ---------------------------------------------------------
-    # 5. Determine symbols to reconcile
-    # ---------------------------------------------------------
-
+    # Single-symbol or multi-symbol input
     state_symbols = state.get("symbols")
 
     if isinstance(state_symbols, dict):
-
-        symbols_to_check = list(state_symbols.items())
-
         if not isinstance(klines_data, dict):
             add_check(
                 "symbol_data_shape",
                 False,
-                "Multi-symbol state requires klines dictionary",
+                "Multi-symbol state requires a klines dictionary",
             )
             return _aggregate(checks)
 
-        missing_symbols = (
-            set(state_symbols.keys())
-            - set(klines_data.keys())
+        symbols_to_check = list(state_symbols.items())
+
+        missing = set(state_symbols) - set(klines_data)
+        add_check(
+            "symbol_completeness",
+            not missing,
+            f"Missing symbols: {sorted(missing)}" if missing else "All symbols covered",
         )
-
-        if missing_symbols:
-            add_check(
-                "symbol_completeness",
-                False,
-                f"Missing symbols: {sorted(missing_symbols)}",
-            )
-        else:
-            add_check(
-                "symbol_completeness",
-                True,
-                "All symbols covered",
-            )
-
+        multi = True
     else:
-
-        symbols_to_check = [
-            ("DEFAULT", state)
-        ]
-
         if isinstance(klines_data, dict):
             add_check(
                 "symbol_data_shape",
@@ -384,251 +232,215 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
             )
             return _aggregate(checks)
 
-    # ---------------------------------------------------------
-    # 6. Per-symbol checks
-    # ---------------------------------------------------------
+        symbols_to_check = [("DEFAULT", state)]
+        multi = False
+
+    def check_name(symbol, suffix):
+        return f"{symbol}_{suffix}" if multi else suffix
 
     for symbol, symbol_state in symbols_to_check:
-
         if not isinstance(symbol_state, dict):
             add_check(
-                f"{symbol}_state_valid",
+                check_name(symbol, "state_valid"),
                 False,
                 "Symbol state is not a dictionary",
             )
             continue
 
-        if isinstance(state_symbols, dict):
-            klines = klines_data.get(symbol)
-        else:
-            klines = klines_data
+        klines = (
+            klines_data.get(symbol)
+            if multi
+            else klines_data
+        )
 
         active = (
             symbol_state.get("position") is not None
             or symbol_state.get("pending_entry") is not None
         )
+        missing_level = "error" if active else "warning"
 
-        # -----------------------------------------------------
-        # 6.1 Candle availability
-        # -----------------------------------------------------
-
+        # Candle availability
         if not isinstance(klines, list) or not klines:
-
             add_check(
-                f"{symbol}_klines_available",
+                check_name(symbol, "klines_available"),
                 False,
                 "No usable klines",
-                level="error" if active else "warning",
+                missing_level,
             )
-
-            continue
-
-        # -----------------------------------------------------
-        # 6.2 Candle structure
-        # -----------------------------------------------------
-
-        structure_error = _validate_klines_structure(klines)
-
-        if structure_error:
-
             add_check(
-                f"{symbol}_klines_structure",
+                check_name(symbol, "klines_sufficient"),
                 False,
-                structure_error,
+                "No candles available",
+                missing_level,
             )
-
+            add_check(
+                check_name(symbol, "last_candle_closed"),
+                False,
+                "Cannot verify candle close without data",
+                missing_level,
+            )
+            add_check(
+                check_name(symbol, "last_processed_vs_latest"),
+                False,
+                "Cannot compare without candle data",
+                missing_level,
+            )
+            add_check(
+                check_name(symbol, "no_missing_candles"),
+                False,
+                "Cannot verify candle gaps without data",
+                missing_level,
+            )
             continue
 
         add_check(
-            f"{symbol}_klines_structure",
+            check_name(symbol, "klines_available"),
+            True,
+            f"{len(klines)} candles",
+        )
+
+        structure_error = _validate_klines_structure(klines)
+        if structure_error:
+            add_check(
+                check_name(symbol, "klines_structure"),
+                False,
+                structure_error,
+            )
+            continue
+
+        add_check(
+            check_name(symbol, "klines_structure"),
             True,
             "OK",
         )
 
-        # -----------------------------------------------------
-        # 6.3 Candle sufficiency
-        # -----------------------------------------------------
-
+        # Candle sufficiency
         candle_count = len(klines)
+        sufficient = candle_count >= MIN_KLINES
 
-        if candle_count < MIN_KLINES:
-
-            add_check(
-                f"{symbol}_klines_sufficient",
-                False,
-                f"Only {candle_count}; minimum is {MIN_KLINES}",
-                level="error" if active else "warning",
-            )
-
-        else:
-
-            add_check(
-                f"{symbol}_klines_sufficient",
-                True,
-                str(candle_count),
-            )
-
-        # -----------------------------------------------------
-        # 6.4 Last candle timestamp
-        # -----------------------------------------------------
+        add_check(
+            check_name(symbol, "klines_sufficient"),
+            sufficient,
+            f"{candle_count}; minimum={MIN_KLINES}",
+            "error" if active else "warning",
+        )
 
         last_ts = klines[-1][0]
 
         if last_ts > now_ms:
-
             add_check(
-                f"{symbol}_last_candle_not_future",
+                check_name(symbol, "last_candle_not_future"),
                 False,
                 "Latest candle timestamp is in the future",
             )
-
+            add_check(
+                check_name(symbol, "last_candle_closed"),
+                False,
+                "Latest candle timestamp is in the future",
+            )
             continue
 
         add_check(
-            f"{symbol}_last_candle_not_future",
+            check_name(symbol, "last_candle_not_future"),
             True,
             "OK",
         )
 
-        # Timestamp is candle OPEN time.
+        # Candle timestamps are OPEN timestamps.
         close_time = last_ts + interval_ms
-
-        if close_time > now_ms:
-
-            add_check(
-                f"{symbol}_last_candle_closed",
-                False,
-                "Latest candle is still open",
-            )
-
-            continue
+        closed = close_time <= now_ms
 
         add_check(
-            f"{symbol}_last_candle_closed",
-            True,
-            "OK",
+            check_name(symbol, "last_candle_closed"),
+            closed,
+            "Closed" if closed else "Latest candle is still open",
         )
 
-        # -----------------------------------------------------
-        # 6.5 Data freshness
-        # -----------------------------------------------------
+        if not closed:
+            continue
 
-        data_age_ms = now_ms - close_time
-        stale_limit_ms = STALE_DATA_HOURS * 3_600_000
+        # Data freshness
+        age_ms = now_ms - close_time
+        stale_limit = STALE_DATA_HOURS * 3_600_000
+        fresh = age_ms <= stale_limit
 
-        if data_age_ms > stale_limit_ms:
+        add_check(
+            check_name(symbol, "data_freshness"),
+            fresh,
+            f"Age {age_ms / 3_600_000:.2f} hours",
+            "error" if active else "warning",
+        )
 
-            add_check(
-                f"{symbol}_data_freshness",
-                False,
-                (
-                    f"Last closed candle is stale: "
-                    f"{data_age_ms / 3_600_000:.2f} hours old"
-                ),
-                level="error" if active else "warning",
-            )
-
-        else:
-
-            add_check(
-                f"{symbol}_data_freshness",
-                True,
-                f"Age {data_age_ms / 60_000:.1f} minutes",
-            )
-
-        # -----------------------------------------------------
-        # 6.6 Last processed candle timestamp
-        # -----------------------------------------------------
-
+        # Last processed candle
         lpct = symbol_state.get("last_processed_candle_ts")
 
         if lpct is None:
-
             add_check(
-                f"{symbol}_last_processed_vs_latest",
+                check_name(symbol, "last_processed_vs_latest"),
                 False,
                 "last_processed_candle_ts is None",
-                level="error" if active else "warning",
+                missing_level,
             )
-
+            add_check(
+                check_name(symbol, "no_missing_candles"),
+                False,
+                "Cannot calculate gap without last processed timestamp",
+                missing_level,
+            )
             continue
 
         if not _is_valid_timestamp(lpct):
-
             add_check(
-                f"{symbol}_last_processed_vs_latest",
+                check_name(symbol, "last_processed_vs_latest"),
                 False,
-                f"Invalid last_processed timestamp: {lpct!r}",
+                f"Invalid last processed timestamp: {lpct!r}",
             )
-
             continue
 
         if lpct > last_ts:
-
             add_check(
-                f"{symbol}_last_processed_vs_latest",
+                check_name(symbol, "last_processed_vs_latest"),
                 False,
-                "last_processed timestamp is ahead of latest candle",
+                "Last processed timestamp is ahead of latest candle",
             )
-
             continue
 
         add_check(
-            f"{symbol}_last_processed_vs_latest",
+            check_name(symbol, "last_processed_vs_latest"),
             True,
             "OK",
         )
 
-        # -----------------------------------------------------
-        # 6.7 Missing candle gap
-        # -----------------------------------------------------
-
+        # Missing candle detection
         delta = last_ts - lpct
 
         if delta % interval_ms != 0:
-
             add_check(
-                f"{symbol}_no_missing_candles",
+                check_name(symbol, "no_missing_candles"),
                 False,
                 "Timestamp difference is not aligned to interval",
             )
-
             continue
 
-        missing_candles = (
-            delta // interval_ms
-        ) - 1
+        missing_candles = (delta // interval_ms) - 1
+        missing_candles = max(0, missing_candles)
 
-        if missing_candles > GAP_WARNING_THRESHOLD:
+        gap_ok = missing_candles < GAP_WARNING_THRESHOLD
 
-            add_check(
-                f"{symbol}_no_missing_candles",
-                False,
-                f"Missing {missing_candles} candles",
-                level="warning",
-            )
-
-        else:
-
-            add_check(
-                f"{symbol}_no_missing_candles",
-                True,
-                f"Missing {missing_candles} candles",
-            )
+        add_check(
+            check_name(symbol, "no_missing_candles"),
+            gap_ok,
+            f"Missing {missing_candles} candles",
+            "warning",
+        )
 
     return _aggregate(checks)
 
 
 def reconcile_public(state_dir, symbol, interval="1h"):
-
     try:
-        state = load_state(
-            state_dir,
-            strict=False,
-        )
-
+        state = load_state(state_dir, strict=False)
     except Exception as exc:
-
         return {
             "status": "ERROR",
             "summary": f"Load failed: {exc}",
@@ -636,15 +448,8 @@ def reconcile_public(state_dir, symbol, interval="1h"):
         }
 
     try:
-
-        klines = fetch_klines(
-            symbol,
-            interval,
-            limit=300,
-        )
-
+        klines = fetch_klines(symbol, interval, limit=300)
     except Exception as exc:
-
         return {
             "status": "ERROR",
             "summary": f"Klines fetch failed: {exc}",
