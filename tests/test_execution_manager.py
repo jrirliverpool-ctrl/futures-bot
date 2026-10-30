@@ -1,4 +1,3 @@
-
 import os
 import sys
 
@@ -43,7 +42,9 @@ class MockClient:
         raise AssertionError("LIVE network call must be blocked")
 
     def get_order_status(self, symbol, client_order_id):
-        self.calls.append(("get_order_status", symbol, client_order_id))
+        self.calls.append(
+            ("get_order_status", symbol, client_order_id)
+        )
         raise AssertionError("LIVE recovery query must be blocked")
 
 
@@ -53,13 +54,18 @@ def test_live_entry_blocked_before_network():
     state = {}
 
     decision = em.execute(
-        _req(), SPECS, state,
+        _req(),
+        SPECS,
+        state,
         save_state_fn=lambda s: None,
     )
 
     assert decision.accepted is False
     assert decision.gate == "safety"
-    assert decision.reason == "real_execution_disabled_pending_reconciliation"
+    assert decision.reason == (
+        "real_execution_disabled_pending_reconciliation"
+    )
+
     assert client.calls == []
     assert state == {}
 
@@ -69,10 +75,15 @@ def test_demo_execution_blocked_before_network():
     em = ExecutionManager("TOOBIT_DEMO", client=client)
     state = {}
 
-    decision = em.execute(_req(), SPECS, state)
+    decision = em.execute(
+        _req(),
+        SPECS,
+        state,
+    )
 
     assert decision.accepted is False
     assert decision.gate == "safety"
+
     assert client.calls == []
     assert state == {}
 
@@ -80,16 +91,23 @@ def test_demo_execution_blocked_before_network():
 def test_live_pending_fill_recovery_is_blocked():
     client = MockClient()
     em = ExecutionManager("LIVE", client=client)
+
     state = {
         "order_status": "PENDING_FILL",
         "pending_order_id": "apex_TEST",
     }
 
-    decision = em.execute(_req(), SPECS, state)
+    decision = em.execute(
+        _req(),
+        SPECS,
+        state,
+    )
 
     assert decision.accepted is False
     assert decision.gate == "safety"
+
     assert client.calls == []
+
     assert state["order_status"] == "PENDING_FILL"
     assert state["pending_order_id"] == "apex_TEST"
 
@@ -100,9 +118,12 @@ def test_live_exit_is_also_blocked():
     state = {}
 
     decision = em.execute(
-        _req(intent="EXIT"), SPECS, state,
+        _req(intent="EXIT"),
+        SPECS,
+        state,
     )
 
     assert decision.accepted is False
     assert decision.gate == "safety"
+
     assert client.calls == []
