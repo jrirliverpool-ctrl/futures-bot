@@ -383,24 +383,28 @@ def test_total_dd_uses_peak_equity():
 
 def test_cooldown_blocks_signal():
     state = _mk_state()
+    
+    # Use realistic epoch timestamps to avoid legacy index migration
+    base_ts = 1790000000000
     klines = [
-        _candle(1000, 100, 101, 99, 100),
-        _candle(2000, 100, 101, 99, 100),
-        _candle(3000, 100, 101, 99, 100),
-        _candle(4000, 100, 101, 99, 100),
-        _candle(5000, 100, 101, 99, 100),
-        _candle(6000, 100, 101, 99, 100),
+        _candle(base_ts + 1000, 100, 101, 99, 100),
+        _candle(base_ts + 2000, 100, 101, 99, 100),
+        _candle(base_ts + 3000, 100, 101, 99, 100),
+        _candle(base_ts + 4000, 100, 101, 99, 100),
+        _candle(base_ts + 5000, 100, 101, 99, 100),
+        _candle(base_ts + 6000, 100, 101, 99, 100),
     ]
     indicators = {"atr": [1.0] * len(klines)}
     signal = {
         "signal": "LONG",
-        "signal_candle_ts": 6000,
+        "signal_candle_ts": base_ts + 6000,
         "atr_at_signal": 1.0,
         "close": 100.0,
         "reason": "test",
     }
     # v3.9.1: cooldown is now timestamp-based (absolute ms), not array index
-    state["cooldown_until_index"] = 6000 + 3_600_000
+    # Set it to be 1 hour in the future from the current candle
+    state["cooldown_until_index"] = base_ts + 6000 + 3_600_000
     new_state, events = process_candle(
         state, klines, indicators, 5, SPECS, _cfg(), signal=signal,
     )
