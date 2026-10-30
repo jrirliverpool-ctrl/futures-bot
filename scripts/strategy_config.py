@@ -1,24 +1,5 @@
-"""
-strategy_config.py — Single Source of Truth برای پارامترهای ApexQuant V1.
-
-تغییرات نسبت به 1.0.0:
-  - افزودن leverage_per_trade (V1 clarification)
-  - get_engine_config اکنون leverage و leverage_cap را پاس می‌دهد
-
-v1.0.1 (policy v2.2.3):
-  - get_engine_config اکنون be_trigger_at_r را نیز پاس می‌دهد.
-
-v1.0.1 (B1):
-  - get_fee_config() اضافه شد — نرخ‌های کارمزد Toobit.
-    ⚠️ این تابع بخشی از STRATEGY_CONFIG نیست. hash استراتژی
-    تغییر نمی‌کند.
-
-تغییر هر پارامتر در این فایل → strategy_hash عوض می‌شود.
-Spec: docs/strategy_v1.md
-"""
-
 STRATEGY_CONFIG = {
-    "version": "1.0.1",
+    "version": "1.1.0",
     "timeframe": "1h",
     "ema_fast_period": 50,
     "ema_slow_period": 200,
@@ -30,7 +11,7 @@ STRATEGY_CONFIG = {
     "be_sl_offset_atr": 0.1,
     "trailing_atr_mult": 1.5,
     "time_exit_candles": 48,
-    "risk_per_trade": 0.001,   # <--- تغییر یافت به 0.1 درصد برای تست امن
+    "risk_per_trade": 0.001,
     "max_leverage": 3,
     "leverage_per_trade": 3,
     "daily_loss_limit": 0.03,
@@ -39,7 +20,6 @@ STRATEGY_CONFIG = {
     "cooldown_candles": 2,
     "slippage_pct": 0.0005,
 }
-
 
 DEFAULT_SYMBOL = "BTC-SWAP-USDT"
 
@@ -50,34 +30,22 @@ INTERVAL_MS_MAP = {
 
 CANONICAL_KEYS = tuple(sorted(STRATEGY_CONFIG.keys()))
 
-
 def get_strategy_config(overrides: dict = None) -> dict:
     config = dict(STRATEGY_CONFIG)
     if overrides:
         unknown = set(overrides.keys()) - set(STRATEGY_CONFIG.keys())
         if unknown:
-            raise ValueError(
-                f"Unknown config keys in overrides: {sorted(unknown)}"
-            )
+            raise ValueError(f"Unknown config keys in overrides: {sorted(unknown)}")
         config.update(overrides)
     return config
 
-
 def get_indicator_params() -> dict:
-    return {
-        "ema_fast_p": STRATEGY_CONFIG["ema_fast_period"],
-        "ema_slow_p": STRATEGY_CONFIG["ema_slow_period"],
-        "donchian_p": STRATEGY_CONFIG["donchian_period"],
-        "atr_p": STRATEGY_CONFIG["atr_period"],
-    }
-
+    return {"ema_fast_p": STRATEGY_CONFIG["ema_fast_period"], "ema_slow_p": STRATEGY_CONFIG["ema_slow_period"], "donchian_p": STRATEGY_CONFIG["donchian_period"], "atr_p": STRATEGY_CONFIG["atr_period"]}
 
 def get_engine_config() -> dict:
     interval_label = STRATEGY_CONFIG["timeframe"]
     if interval_label not in INTERVAL_MS_MAP:
-        raise ValueError(
-            f"Unknown timeframe in strategy config: {interval_label}"
-        )
+        raise ValueError(f"Unknown timeframe in strategy config: {interval_label}")
     return {
         "risk_per_trade": STRATEGY_CONFIG["risk_per_trade"],
         "leverage": STRATEGY_CONFIG["leverage_per_trade"],
@@ -96,35 +64,10 @@ def get_engine_config() -> dict:
         "interval_ms": INTERVAL_MS_MAP[interval_label],
     }
 
-
 def get_timeframe_interval_ms() -> int:
     tf = STRATEGY_CONFIG["timeframe"]
-    if tf not in INTERVAL_MS_MAP:
-        raise ValueError(f"Unknown timeframe: {tf}")
+    if tf not in INTERVAL_MS_MAP: raise ValueError(f"Unknown timeframe: {tf}")
     return INTERVAL_MS_MAP[tf]
 
-
 def get_fee_config() -> dict:
-    """
-    نرخ‌های کارمزد صرافی (Toobit) برای B1.
-
-    ⚠️ این تابع بخشی از STRATEGY_CONFIG نیست. hash استراتژی
-    تغییر نمی‌کند.
-
-    منبع: probe_toobit_commission.py — 2026-10-18
-    نرخ‌های واقعی حساب apextest2 روی BTC-SWAP-USDT.
-
-    قرارداد محاسبه:
-      - open_taker_fee × entry_notional = commission ورود
-      - close_taker_fee × tp1_notional = commission TP1 (partial)
-      - close_taker_fee × final_notional = commission خروج نهایی
-
-    مقادیر به صورت fraction از notional هستند (0.0005 = 0.05%).
-    """
-    return {
-        "open_taker_fee": 0.0005,
-        "close_taker_fee": 0.0005,
-        "open_maker_fee": 0.0002,
-        "close_maker_fee": 0.0002,
-        "source": "toobit-probe-2026-10-18",
-    }
+    return {"open_taker_fee": 0.0005, "close_taker_fee": 0.0005, "open_maker_fee": 0.0002, "close_maker_fee": 0.0002, "source": "toobit-probe-2026-10-18"}
