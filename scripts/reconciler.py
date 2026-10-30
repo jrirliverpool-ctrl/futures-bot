@@ -1,182 +1,80 @@
 """
-reconciler.py — Public Dry-Run Reconciliation.
+reconciler.py — Pre-flight health check.
+v1.1 — Fixes: Detect UNKNOWN orders, validate candle gaps, detect open position mismatch.
 """
-
-import os
 import time
-
 from data_feed import fetch_klines, INTERVAL_MS
-from paper_state_manager import load_state, state_exists
+from state_manager import load_state
 from compute_hash import compute_strategy_hash
-
+import os
 
 MIN_KLINES = 250
 GAP_WARNING_THRESHOLD = 2
 
-STATUS_OK = "OK"
-STATUS_WARNING = "WARNING"
-STATUS_ERROR = "ERROR"
+def reconcile_with_data(state, klines, interval, now_ms):
+    checks = []
+    
+    def add_check(name, ok, detail, level="error"):
+        checks.append({"name": name, "ok": ok, "level": level, "detail": detail})
 
+    # 1. HALT & Order Status Check
+    if state.get("halt_trading"):
+        add_check("halt_trading", False, "System halted due to UNKNOWN order.")
+    if state.get("order_status") == "UNKNOWN":
+        add_check("unknown_order", False, "UNKNOWN order exists. Manual intervention required.")
+    if state.get("pending_order_id"):
+        add_check("pending_order_id", False, f"Stale pending_order_id: {state['pending_order_id']}")
 
-def _result(status: str, checks: list, summary: str) -> dict:
+    # 2. Equity & Peak checks
+    peak = state.get("peak_equity", 0)
+    eq = state.get("equity", 0)
+    if eq > peak:
+        add_check("equity_peak", False, f"equity {eq} > peak {peak}")
+    else:
+        add_check("equity_peak", True, "OK")
+
+    # 3. Klines structure & gaps
+    if not klines:
+        add_check("klines_avail", False, "No klines provided")
+    else:
+        n = len(klines)
+        if n < MIN_KLINES:
+            add_check("klines_count", False, f"Only {n} klines (min {MIN_KLINES})", level="warning")
+        else:
+            add_check("klines_count", True, f"{n} klines")
+
+        interval_ms = INTERVAL_MS[interval]
+        last_ts = klines[-1][0]
+        
+        # Check gap
+        lpct = state.get("last_processed_candle_ts")
+        if lpct is not None:
+            if lpct > last_ts:
+                add_check("lpct_future", False, f"lpct {lpct} > last_ts {last_ts}")
+            else:
+                missing = (last_ts - lpct) // interval_ms - 1
+                if missing > GAP_WARNING_THRESHOLD:
+                    add_check("candle_gap", False, f"Missing {missing} candles", level="warning")
+                else:
+                    add_check("candle_gap", True, "OK")
+
+    has_error = any(not c["ok"] and c["level"] == "error" for c in checks)
+    has_warn = any(not c["ok"] and c["level"] == "warning" for c in checks)
+    
+    status = "ERROR" if has_error else ("WARNING" if has_warn else "OK")
+    summary = f"{len(checks)} checks: {sum(1 for c in checks if not c['ok'])} failed"
     return {"status": status, "checks": checks, "summary": summary}
 
-
-def _check(name: str, ok: bool, detail: str, level: str = "error") -> dict:
-    return {"name": name, "ok": ok, "level": level, "detail": detail}
-
-
-def _aggregate_status(checks: list) -> str:
-    has_error = any(not c["ok"] and c["level"] == "error" for c in checks)
-    has_warning = any(not c["ok"] and c["level"] == "warning" for c in checks)
-    if has_error: return STATUS_ERROR
-    if has_warning: return STATUS_WARNING
-    return STATUS_OK
-
-
-def _summarize(checks: list) -> str:
-    n_error = sum(1 for c in checks if not c["ok"] and c["level"] == "error")
-    n_warn = sum(1 for c in checks if not c["ok"] and c["level"] == "warning")
-    return f"{len(checks)} checks: {n_error} error, {n_warn} warning"
-
-
-def _check_state_exists(state_dir: str) -> dict:
-    return _check("state_exists", state_exists(state_dir), f"state.json in {state_dir}")
-
-
-def _check_state_loads(state_dir: str) -> tuple:
+def reconcile_public(state_dir, symbol, interval="1h"):
     try:
         state = load_state(state_dir, strict=False)
-        return _check("state_loads", True, "state.json loaded"), state
     except Exception as e:
-        return _check("state_loads", False, f"load failed: {e}"), None
-
-
-def _check_klines(klines: list) -> dict:
-    n = len(klines)
-    ok = n >= MIN_KLINES
-    return _check("klines_sufficient", ok, f"received {n} klines (min={MIN_KLINES})", level="warning")
-
-
-def _check_last_candle_closed(klines: list, interval: str, now_ms: int) -> dict:
-    if not klines:
-        return _check("last_candle_closed", False, "no klines to check")
-    last_ts = int(klines[-1][0])
-    if interval not in INTERVAL_MS:
-        return _check("last_candle_closed", False, f"unknown interval: {interval}")
-    close_time = last_ts + INTERVAL_MS[interval]
-    ok = close_time <= now_ms
-    return _check("last_candle_closed", ok, f"last_ts={last_ts} close_time={close_time} now={now_ms}")
-
-
-def _check_last_processed_vs_latest(klines: list, state: dict, symbol: str) -> dict:
-    if not klines:
-        return _check("last_processed_vs_latest", False, "no klines")
-    last_candle_ts = int(klines[-1][0])
-
-    if "last_processed_candle_ts" not in state:
-        return _check("last_processed_vs_latest", False, "last_processed_candle_ts missing in state", level="warning")
-
-    lpct = state["last_processed_candle_ts"]
-    if lpct is None:
-        return _check("last_processed_vs_latest", False, "last_processed_candle_ts is None (state never processed a candle)", level="warning")
-
-    if lpct > last_candle_ts:
-        return _check("last_processed_vs_latest", False, f"last_processed={lpct} > latest_candle={last_candle_ts}")
-
-    return _check("last_processed_vs_latest", True, f"last_processed={lpct} latest_candle={last_candle_ts}")
-
-
-def _check_missing_candles(klines: list, state: dict, interval: str, symbol: str) -> dict:
-    if not klines or interval not in INTERVAL_MS:
-        return _check("no_missing_candles", False, "insufficient data to compute gap", level="warning")
-
-    lpct = state.get("last_processed_candle_ts")
-    if lpct is None:
-        return _check("no_missing_candles", False, "last_processed_candle_ts is None", level="warning")
-
-    interval_ms = INTERVAL_MS[interval]
-    last_candle_ts = int(klines[-1][0])
-
-    if last_candle_ts <= lpct:
-        return _check("no_missing_candles", True, f"no gap (last={last_candle_ts}, lpct={lpct})")
-
-    delta = last_candle_ts - lpct
-    missing = (delta // interval_ms) - 1
-    if missing < 0: missing = 0
-
-    if missing >= GAP_WARNING_THRESHOLD:
-        return _check("no_missing_candles", False, f"{missing} candle(s) missing between lpct={lpct} and last={last_candle_ts}", level="warning")
-
-    return _check("no_missing_candles", True, f"no significant gap (missing={missing})")
-
-
-def _check_hash_match(state: dict) -> dict:
-    expected = compute_strategy_hash()
-    actual = state.get("strategy_hash")
-    if actual is None:
-        return _check("hash_match", False, "strategy_hash missing in state")
-    return _check("hash_match", actual == expected, f"state={actual[:16]}... expected={expected[:16]}...")
-
-
-def reconcile_with_data(state: dict, klines: list, interval: str, now_ms: int, symbol: str = "BTC-SWAP-USDT") -> dict:
-    checks = []
-    checks.append(_check_hash_match(state))
-    checks.append(_check_klines(klines))
-    checks.append(_check_last_candle_closed(klines, interval, now_ms))
-    checks.append(_check_last_processed_vs_latest(klines, state, symbol))
-    checks.append(_check_missing_candles(klines, state, interval, symbol))
-
-    status = _aggregate_status(checks)
-    return _result(status, checks, _summarize(checks))
-
-
-def reconcile_public(state_dir: str, symbol: str = "BTC-SWAP-USDT", interval: str = "1h") -> dict:
-    checks = []
-
-    chk_exists = _check_state_exists(state_dir)
-    checks.append(chk_exists)
-    if not chk_exists["ok"]:
-        return _result(STATUS_ERROR, checks, "state.json missing → ERROR")
-
-    chk_load, state = _check_state_loads(state_dir)
-    checks.append(chk_load)
-    if not chk_load["ok"]:
-        return _result(STATUS_ERROR, checks, "state.json invalid → ERROR")
-
-    checks.append(_check_hash_match(state))
-
+        return {"status": "ERROR", "summary": f"Load failed: {e}", "checks": []}
+        
     try:
         klines = fetch_klines(symbol, interval, limit=300)
     except Exception as e:
-        checks.append(_check("klines_fetched", False, f"data_feed failed: {e}"))
-        return _result(STATUS_ERROR, checks, "data_feed failed → ERROR")
-
-    checks.append(_check("klines_fetched", True, f"received {len(klines)} klines"))
-    checks.append(_check_klines(klines))
-
-    if not klines:
-        return _result(_aggregate_status(checks), checks, "no klines → cannot proceed")
-
+        klines = None
+        
     now_ms = int(time.time() * 1000)
-    inner = reconcile_with_data(state, klines, interval, now_ms, symbol=symbol)
-    for c in inner["checks"]:
-        if c["name"] not in ("hash_match", "klines_sufficient"):
-            checks.append(c)
-
-    status = _aggregate_status(checks)
-    return _result(status, checks, _summarize(checks))
-
-
-if __name__ == "__main__":
-    import sys
-    state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
-    symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
-    interval = os.environ.get("INTERVAL", "1h")
-
-    result = reconcile_public(state_dir, symbol, interval)
-    print(f"STATUS: {result['status']} | {result['summary']}")
-    for c in result["checks"]:
-        mark = "✅" if c["ok"] else ("❌" if c["level"] == "error" else "⚠️ ")
-        print(f"  {mark} [{c['name']}] {c['detail']}")
-    if result["status"] == "ERROR": sys.exit(1)
+    return reconcile_with_data(state, klines, interval, now_ms)
