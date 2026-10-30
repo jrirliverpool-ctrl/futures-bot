@@ -1,14 +1,3 @@
-"""
-toobit_client.py — Toobit API V1 client.
-v2.2 — Final fixes:
-  - _is_success handles both direct order dict AND wrapped {code:200}
-  - NEW: caller must save exchange_order_id before halting
-  - Market order: no `price` field sent
-  - executedQty > origQty → UNKNOWN
-  - origQty=0 → use requested_qty fallback (safe for filled orders)
-  - Auth preserved exactly: HMAC-SHA256 + urllib.urlencode(sorted) + X-BB-APIKEY
-"""
-
 import os
 import time
 import hmac
@@ -21,10 +10,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
-
 BASE_URL = "https://api.toobit.com"
 VALID_STATUSES = ("NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "REJECTED")
-
 
 @dataclass
 class StandardOrderResponse:
@@ -37,7 +24,6 @@ class StandardOrderResponse:
     status: str
     raw_response: dict
 
-
 class ToobitClient:
     def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None):
         self.api_key = api_key or os.environ.get("TOOBIT_API_KEY")
@@ -46,7 +32,8 @@ class ToobitClient:
             raise ValueError("API credentials required")
 
     def _generate_signature(self, params: dict) -> str:
-        query_string = urllib.parse.urlencode(sorted(params.items()))
+        sorted_items = sorted(params.items())
+        query_string = urllib.parse.urlencode(sorted_items)
         return hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
@@ -56,15 +43,19 @@ class ToobitClient:
     def _request(self, method: str, path: str, params: dict) -> dict:
         url = f"{BASE_URL}{path}"
         headers = {"X-BB-APIKEY": self.api_key}
+        
         params["timestamp"] = int(time.time() * 1000)
         params["recvWindow"] = 5000
         params["signature"] = self._generate_signature(params)
+        
+        # P0 FIX: Ensure the data sent matches the exact sorted order used for signing
+        sorted_items = sorted(params.items())
 
         try:
             if method == "GET":
-                r = requests.get(url, params=params, headers=headers, timeout=15)
+                r = requests.get(url, params=sorted_items, headers=headers, timeout=15)
             elif method == "POST":
-                r = requests.post(url, data=params, headers=headers, timeout=15)
+                r = requests.post(url, data=sorted_items, headers=headers, timeout=15)
             else:
                 raise ValueError(f"Unsupported method: {method}")
         except requests.exceptions.Timeout:
@@ -85,51 +76,37 @@ class ToobitClient:
         raise ValueError(f"Invalid side/intent: {side}/{intent}")
 
     def _is_success(self, data: dict) -> bool:
-        """
-        v2.2 Fix: Handles both:
-          (a) Direct order object: {orderId, status, executedQty, ...} → success
-          (b) Wrapped response: {code: 200, data: ...} → success
-        Returns False for transport errors, non-dict, or error codes.
-        """
-        if not isinstance(data, dict):
-            return False
-        if data.get("_transport"):
-            return False
-
-        # Case (a): direct order response
+        if not isinstance(data, dict): return False
+        if data.get("_transport"): return False
+        # Accept direct order response or wrapped {code: 200, data: ...}
         if "orderId" in data or "status" in data:
             code = data.get("code")
-            if code is not None and code not in (200, 0):
-                return False
-            return True
+            return code in (200, 0) if code is not None else True
+        return data.get("code") in (200, 0)
 
-        # Case (b): wrapped response
-        code = data.get("code")
-        return code in (200, 0)
+    def _parse_order(self, raw_data: dict, requested_qty: float) -> StandardOrderResponse:
+        # P0 FIX: Unwrap if wrapped in {"code": 200, "data": {...}}
+        data = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else {}
 
-    def _parse_order(self, data: dict, requested_qty: float) -> StandardOrderResponse:
         def _safe_float(v):
+            if isinstance(v, bool): return None
             try:
                 f = float(v)
-                if math.isfinite(f) and f >= 0:
-                    return f
+                if math.isfinite(f) and f >= 0: return f
             except (ValueError, TypeError):
                 pass
             return None
 
         executed = _safe_float(data.get("executedQty"))
         orig = _safe_float(data.get("origQty"))
-
+        
         if executed is None:
-            return self._unknown_from(data, requested_qty, "executedQty invalid")
-
-        # v2.2: executedQty must not exceed origQty
-        if orig is not None and orig > 0 and executed > orig + 1e-8:
-            return self._unknown_from(data, requested_qty, "executedQty > origQty")
-
-        # Fallback for origQty=0
+            return self._unknown_from(raw_data, requested_qty, "executedQty invalid")
+            
         if orig is None or orig == 0:
             orig = requested_qty
+        elif executed > orig + 1e-8:
+            return self._unknown_from(raw_data, requested_qty, "executedQty > origQty")
 
         avg_price = _safe_float(data.get("avgPrice"))
         status = data.get("status", "UNKNOWN")
@@ -144,21 +121,12 @@ class ToobitClient:
             filled_qty=executed,
             avg_price=avg_price,
             status=status,
-            raw_response=data,
+            raw_response=raw_data,
         )
 
     def _unknown_from(self, data: dict, requested_qty: float, reason: str) -> StandardOrderResponse:
         logger.critical(f"UNKNOWN: {reason}. Data: {data}")
-        return StandardOrderResponse(
-            exchange_order_id=None,
-            client_order_id=None,
-            symbol="",
-            requested_qty=requested_qty,
-            filled_qty=0.0,
-            avg_price=None,
-            status="UNKNOWN",
-            raw_response=data,
-        )
+        return StandardOrderResponse(None, None, "", requested_qty, 0.0, None, "UNKNOWN", data)
 
     def place_order(self, symbol: str, side: str, order_type: str,
                     quantity: float, price: Optional[float],
@@ -166,7 +134,7 @@ class ToobitClient:
         try:
             toobit_side = self._map_side(side, intent)
         except ValueError as e:
-            return StandardOrderResponse(None, client_order_id, symbol, quantity, 0.0, None, "UNKNOWN", {"error": str(e)})
+            return self._unknown_from({"error": str(e)}, quantity, str(e))
 
         params = {
             "symbol": symbol,
@@ -175,30 +143,23 @@ class ToobitClient:
             "newClientOrderId": client_order_id,
         }
 
-        # v2.2: Market order — do NOT send `price` field at all
         if order_type == "MARKET":
             params["type"] = "LIMIT"
             params["priceType"] = "MARKET"
-            # NO price field
         elif order_type == "LIMIT":
             params["type"] = "LIMIT"
             params["price"] = price
         else:
-            return StandardOrderResponse(None, client_order_id, symbol, quantity, 0.0, None, "UNKNOWN",
-                                         {"error": f"unsupported order_type: {order_type}"})
+            return self._unknown_from({"error": "bad order_type"}, quantity, "bad order_type")
 
         data = self._request("POST", "/api/v1/futures/order", params)
-
         if not self._is_success(data):
-            return StandardOrderResponse(None, client_order_id, symbol, quantity, 0.0, None, "UNKNOWN", data)
-
+            return self._unknown_from(data, quantity, "API_ERROR or invalid")
         return self._parse_order(data, quantity)
 
     def get_order_status(self, symbol: str, client_order_id: str) -> StandardOrderResponse:
         params = {"symbol": symbol, "origClientOrderId": client_order_id}
         data = self._request("GET", "/api/v1/futures/order", params)
-
         if not self._is_success(data):
-            return StandardOrderResponse(None, client_order_id, symbol, 0.0, 0.0, None, "UNKNOWN", data)
-
+            return self._unknown_from(data, 0.0, "query failed")
         return self._parse_order(data, 0.0)
