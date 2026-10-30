@@ -1,107 +1,590 @@
-import sys, os, copy
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from paper_engine import (
-    floor_to_step, apply_slippage, compute_initial_levels,
-    calculate_position_size, manage_position_on_candle,
-    execute_pending_entry, process_candle, run_engine,
-    reset_period_losses_if_needed, DEFAULT_CONFIG, DEFAULT_STATE,
+"""
+test_paper_state_manager.py
+
+Tests for scripts/paper_state_manager.py.
+
+Coverage:
+- state_exists
+- load_events
+- append_events
+- events_count
+- max_seq
+
+Scope:
+- Tests only the native behavior of paper_state_manager.py.
+- Does not test delegated init_state/load_state/save_state behavior.
+- Does not assume atomic JSONL writes.
+"""
+
+import json
+import os
+import sys
+import tempfile
+
+import pytest
+
+
+SCRIPTS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "scripts")
 )
 
-SPECS = {
-    "contract_multiplier": 0.001, "min_qty": 0.0001, "max_qty": 120.0,
-    "qty_step": 0.0001, "min_notional": 0.0, "tick_size": 0.1, "max_leverage": 200.0,
-}
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
 
-def _candle(ts, o, h, l, c): return [ts, str(o), str(h), str(l), str(c), "1000"]
-def _mk_state(): return copy.deepcopy(DEFAULT_STATE)
-def _cfg():
-    c = dict(DEFAULT_CONFIG)
-    c["contract_multiplier_for_pnl"] = SPECS["contract_multiplier"]
-    return c
 
-def _make_position(side="LONG", entry=85000.0, sl=84250.0, tp1=86000.0, atr=500.0, size=1.0):
-    return {
-        "side": side, "entry_price": entry, "entry_candle_ts": 0,
-        "size": size, "remaining_size": size, "tp1_size": 0.0,
-        "realized_pnl": 0.0, "initial_sl": sl, "current_sl": sl, "initial_tp1": tp1,
-        "tp1_hit": False, "be_moved": False, "trailing_active": False,
-        "highest_high_since_entry": entry, "lowest_low_since_entry": entry,
-        "candles_since_entry": 0, "atr_at_entry": atr, "signal_candle_ts": 0,
+from paper_state_manager import (
+    state_exists,
+    load_events,
+    append_events,
+    events_count,
+    max_seq,
+    events_file,
+    state_file,
+)
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def _write_events_file(state_dir, content):
+    os.makedirs(state_dir, exist_ok=True)
+
+    path = events_file(state_dir)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return path
+
+
+def _event(event_type="SIGNAL", timestamp=1000, **extra):
+    event = {
+        "type": event_type,
+        "timestamp": timestamp,
     }
+    event.update(extra)
+    return event
 
-def _cb_yes(info, state): return True
-def _cb_no(info, state): return False
 
-def test_floor_to_step():
-    assert floor_to_step(13.333333, 0.0001) == 13.3333
-    assert floor_to_step(0.00009, 0.0001) == 0.0
+# ============================================================
+# state_exists
+# ============================================================
 
-def test_apply_slippage():
-    assert abs(apply_slippage(100.0, True, "LONG", 0.001) - 100.1) < 1e-9
-    assert abs(apply_slippage(100.0, False, "SHORT", 0.001) - 100.1) < 1e-9
+def test_state_exists_false_when_state_file_missing():
+    with tempfile.TemporaryDirectory() as state_dir:
+        assert state_exists(state_dir) is False
 
-def test_compute_initial_levels():
-    sl, tp1 = compute_initial_levels(100.0, 10.0, "LONG", DEFAULT_CONFIG)
-    assert abs(sl - 85.0) < 1e-9
-    assert abs(tp1 - 120.0) < 1e-9
 
-def test_position_size_valid():
-    qty = calculate_position_size(1000.0, 85000.0, 84250.0, SPECS, 0.01)
-    assert qty is not None and abs(qty - 13.3333) < 1e-6
+def test_state_exists_true_when_state_file_exists():
+    with tempfile.TemporaryDirectory() as state_dir:
+        os.makedirs(state_dir, exist_ok=True)
 
-def test_position_size_below_min():
-    qty = calculate_position_size(0.001, 85000.0, 84250.0, SPECS, 0.01)
-    assert qty is None
+        path = state_file(state_dir)
 
-def test_sl_hit_long():
-    pos = _make_position()
-    candle = _candle(1000, 85000, 85100, 84000, 84500)
-    _, events, exited = manage_position_on_candle(pos, candle, 500.0, _cfg())
-    assert exited is True
-    assert events[0]["reason"] == "SL"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"equity": 1000.0}, f)
 
-def test_be_moved():
-    pos = _make_position()
-    candle = _candle(1000, 85000, 85800, 84800, 85700)
-    pos_after, events, exited = manage_position_on_candle(pos, candle, 500.0, _cfg())
-    assert exited is False
-    assert pos_after["be_moved"] is True
+        assert state_exists(state_dir) is True
 
-def test_tp1_reduces_remaining_size():
-    pos = _make_position(size=10.0)
-    candle = _candle(1000, 85000, 86200, 84900, 86100)
-    pos_after, events, exited = manage_position_on_candle(pos, candle, 500.0, _cfg(), specs=SPECS)
-    assert exited is False
-    assert pos_after["tp1_hit"] is True
-    assert abs(pos_after["remaining_size"] - 5.0) < 1e-9
 
-def test_time_exit():
-    pos = _make_position()
-    pos["candles_since_entry"] = 47
-    candle = _candle(1000, 85000, 85100, 84900, 85050)
-    _, events, exited = manage_position_on_candle(pos, candle, 500.0, _cfg())
-    assert exited is True
-    assert events[0]["reason"] == "TIME_EXIT"
+def test_state_exists_does_not_confuse_events_file_with_state_file():
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 1, "event_type": "SIGNAL"}\n',
+        )
 
-def test_pending_entry_executed():
-    state = _mk_state()
-    state["pending_entry"] = {"side": "LONG", "signal_candle_ts": 1000, "atr_at_signal": 500.0, "close_at_signal": 85000.0}
-    candle = _candle(3600000, 85100, 85300, 85000, 85200)
-    new_state, events = execute_pending_entry(state, candle, SPECS, _cfg(), execution_callback=_cb_yes)
-    assert new_state["position"] is not None
+        assert state_exists(state_dir) is False
 
-def test_daily_breaker():
-    state = _mk_state()
-    state["daily_loss"] = 30.0
-    state["loss_day_key"] = 0
-    klines = [_candle(1000, 100, 101, 99, 100)]
-    new_state, events = process_candle(state, klines, {"atr": [1.0]}, 0, SPECS, _cfg())
-    assert new_state["circuit_breaker_active"] is True
 
-def test_halt_trading_blocks_signal():
-    state = _mk_state()
-    state["halt_trading"] = True
-    klines = [_candle(1000, 100, 101, 99, 100)]
-    sig = {"signal": "LONG", "signal_candle_ts": 1000, "atr_at_signal": 1.0, "close": 100.0}
-    new_state, events = process_candle(state, klines, {"atr": [1.0]}, 0, SPECS, _cfg(), signal=sig)
-    assert new_state["pending_entry"] is None
+# ============================================================
+# load_events
+# ============================================================
+
+def test_load_events_returns_empty_list_when_file_missing():
+    with tempfile.TemporaryDirectory() as state_dir:
+        assert load_events(state_dir) == []
+
+
+def test_load_events_reads_valid_jsonl():
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 1, "event_type": "SIGNAL"}\n'
+            '{"seq": 2, "event_type": "ENTRY"}\n',
+        )
+
+        loaded = load_events(state_dir)
+
+        assert len(loaded) == 2
+        assert loaded[0]["seq"] == 1
+        assert loaded[1]["seq"] == 2
+
+
+def test_load_events_skips_blank_lines():
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 1}\n'
+            '\n'
+            '   \n'
+            '{"seq": 2}\n',
+        )
+
+        loaded = load_events(state_dir)
+
+        assert len(loaded) == 2
+        assert loaded[0]["seq"] == 1
+        assert loaded[1]["seq"] == 2
+
+
+def test_load_events_raises_on_corrupt_json_line():
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 1}\n'
+            'this is not json\n',
+        )
+
+        with pytest.raises(ValueError, match="line 2"):
+            load_events(state_dir)
+
+
+def test_load_events_raises_when_last_line_is_incomplete():
+    """
+    The implementation is append-only, not atomic.
+    A partial final JSONL line must fail closed.
+    """
+
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 1}\n'
+            '{"seq": 2',
+        )
+
+        with pytest.raises(ValueError):
+            load_events(state_dir)
+
+
+# ============================================================
+# append_events — empty input
+# ============================================================
+
+def test_append_events_empty_list_returns_zero_counts():
+    with tempfile.TemporaryDirectory() as state_dir:
+        appended, skipped = append_events(state_dir, [])
+
+        assert appended == 0
+        assert skipped == 0
+
+
+def test_append_events_empty_list_does_not_create_events_file():
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(state_dir, [])
+
+        assert os.path.exists(events_file(state_dir)) is False
+
+
+# ============================================================
+# append_events — sequence assignment
+# ============================================================
+
+def test_append_events_assigns_sequential_seq_numbers():
+    with tempfile.TemporaryDirectory() as state_dir:
+        events = [
+            _event("SIGNAL", 1000),
+            _event("ENTRY", 2000),
+        ]
+
+        appended, skipped = append_events(
+            state_dir,
+            events,
+            strategy_hash="test-hash",
+        )
+
+        assert appended == 2
+        assert skipped == 0
+
+        loaded = load_events(state_dir)
+
+        assert len(loaded) == 2
+        assert loaded[0]["seq"] == 1
+        assert loaded[1]["seq"] == 2
+
+
+def test_append_events_continues_sequence_across_calls():
+    with tempfile.TemporaryDirectory() as state_dir:
+        first_appended, first_skipped = append_events(
+            state_dir,
+            [_event("SIGNAL", 1000)],
+            strategy_hash="test-hash",
+        )
+
+        second_appended, second_skipped = append_events(
+            state_dir,
+            [_event("ENTRY", 2000)],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert first_appended == 1
+        assert first_skipped == 0
+
+        assert second_appended == 1
+        assert second_skipped == 0
+
+        assert [event["seq"] for event in loaded] == [1, 2]
+
+
+def test_append_events_continues_after_existing_sequence_gap():
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 2, "event_id": "existing-1"}\n'
+            '{"seq": 7, "event_id": "existing-2"}\n',
+        )
+
+        appended, skipped = append_events(
+            state_dir,
+            [_event("ENTRY", 3000)],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert appended == 1
+        assert skipped == 0
+        assert loaded[-1]["seq"] == 8
+
+
+# ============================================================
+# append_events — field transformation
+# ============================================================
+
+def test_append_events_renames_type_to_event_type():
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(
+            state_dir,
+            [_event("SIGNAL", 1000)],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+        event = loaded[0]
+
+        assert "type" not in event
+        assert event["event_type"] == "SIGNAL"
+
+
+def test_append_events_transforms_timestamp():
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(
+            state_dir,
+            [_event("SIGNAL", 1000)],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+        event = loaded[0]
+
+        assert "timestamp" not in event
+        assert event["candle_ts_ms"] == 1000
+        assert "timestamp_iso" in event
+        assert event["timestamp_iso"].endswith("+00:00")
+
+
+def test_append_events_preserves_other_event_fields():
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(
+            state_dir,
+            [
+                _event(
+                    "ENTRY",
+                    1000,
+                    side="LONG",
+                    price=85000.0,
+                    size=2.0,
+                )
+            ],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+        event = loaded[0]
+
+        assert event["side"] == "LONG"
+        assert event["price"] == 85000.0
+        assert event["size"] == 2.0
+
+
+def test_append_events_adds_strategy_hash():
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(
+            state_dir,
+            [_event("SIGNAL", 1000)],
+            strategy_hash="custom-strategy-hash",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert loaded[0]["strategy_hash"] == "custom-strategy-hash"
+
+
+def test_append_events_adds_strategy_version():
+    from strategy_config import STRATEGY_CONFIG
+
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(
+            state_dir,
+            [_event("SIGNAL", 1000)],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert loaded[0]["strategy_version"] == STRATEGY_CONFIG["version"]
+
+
+def test_append_events_adds_event_id():
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(
+            state_dir,
+            [_event("SIGNAL", 1000)],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert "event_id" in loaded[0]
+        assert isinstance(loaded[0]["event_id"], str)
+        assert len(loaded[0]["event_id"]) == 16
+
+
+# ============================================================
+# append_events — idempotency
+# ============================================================
+
+def test_append_events_skips_duplicate_event():
+    with tempfile.TemporaryDirectory() as state_dir:
+        event = _event("SIGNAL", 1000, signal="LONG")
+
+        first_appended, first_skipped = append_events(
+            state_dir,
+            [event],
+            strategy_hash="test-hash",
+        )
+
+        second_appended, second_skipped = append_events(
+            state_dir,
+            [event],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert first_appended == 1
+        assert first_skipped == 0
+
+        assert second_appended == 0
+        assert second_skipped == 1
+
+        assert len(loaded) == 1
+
+
+def test_append_events_does_not_skip_different_events():
+    with tempfile.TemporaryDirectory() as state_dir:
+        first = _event("SIGNAL", 1000, signal="LONG")
+        second = _event("SIGNAL", 2000, signal="SHORT")
+
+        appended, skipped = append_events(
+            state_dir,
+            [first, second],
+            strategy_hash="test-hash",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert appended == 2
+        assert skipped == 0
+        assert len(loaded) == 2
+
+
+def test_append_events_fingerprint_depends_on_strategy_hash():
+    with tempfile.TemporaryDirectory() as state_dir:
+        event = _event("SIGNAL", 1000, signal="LONG")
+
+        first_appended, first_skipped = append_events(
+            state_dir,
+            [event],
+            strategy_hash="hash-A",
+        )
+
+        second_appended, second_skipped = append_events(
+            state_dir,
+            [event],
+            strategy_hash="hash-B",
+        )
+
+        loaded = load_events(state_dir)
+
+        assert first_appended == 1
+        assert first_skipped == 0
+
+        assert second_appended == 1
+        assert second_skipped == 0
+
+        assert len(loaded) == 2
+        assert loaded[0]["strategy_hash"] == "hash-A"
+        assert loaded[1]["strategy_hash"] == "hash-B"
+
+
+# ============================================================
+# append_events — corrupted existing file
+# ============================================================
+
+def test_append_events_refuses_to_append_to_corrupt_file():
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 1}\n'
+            'corrupt-json-line\n',
+        )
+
+        with pytest.raises(ValueError, match="line 2"):
+            append_events(
+                state_dir,
+                [_event("ENTRY", 2000)],
+                strategy_hash="test-hash",
+            )
+
+
+def test_append_events_does_not_silently_repair_corrupt_file():
+    with tempfile.TemporaryDirectory() as state_dir:
+        original_content = (
+            '{"seq": 1}\n'
+            'corrupt-json-line\n'
+        )
+
+        path = _write_events_file(state_dir, original_content)
+
+        with pytest.raises(ValueError):
+            append_events(
+                state_dir,
+                [_event("ENTRY", 2000)],
+                strategy_hash="test-hash",
+            )
+
+        with open(path, "r", encoding="utf-8") as f:
+            after_content = f.read()
+
+        assert after_content == original_content
+
+
+# ============================================================
+# events_count
+# ============================================================
+
+def test_events_count_returns_zero_when_file_missing():
+    with tempfile.TemporaryDirectory() as state_dir:
+        assert events_count(state_dir) == 0
+
+
+def test_events_count_counts_physical_lines():
+    """
+    Current implementation counts physical lines,
+    including blank lines.
+    """
+
+    with tempfile.TemporaryDirectory() as state_dir:
+        _write_events_file(
+            state_dir,
+            '{"seq": 1}\n'
+            '\n'
+            '{"seq": 2}\n',
+        )
+
+        assert events_count(state_dir) == 3
+
+
+def test_events_count_after_append():
+    with tempfile.TemporaryDirectory() as state_dir:
+        append_events(
+            state_dir,
+            [
+                _event("SIGNAL", 1000),
+                _event("ENTRY", 2000),
+            ],
+            strategy_hash="test-hash",
+        )
+
+        assert events_count(state_dir) == 2
+
+
+# ============================================================
+# max_seq
+# ============================================================
+
+def test_max_seq_returns_zero_for_empty_list():
+    assert max_seq([]) == 0
+
+
+def test_max_seq_returns_largest_sequence():
+    events = [
+        {"seq": 1},
+        {"seq": 5},
+        {"seq": 3},
+    ]
+
+    assert max_seq(events) == 5
+
+
+def test_max_seq_defaults_missing_seq_to_zero():
+    events = [
+        {},
+        {"seq": 3},
+        {"seq": 1},
+    ]
+
+    assert max_seq(events) == 3
+
+
+def test_max_seq_accepts_zero():
+    assert max_seq([{"seq": 0}]) == 0
+
+
+def test_max_seq_rejects_string_sequence():
+    with pytest.raises(ValueError, match="must be int"):
+        max_seq([{"seq": "3"}])
+
+
+def test_max_seq_rejects_float_sequence():
+    with pytest.raises(ValueError, match="must be int"):
+        max_seq([{"seq": 3.0}])
+
+
+def test_max_seq_rejects_boolean_sequence():
+    """
+    bool is a subclass of int in Python.
+    The implementation explicitly rejects bool.
+    """
+
+    with pytest.raises(ValueError, match="must be int"):
+        max_seq([{"seq": True}])
+
+
+def test_max_seq_rejects_negative_sequence():
+    with pytest.raises(ValueError, match="must be >= 0"):
+        max_seq([{"seq": -1}])
+
+
+# ============================================================
+# Main
+# ============================================================
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "Run this file with pytest; no standalone runner is defined."
+    )
