@@ -8,21 +8,15 @@ MIN_KLINES = 250
 GAP_WARNING_THRESHOLD = 2
 STALE_DATA_HOURS = 4
 
-
 def _validate_klines_structure(klines):
-    if not isinstance(klines, list):
-        return "not a list"
-    if not klines:
-        return None
+    if not isinstance(klines, list): return "not a list"
+    if not klines: return None
     prev_ts = None
     for i, k in enumerate(klines):
-        if not isinstance(k, (list, tuple)) or len(k) < 5:
-            return f"candle[{i}] invalid structure"
+        if not isinstance(k, (list, tuple)) or len(k) < 5: return f"candle[{i}] invalid structure"
         ts = k[0]
-        if isinstance(ts, bool) or not isinstance(ts, int):
-            return f"candle[{i}] timestamp not int"
-        if prev_ts is not None and ts <= prev_ts:
-            return f"candle[{i}] not strictly ascending"
+        if isinstance(ts, bool) or not isinstance(ts, int): return f"candle[{i}] timestamp not int"
+        if prev_ts is not None and ts <= prev_ts: return f"candle[{i}] not strictly ascending"
         prev_ts = ts
         try:
             o, h, l, c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
@@ -34,40 +28,32 @@ def _validate_klines_structure(klines):
             return f"candle[{i}] logical OHLC violation"
     return None
 
-
 def reconcile_with_data(state, klines_data, interval, now_ms):
     checks = []
-
     def add_check(name, ok, detail, level="error"):
         checks.append({"name": name, "ok": ok, "level": level, "detail": detail})
 
     current_hash = compute_strategy_hash()
     state_hash = state.get("strategy_hash")
-    if not state_hash:
-        add_check("strategy_hash", False, "Missing strategy_hash")
-    elif state_hash != current_hash:
-        add_check("strategy_hash", False, "Hash mismatch")
-    else:
-        add_check("strategy_hash", True, "OK")
+    if not state_hash: add_check("strategy_hash", False, "Missing")
+    elif state_hash != current_hash: add_check("strategy_hash", False, "Mismatch")
+    else: add_check("strategy_hash", True, "OK")
 
-    if state.get("halt_trading"):
-        add_check("halt_trading", False, "System halted")
-    if state.get("order_status") == "UNKNOWN":
-        add_check("unknown_order", False, "UNKNOWN order exists")
-    if state.get("pending_order_id"):
-        add_check("pending_order_id", False, f"Stale: {state['pending_order_id']}")
+    if state.get("halt_trading"): add_check("halt_trading", False, "Halted")
+    if state.get("order_status") == "UNKNOWN": add_check("unknown_order", False, "UNKNOWN order")
+    if state.get("order_status") == "PENDING_FILL": add_check("pending_fill", False, "PENDING_FILL order")
+    if state.get("pending_order_id"): add_check("pending_order_id", False, f"Stale: {state['pending_order_id']}")
 
     peak = state.get("peak_equity", 0)
     eq = state.get("equity", 0)
-    if not (math.isfinite(peak) and math.isfinite(eq)):
-        add_check("equity_peak", False, "equity/peak not finite")
-    elif eq > peak:
-        add_check("equity_peak", False, f"equity {eq} > peak {peak}")
-    else:
-        add_check("equity_peak", True, "OK")
+    if not (isinstance(peak, (int, float)) and not isinstance(peak, bool) and math.isfinite(peak) and
+            isinstance(eq, (int, float)) and not isinstance(eq, bool) and math.isfinite(eq)):
+        add_check("equity_peak", False, "equity/peak invalid")
+    elif eq > peak: add_check("equity_peak", False, f"{eq} > {peak}")
+    else: add_check("equity_peak", True, "OK")
 
     if interval not in INTERVAL_MS:
-        add_check("interval", False, f"Unknown interval: {interval!r}")
+        add_check("interval", False, f"Unknown: {interval!r}")
         return _aggregate(checks)
     add_check("interval", True, interval)
 
@@ -76,10 +62,8 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
         symbols_to_check = list(klines_data.items())
         if isinstance(state.get("symbols"), dict):
             missing = set(state["symbols"].keys()) - set(klines_data.keys())
-            if missing:
-                add_check("symbol_completeness", False, f"Missing: {sorted(missing)}")
-            else:
-                add_check("symbol_completeness", True, "All covered")
+            if missing: add_check("symbol_completeness", False, f"Missing: {sorted(missing)}")
+            else: add_check("symbol_completeness", True, "All covered")
     else:
         symbols_to_check = [("DEFAULT", klines_data)]
 
@@ -95,22 +79,17 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
         add_check(f"klines_struct_{sym}", True, "OK")
 
         n = len(klines)
-        if n < MIN_KLINES:
-            add_check(f"klines_count_{sym}", False, f"Only {n}", level="warning")
-        else:
-            add_check(f"klines_count_{sym}", True, f"{n}")
+        if n < MIN_KLINES: add_check(f"klines_count_{sym}", False, f"Only {n}", level="warning")
+        else: add_check(f"klines_count_{sym}", True, f"{n}")
 
         interval_ms = INTERVAL_MS[interval]
         last_ts = klines[-1][0]
 
-        if last_ts > now_ms:
-            add_check(f"data_future_{sym}", False, "Last candle in future")
+        if last_ts > now_ms: add_check(f"data_future_{sym}", False, "Future candle")
         else:
             age_h = (now_ms - last_ts) / 3_600_000
-            if age_h > STALE_DATA_HOURS:
-                add_check(f"data_fresh_{sym}", False, f"Stale {age_h:.1f}h", level="warning")
-            else:
-                add_check(f"data_fresh_{sym}", True, "OK")
+            if age_h > STALE_DATA_HOURS: add_check(f"data_fresh_{sym}", False, f"Stale {age_h:.1f}h", level="warning")
+            else: add_check(f"data_fresh_{sym}", True, "OK")
 
         if isinstance(state.get("symbols"), dict) and sym in state["symbols"]:
             lpct = state["symbols"][sym].get("last_processed_candle_ts")
@@ -118,17 +97,13 @@ def reconcile_with_data(state, klines_data, interval, now_ms):
             lpct = state.get("last_processed_candle_ts")
 
         if lpct is not None:
-            if lpct > last_ts:
-                add_check(f"lpct_future_{sym}", False, "lpct > last_ts")
+            if lpct > last_ts: add_check(f"lpct_future_{sym}", False, "lpct > last_ts")
             else:
                 missing = (last_ts - lpct) // interval_ms - 1
-                if missing > GAP_WARNING_THRESHOLD:
-                    add_check(f"candle_gap_{sym}", False, f"Missing {missing}", level="warning")
-                else:
-                    add_check(f"candle_gap_{sym}", True, "OK")
+                if missing > GAP_WARNING_THRESHOLD: add_check(f"candle_gap_{sym}", False, f"Missing {missing}", level="warning")
+                else: add_check(f"candle_gap_{sym}", True, "OK")
 
     return _aggregate(checks)
-
 
 def _aggregate(checks):
     has_error = any(not c["ok"] and c["level"] == "error" for c in checks)
@@ -136,7 +111,6 @@ def _aggregate(checks):
     status = "ERROR" if has_error else ("WARNING" if has_warn else "OK")
     summary = f"{len(checks)} checks: {sum(1 for c in checks if not c['ok'])} failed"
     return {"status": status, "checks": checks, "summary": summary}
-
 
 def reconcile_public(state_dir, symbol, interval="1h"):
     try:
