@@ -1,3 +1,4 @@
+
 import math
 from decimal import Decimal, ROUND_DOWN
 from dataclasses import dataclass
@@ -231,18 +232,18 @@ def _validate_exit_qty_and_side(
     pos = state.get("position")
 
     if pos is None:
-        return _reject("exit", "no position")
+        return _reject("exit_qty", "no position")
 
     if pos.get("side") != req.side:
-        return _reject("exit", "side mismatch")
+        return _reject("exit_qty", "side mismatch")
 
     remaining = pos.get("remaining_size", 0.0)
 
     if not _is_finite_number(remaining) or remaining <= 0:
-        return _reject("exit", "bad remaining_size")
+        return _reject("exit_qty", "bad remaining_size")
 
     if req.qty > remaining + 1e-9:
-        return _reject("exit", "> remaining")
+        return _reject("exit_qty", "> remaining")
 
     return None
 
