@@ -1,7 +1,3 @@
-"""
-run_mock_live.py — Mock Live Orchestrator for ApexQuant.
-v3.3 — Implements True Outbox (pending_events in state). Safe Bootstrap.
-"""
 import json
 import os
 import sys
@@ -110,11 +106,6 @@ def _create_order_from_event(ev, symbol, leverage=1):
     req = OrderRequest(symbol=symbol, side=ev["side"], order_type="MARKET", qty=qty, price=None, leverage=leverage, intent=order_intent)
     return req, price, intent
 
-def _build_strategy_monitor(indicators, signal, index, symbol, interval, monitor_status):
-    # (Simplified for brevity, same as before)
-    result = {"symbol": symbol, "interval": interval, "monitor_status": monitor_status, "signal": signal.get("signal", "UNKNOWN")}
-    return result
-
 def main() -> int:
     state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
     symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
@@ -135,7 +126,6 @@ def main() -> int:
     reconciler_status = None
     reconciler_summary = None
     catchup_lag = 0
-    strategy_monitor = None
 
     em = ExecutionManager(mode="MOCK_LIVE", client=None)
 
@@ -149,7 +139,8 @@ def main() -> int:
                 else:
                     return False
 
-        decision = em.execute(req, specs, state_ref, engine_config, ref_price=ref_price)
+        # CRITICAL: pass save_state so em can persist before network call
+        decision = em.execute(req, specs, state_ref, engine_config, ref_price=ref_price, save_state_fn=lambda s: save_state(state_dir, s))
         return decision.accepted
 
     try:
@@ -161,15 +152,15 @@ def main() -> int:
         if was_existing:
             state = load_state(state_dir)
             print("✅ State loaded (existing)")
-            if state.get("halt_trading"):
-                print("❌ SYSTEM HALTED: Prior critical error requires manual intervention.")
-                raise _RunComplete(1, "halted", "system_halted")
-            # OUTBOX RECOVERY: Push pending events from previous crash
+            
             if state.get("pending_events"):
                 print(f"⚠️ Recovering {len(state['pending_events'])} pending events from previous crash.")
                 append_events(state_dir, state["pending_events"], strategy_hash=compute_strategy_hash())
                 state["pending_events"] = []
                 save_state(state_dir, state)
+                
+            if state.get("halt_trading"):
+                print("⚠️ SYSTEM HALTED: Prior critical error. Will only manage existing positions, no new entries.")
         else:
             state = init_state(state_dir, initial_equity=1000.0, symbol=symbol)
             print("✅ State initialized")
@@ -188,8 +179,17 @@ def main() -> int:
 
         print("🧠 Computing indicators...")
         indicators = _build_indicators(klines)
+
+        # P0 FIX: Actually call Reconciler
+        print("🔍 Reconciler check...")
+        now_ms = int(time.time() * 1000)
+        rec = reconcile_with_data(state, klines, interval, now_ms)
+        reconciler_status = rec["status"]
+        reconciler_summary = rec["summary"]
+        if reconciler_status == "ERROR":
+            print(f"❌ reconciler ERROR: {reconciler_summary}")
+            raise _RunComplete(1, "aborted", f"reconciler: {reconciler_summary}")
         
-        # SAFE BOOTSTRAP
         if last_processed is None:
             if has_position or state.get("pending_entry"):
                 print("❌ BOOTSTRAP FAILED: Fresh start but open position/pending_entry exists!")
@@ -216,9 +216,12 @@ def main() -> int:
 
         for n, idx in enumerate(to_process, start=1):
             candle_ts = int(klines[idx][0])
-            sig = evaluate_signal(indicators, idx)
+            
+            if state.get("halt_trading"):
+                sig = None
+            else:
+                sig = evaluate_signal(indicators, idx)
 
-            # Process candle
             state, events = process_candle(
                 state, klines, indicators, idx, specs, engine_config,
                 signal=sig, execution_callback=execution_callback, exit_callback=execution_callback
@@ -226,11 +229,11 @@ def main() -> int:
 
             # OUTBOX PATTERN
             state["pending_events"] = events
-            save_state(state_dir, state) # 1. State + pending_events saved atomically
+            save_state(state_dir, state)
             if events:
-                append_events(state_dir, events, strategy_hash=strategy_hash) # 2. Events appended
+                append_events(state_dir, events, strategy_hash=strategy_hash)
             state["pending_events"] = []
-            save_state(state_dir, state) # 3. pending_events cleared
+            save_state(state_dir, state)
 
             candles_processed += 1
             print(f"  [{n}/{len(to_process)}] ts={candle_ts} events={len(events)}")
