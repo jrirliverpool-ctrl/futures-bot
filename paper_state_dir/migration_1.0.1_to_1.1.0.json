@@ -1,0 +1,22 @@
+{
+  "backup_file": "state.json.pre_migration_1.0.1_to_1.1.0.bak",
+  "events_count": 95,
+  "events_file": "events.jsonl",
+  "events_rewritten": false,
+  "events_sha256": "33cbd8d73cccacf9022ed90f0aa774d8e07286a854a8beb7cfdc8800be2a07b2",
+  "migrated_at_utc": "2026-10-30T23:10:25.384044+00:00",
+  "migration_id": "paper_v1_0_1_to_v1_1_0",
+  "migration_status": "success",
+  "pending_entry_was_present": false,
+  "position_was_open": false,
+  "source": {
+    "hash": "sha256:7d608627418f8c9a9f7d157d03d0fdc5e25add19cc35f0cc3ee1cc024c347d90",
+    "version": "1.0.1"
+  },
+  "state_file": "state.json",
+  "state_values_preserved": true,
+  "target": {
+    "hash": "sha256:0de5d79fa280590cb4f316200ed31c7e110c6d8dee448ca74650bfef95bb07e7",
+    "version": "1.1.0"
+  }
+}
