@@ -27,7 +27,7 @@ from strategy_config import (
 # ============================================================
 
 def test_config_has_version():
-    assert STRATEGY_CONFIG["version"] == "1.0.1"
+    assert STRATEGY_CONFIG["version"] == "1.1.0"
 
 
 def test_config_timeframe_valid():
@@ -110,7 +110,7 @@ def test_get_engine_config_keys():
         "leverage", "leverage_cap",
         "sl_atr_mult", "tp1_atr_mult",
         "trailing_atr_mult", "be_sl_offset_atr",
-        "be_trigger_at_r",                    # ← NEW
+        "be_trigger_at_r",
         "time_exit_candles",
         "cooldown_candles", "daily_loss_limit", "weekly_loss_limit",
         "total_dd_limit", "slippage_pct", "interval_ms",
@@ -120,7 +120,7 @@ def test_get_engine_config_keys():
 
 def test_get_engine_config_values():
     ec = get_engine_config()
-    assert ec["risk_per_trade"] == 0.01
+    assert ec["risk_per_trade"] == 0.001
     assert ec["leverage"] == 3
     assert ec["leverage_cap"] == 3
     assert ec["sl_atr_mult"] == 1.5
