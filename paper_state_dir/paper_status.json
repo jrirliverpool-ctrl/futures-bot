@@ -2,6 +2,6 @@
   "equity": 984.6741532799955,
   "error_message": null,
   "run_exit_code": 0,
-  "run_status": "no_op",
+  "run_status": "success",
   "schema_version": "1.0.0"
 }
