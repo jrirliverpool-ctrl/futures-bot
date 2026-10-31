@@ -1,3 +1,4 @@
+
 """Tests for MOCK_LIVE status reporting and safety guards."""
 
 import copy
@@ -475,6 +476,147 @@ def test_reconciler_error_aborts_run(monkeypatch):
         assert status["run_status"] == "aborted"
         assert status["reconciler_status"] == "ERROR"
         assert "reconciler" in status["error_message"]
+
+
+def test_reconciler_logs_failed_check_details(capsys):
+    result = {
+        "status": "WARNING",
+        "summary": "2 checks: 1 failed",
+        "checks": [
+            {
+                "name": "no_missing_candles",
+                "ok": False,
+                "level": "warning",
+                "detail": "Missing 2 candles",
+            },
+            {
+                "name": "hash_match",
+                "ok": True,
+                "level": "error",
+                "detail": "OK",
+            },
+        ],
+    }
+
+    status, summary = rm._log_reconciler_result(
+        result,
+        "PRE",
+    )
+
+    output = capsys.readouterr().out
+
+    assert status == "WARNING"
+    assert summary == "2 checks: 1 failed"
+    assert "RECONCILER[PRE] FAILED" in output
+    assert "name=no_missing_candles" in output
+    assert "detail=Missing 2 candles" in output
+    assert "name=hash_match" not in output
+
+
+def test_post_reconciler_error_aborts_after_candle_processing(
+    monkeypatch,
+):
+    with tempfile.TemporaryDirectory() as td:
+        klines = make_candles(300)
+        state = make_state(
+            int(klines[298][0])
+        )
+
+        calls = []
+
+        def reconciler_sequence(*_args, **_kwargs):
+            calls.append(len(calls) + 1)
+
+            if len(calls) == 1:
+                return {
+                    "status": "OK",
+                    "summary": "pre-check passed",
+                    "checks": [],
+                }
+
+            return {
+                "status": "ERROR",
+                "summary": "post-check failed",
+                "checks": [
+                    {
+                        "name": "equity_valid",
+                        "ok": False,
+                        "level": "error",
+                        "detail": "equity is invalid",
+                    }
+                ],
+            }
+
+        exit_code = run_with_mocks(
+            monkeypatch,
+            td,
+            state,
+            klines,
+            process_new_candles=True,
+            reconciler_mock=reconciler_sequence,
+        )
+
+        status = read_status(td)
+
+        assert exit_code == 1
+        assert len(calls) == 2
+        assert status["run_status"] == "aborted"
+        assert status["run_exit_code"] == 1
+        assert status["reconciler_status"] == "ERROR"
+        assert status["reconciler_summary"] == "post-check failed"
+        assert "post_reconciler" in status["error_message"]
+
+
+def test_pre_catchup_warning_is_replaced_by_post_catchup_ok(
+    monkeypatch,
+):
+    with tempfile.TemporaryDirectory() as td:
+        klines = make_candles(300)
+        state = make_state(
+            int(klines[298][0])
+        )
+
+        calls = []
+
+        def reconciler_sequence(*_args, **_kwargs):
+            calls.append(len(calls) + 1)
+
+            if len(calls) == 1:
+                return {
+                    "status": "WARNING",
+                    "summary": "pre-check gap warning",
+                    "checks": [
+                        {
+                            "name": "no_missing_candles",
+                            "ok": False,
+                            "level": "warning",
+                            "detail": "Missing 2 candles",
+                        }
+                    ],
+                }
+
+            return {
+                "status": "OK",
+                "summary": "post-check clean",
+                "checks": [],
+            }
+
+        exit_code = run_with_mocks(
+            monkeypatch,
+            td,
+            state,
+            klines,
+            process_new_candles=True,
+            reconciler_mock=reconciler_sequence,
+        )
+
+        status = read_status(td)
+
+        assert exit_code == 0
+        assert len(calls) == 2
+        assert status["run_status"] == "success"
+        assert status["reconciler_status"] == "OK"
+        assert status["reconciler_summary"] == "post-check clean"
 
 
 def test_success_updates_candle_timestamp_and_equity(monkeypatch):
