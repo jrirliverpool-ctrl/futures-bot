@@ -1,6 +1,6 @@
-import uuid
+
 import logging
-import math
+import os
 
 from order_executor import (
     evaluate,
@@ -8,7 +8,7 @@ from order_executor import (
     Decision,
     DEFAULT_CONFIG,
 )
-from toobit_client import StandardOrderResponse
+from order_intent_store import OrderIntentStore
 
 
 class ExecutionManager:
@@ -18,8 +18,9 @@ class ExecutionManager:
     Safety policy:
     - PAPER and MOCK_LIVE are supported.
     - TOOBIT_DEMO and LIVE are intentionally blocked.
-    - Real execution must not be enabled until actual exchange fills
-      are reconciled into the strategy state and accounting ledger.
+    - Unresolved durable order intents block new simulated execution.
+    - A corrupt or unreadable intent journal fails closed.
+    - This manager does not automatically resubmit unresolved orders.
     """
 
     ALLOWED_MODES = (
@@ -34,13 +35,39 @@ class ExecutionManager:
         "LIVE",
     )
 
-    def __init__(self, mode: str, client=None, logger=None):
+    def __init__(
+        self,
+        mode: str,
+        client=None,
+        logger=None,
+        intent_store=None,
+    ):
         if mode not in self.ALLOWED_MODES:
             raise ValueError(f"Invalid mode: {mode}")
 
         self.mode = mode
         self.client = client
         self.logger = logger or logging.getLogger("ExecutionManager")
+
+        if intent_store is not None:
+            self.intent_store = intent_store
+        else:
+            state_dir = os.environ.get(
+                "STATE_DIR",
+                "./paper_state_dir",
+            )
+
+            journal_path = os.environ.get(
+                "APEX_ORDER_INTENT_JOURNAL",
+                os.path.join(
+                    state_dir,
+                    "order_intents.jsonl",
+                ),
+            )
+
+            self.intent_store = OrderIntentStore(
+                journal_path
+            )
 
         if self.mode in self.BLOCKED_REAL_MODES:
             self.logger.critical(
@@ -52,6 +79,7 @@ class ExecutionManager:
         Fail-closed response.
 
         This check must happen before:
+        - reading the order intent journal
         - querying exchange order status
         - generating an exchange order ID
         - persisting a new exchange order intent
@@ -70,6 +98,53 @@ class ExecutionManager:
             order=None,
         )
 
+    def _check_intent_recovery(self) -> Decision | None:
+        """
+        Block execution when durable exchange intents remain unresolved.
+
+        The journal is read-only in this method.
+        No unresolved intent is automatically resubmitted.
+        """
+
+        try:
+            unresolved = self.intent_store.recovery_required()
+
+            if not isinstance(unresolved, list):
+                raise TypeError(
+                    "intent recovery result must be a list"
+                )
+
+            if unresolved:
+                self.logger.critical(
+                    "Execution blocked: %s unresolved durable "
+                    "order intent(s) require manual/exchange recovery.",
+                    len(unresolved),
+                )
+
+                return Decision(
+                    accepted=False,
+                    reason="unresolved_order_intent_recovery_required",
+                    gate="safety",
+                    order=None,
+                )
+
+        except Exception as exc:
+            self.logger.critical(
+                "Execution blocked: order intent journal "
+                "could not be verified: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+            return Decision(
+                accepted=False,
+                reason="order_intent_journal_unreadable",
+                gate="safety",
+                order=None,
+            )
+
+        return None
+
     def execute(
         self,
         req: OrderRequest,
@@ -85,14 +160,23 @@ class ExecutionManager:
 
         # ---------------------------------------------------------
         # P0 SAFETY LOCK
-        # Must execute before recovery or any exchange interaction.
+        # Must execute before journal access or exchange interaction.
         # ---------------------------------------------------------
 
         if self.mode in self.BLOCKED_REAL_MODES:
             return self._blocked_real_execution()
 
         # ---------------------------------------------------------
-        # 1. Recovery protection
+        # 1. Durable order-intent recovery guard
+        # ---------------------------------------------------------
+
+        recovery_decision = self._check_intent_recovery()
+
+        if recovery_decision is not None:
+            return recovery_decision
+
+        # ---------------------------------------------------------
+        # 2. Existing state recovery protection
         # ---------------------------------------------------------
 
         if state.get("order_status") == "PENDING_FILL":
@@ -125,7 +209,7 @@ class ExecutionManager:
             )
 
         # ---------------------------------------------------------
-        # 2. Validate request
+        # 3. Validate request
         # ---------------------------------------------------------
 
         decision = evaluate(
@@ -140,7 +224,7 @@ class ExecutionManager:
             return decision
 
         # ---------------------------------------------------------
-        # 3. Prevent stale pending-order state
+        # 4. Prevent stale pending-order state
         # ---------------------------------------------------------
 
         if state.get("pending_order_id") is not None:
@@ -158,7 +242,7 @@ class ExecutionManager:
             )
 
         # ---------------------------------------------------------
-        # 4. PAPER / MOCK_LIVE only
+        # 5. PAPER / MOCK_LIVE only
         # No exchange request is sent in these modes.
         # ---------------------------------------------------------
 
@@ -174,7 +258,7 @@ class ExecutionManager:
             return decision
 
         # ---------------------------------------------------------
-        # 5. Defensive fallback
+        # 6. Defensive fallback
         # ---------------------------------------------------------
 
         self.logger.critical(
@@ -200,7 +284,7 @@ class ExecutionManager:
     ) -> Decision:
 
         """
-        Exchange response processing is deliberately disabled.
+        Exchange response processing remains deliberately disabled.
 
         A future implementation must reconcile:
         - exchange order ID
