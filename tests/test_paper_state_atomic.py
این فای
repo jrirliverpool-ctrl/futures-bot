@@ -1,0 +1,218 @@
+import os
+import sys
+import tempfile
+
+import pytest
+
+
+SCRIPTS_DIR = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "scripts",
+    )
+)
+
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+
+import paper_state_manager as psm
+
+
+def _event(event_type, timestamp, **extra):
+
+    event = {
+        "type": event_type,
+        "timestamp": timestamp,
+    }
+
+    event.update(extra)
+
+    return event
+
+
+def _read_bytes(path):
+
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def test_atomic_append_and_replay_are_idempotent():
+
+    with tempfile.TemporaryDirectory() as td:
+
+        events = [
+            _event("SIGNAL", 1000, signal="LONG"),
+            _event("ENTRY", 2000, side="LONG"),
+        ]
+
+        first = psm.append_events(
+            td,
+            events,
+            strategy_hash="test-hash",
+        )
+
+        second = psm.append_events(
+            td,
+            events,
+            strategy_hash="test-hash",
+        )
+
+        loaded = psm.load_events(td)
+
+        assert first == (2, 0)
+        assert second == (0, 2)
+
+        assert len(loaded) == 2
+
+        assert [
+            event["seq"]
+            for event in loaded
+        ] == [1, 2]
+
+
+def test_replace_failure_preserves_original_log(monkeypatch):
+
+    with tempfile.TemporaryDirectory() as td:
+
+        psm.append_events(
+            td,
+            [
+                _event("SIGNAL", 1000, signal="LONG")
+            ],
+            strategy_hash="test-hash",
+        )
+
+        path = psm.events_file(td)
+
+        original = _read_bytes(path)
+
+        def failing_replace(*args, **kwargs):
+
+            raise OSError(
+                "simulated atomic replace failure"
+            )
+
+        monkeypatch.setattr(
+            psm.os,
+            "replace",
+            failing_replace,
+        )
+
+        with pytest.raises(
+            OSError,
+            match="simulated atomic replace failure",
+        ):
+
+            psm.append_events(
+                td,
+                [
+                    _event("ENTRY", 2000, side="LONG")
+                ],
+                strategy_hash="test-hash",
+            )
+
+        assert _read_bytes(path) == original
+
+        assert len(psm.load_events(td)) == 1
+
+        temporary_files = [
+            name
+            for name in os.listdir(td)
+            if name.startswith(".events_")
+        ]
+
+        assert temporary_files == []
+
+
+def test_valid_file_without_final_newline_is_preserved():
+
+    with tempfile.TemporaryDirectory() as td:
+
+        path = psm.events_file(td)
+
+        with open(path, "w", encoding="utf-8") as f:
+
+            f.write(
+                '{"event_type":"OLD","event_id":"old",'
+                '"seq":1}'
+            )
+
+        appended, skipped = psm.append_events(
+            td,
+            [
+                _event("SIGNAL", 2000, signal="SHORT")
+            ],
+            strategy_hash="test-hash",
+        )
+
+        loaded = psm.load_events(td)
+
+        assert appended == 1
+        assert skipped == 0
+
+        assert len(loaded) == 2
+
+        assert loaded[0]["event_id"] == "old"
+        assert loaded[1]["seq"] == 2
+
+
+def test_non_finite_event_does_not_modify_existing_log():
+
+    with tempfile.TemporaryDirectory() as td:
+
+        psm.append_events(
+            td,
+            [
+                _event("SIGNAL", 1000)
+            ],
+            strategy_hash="test-hash",
+        )
+
+        path = psm.events_file(td)
+
+        original = _read_bytes(path)
+
+        with pytest.raises(ValueError):
+
+            psm.append_events(
+                td,
+                [
+                    _event(
+                        "ENTRY",
+                        2000,
+                        invalid_value=float("nan"),
+                    )
+                ],
+                strategy_hash="test-hash",
+            )
+
+        assert _read_bytes(path) == original
+
+
+def test_corrupted_existing_log_is_not_repaired_automatically():
+
+    with tempfile.TemporaryDirectory() as td:
+
+        path = psm.events_file(td)
+
+        original = (
+            b'{"event_type":"OLD","seq":1}\n'
+            b'{"event_type":"BROKEN"'
+        )
+
+        with open(path, "wb") as f:
+            f.write(original)
+
+        with pytest.raises(ValueError):
+
+            psm.append_events(
+                td,
+                [
+                    _event("ENTRY", 2000)
+                ],
+                strategy_hash="test-hash",
+            )
+
+        assert _read_bytes(path) == original
