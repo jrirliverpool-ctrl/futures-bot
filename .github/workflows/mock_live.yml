@@ -1,9 +1,10 @@
+
 name: ApexQuant Mock Live Runner
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '17 * * * *'
 
 permissions:
   contents: write
@@ -45,7 +46,9 @@ jobs:
             tests/test_telegram_notifier.py \
             tests/test_mock_live_status.py \
             tests/test_paper_state_manager.py \
-            tests/test_paper_state_atomic.py
+            tests/test_paper_state_atomic.py \
+            tests/test_reconciler.py \
+            tests/test_reconcile_with_data.py
 
       - name: Initialize Telegram Event Baseline
         if: success()
