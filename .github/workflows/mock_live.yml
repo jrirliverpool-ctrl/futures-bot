@@ -1,3 +1,4 @@
+
 name: ApexQuant Mock Live Runner
 
 on:
@@ -36,16 +37,67 @@ jobs:
 
       - name: Run Safety Tests
         run: |
-          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py tests/test_tp1_exit.py tests/test_telegram_notifier.py tests/test_mock_live_status.py
+          pytest -q \
+            tests/test_execution_manager.py \
+            tests/test_order_executor.py \
+            tests/test_kill_switch.py \
+            tests/test_tp1_exit.py \
+            tests/test_telegram_notifier.py \
+            tests/test_mock_live_status.py
+
+      - name: Initialize Telegram Event Baseline
+        if: success()
+        continue-on-error: true
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python - <<'PY'
+          from telegram_notifier import initialize_event_baseline
+
+          ok = initialize_event_baseline("./paper_state_dir")
+
+          if ok:
+              print("TELEGRAM_BASELINE=READY")
+          else:
+              print("::warning::Telegram event baseline initialization failed.")
+          PY
 
       - name: Run Mock Live Engine
         env:
           STATE_DIR: ./paper_state_dir
           SYMBOL: BTC-SWAP-USDT
           INTERVAL: 1h
+          APEX_SAFE_MODE: "1"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/run_mock_live.py
+
+      - name: Dispatch Telegram Trading Events
+        if: always()
+        continue-on-error: true
+        env:
+          PYTHONPATH: scripts
+          STATE_DIR: ./paper_state_dir
+          SYMBOL: BTC-SWAP-USDT
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          from telegram_notifier import notify_pending_events
+
+          state_dir = os.environ.get(
+              "STATE_DIR",
+              "./paper_state_dir",
+          )
+
+          count = notify_pending_events(state_dir)
+
+          print(
+              "TELEGRAM_CONFIRMED_EVENT_DELIVERIES="
+              f"{count}"
+          )
+          PY
 
       - name: Commit State Updates
         if: always()
