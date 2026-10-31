@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests pytest
-      - run: pytest -q tests/test_signal_to_order.py tests/test_order_executor.py tests/test_execution_manager.py tests/test_execution_chain.py tests/test_kill_switch.py tests/test_state_manager.py tests/test_toobit_client.py
+      - run: pytest -q tests/test_signal_to_order.py tests/test_order_executor.py tests/test_execution_manager.py tests/test_execution_chain.py tests/test_kill_switch.py tests/test_state_manager.py tests/test_toobit_client.py tests/test_fill_ledger.py tests/test_toobit_user_trades.py
 
   backtest-and-chain:
     runs-on: ubuntu-latest
