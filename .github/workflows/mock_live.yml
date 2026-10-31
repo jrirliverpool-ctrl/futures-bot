@@ -3,7 +3,7 @@ name: ApexQuant Mock Live Runner
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *' # اجرای خودکار در دقیقه 0 هر ساعت (UTC)
+    - cron: '0 * * * *'
 
 permissions:
   contents: write
@@ -36,7 +36,7 @@ jobs:
 
       - name: Run Safety Tests
         run: |
-          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py tests/test_tp1_exit.py tests/test_telegram_notifier.py
+          pytest -q tests/test_execution_manager.py tests/test_order_executor.py tests/test_kill_switch.py tests/test_tp1_exit.py tests/test_telegram_notifier.py tests/test_mock_live_status.py
 
       - name: Run Mock Live Engine
         env:
@@ -51,12 +51,12 @@ jobs:
         if: always()
         run: |
           set -e
-          
+
           git config user.name "ApexQuant Bot"
           git config user.email "bot@apexquant.local"
 
           git add -f -A -- paper_state_dir/
-          
+
           if ! git diff --staged --quiet; then
             git commit -m "chore: auto-update mock live state [skip ci]"
             git pull --rebase origin main
