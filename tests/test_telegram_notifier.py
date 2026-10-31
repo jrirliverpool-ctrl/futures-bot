@@ -33,6 +33,8 @@ def test_send_success_requires_telegram_confirmation(
     monkeypatch,
     caplog,
 ):
+    caplog.set_level("INFO", logger="ApexQuant.Telegram")
+
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
 
@@ -196,6 +198,8 @@ def test_run_status_notification_reports_delivery(
     monkeypatch,
     caplog,
 ):
+    caplog.set_level("INFO", logger="ApexQuant.Telegram")
+
     monkeypatch.setattr(
         tn,
         "send_telegram_alert",
