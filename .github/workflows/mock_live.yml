@@ -1,4 +1,3 @@
-
 name: ApexQuant Mock Live Runner
 
 on:
@@ -17,6 +16,7 @@ jobs:
   run-mock-live:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     if: github.ref == 'refs/heads/main'
 
     steps:
@@ -43,7 +43,9 @@ jobs:
             tests/test_kill_switch.py \
             tests/test_tp1_exit.py \
             tests/test_telegram_notifier.py \
-            tests/test_mock_live_status.py
+            tests/test_mock_live_status.py \
+            tests/test_paper_state_manager.py \
+            tests/test_paper_state_atomic.py
 
       - name: Initialize Telegram Event Baseline
         if: success()
@@ -59,7 +61,7 @@ jobs:
           if ok:
               print("TELEGRAM_BASELINE=READY")
           else:
-              print("::warning::Telegram event baseline initialization failed.")
+              print("::warning::Telegram baseline initialization failed.")
           PY
 
       - name: Run Mock Live Engine
