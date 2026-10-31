@@ -7,8 +7,11 @@ import logging
 from datetime import datetime, timezone
 
 from paper_state_manager import (
-    init_state, load_state, save_state, state_exists,
-    append_events, events_count,
+    init_state,
+    load_state,
+    save_state,
+    state_exists,
+    append_events,
 )
 from data_feed import fetch_closed_klines
 from symbol_specs import get_symbol_specs
@@ -16,7 +19,9 @@ from indicators import compute_all
 from strategy import evaluate_signal
 from paper_engine import process_candle
 from strategy_config import (
-    get_indicator_params, get_engine_config, get_fee_config,
+    get_indicator_params,
+    get_engine_config,
+    get_fee_config,
 )
 from compute_hash import compute_strategy_hash
 from kill_switch import is_kill_switch_active
@@ -38,6 +43,9 @@ MAX_CATCHUP_CANDLES = 100
 PAPER_STATUS_SCHEMA = "1.0.0"
 MIN_REQUIRED_CANDLES = 250
 
+# This runner is deliberately simulation-only.
+EXECUTION_MODE = "MOCK_LIVE"
+
 
 class _RunComplete(Exception):
     def __init__(self, exit_code, run_status, error_message=None):
@@ -48,13 +56,14 @@ class _RunComplete(Exception):
 
 
 def _build_indicators(klines):
-    p = get_indicator_params()
+    params = get_indicator_params()
+
     return compute_all(
         klines,
-        ema_fast_p=p["ema_fast_p"],
-        ema_slow_p=p["ema_slow_p"],
-        donchian_p=p["donchian_p"],
-        atr_p=p["atr_p"],
+        ema_fast_p=params["ema_fast_p"],
+        ema_slow_p=params["ema_slow_p"],
+        donchian_p=params["donchian_p"],
+        atr_p=params["atr_p"],
     )
 
 
@@ -70,12 +79,15 @@ def _enrich_specs_for_engine(specs):
 
 
 def _build_engine_config_with_kill_switch(
-    specs, state, state_dir, repo_root=None
+    specs,
+    state,
+    state_dir,
+    repo_root=None,
 ):
     cfg = _enrich_specs_for_engine(specs)
 
-    # Fail-closed: اگر بررسی Kill Switch کامل نشود،
-    # ورود معامله جدید مجاز نخواهد بود.
+    # Fail-closed: if Kill Switch verification fails,
+    # new entries must remain blocked.
     ks_active = True
     ks_reason = "fail-closed: kill_switch check did not complete"
 
@@ -93,15 +105,15 @@ def _build_engine_config_with_kill_switch(
         ):
             ks_active = True
             ks_reason = "fail-closed: invalid kill_switch output"
+
         else:
             active, reason = result
             ks_active = active
-            ks_reason = (
-                reason if active and reason
-                else "kill_switch active"
-                if active
-                else None
-            )
+
+            if active:
+                ks_reason = reason or "kill_switch active"
+            else:
+                ks_reason = None
 
     except Exception as exc:
         ks_active = True
@@ -124,7 +136,8 @@ def _find_new_candles(klines, last_processed_ts):
         return list(range(len(klines)))
 
     return [
-        i for i, candle in enumerate(klines)
+        i
+        for i, candle in enumerate(klines)
         if int(candle[0]) > last_processed_ts
     ]
 
@@ -132,7 +145,10 @@ def _find_new_candles(klines, last_processed_ts):
 def _write_paper_status_atomic(state_dir, status):
     os.makedirs(state_dir, exist_ok=True)
 
-    target = os.path.join(state_dir, "paper_status.json")
+    target = os.path.join(
+        state_dir,
+        "paper_status.json",
+    )
 
     fd, tmp_path = tempfile.mkstemp(
         dir=state_dir,
@@ -150,6 +166,7 @@ def _write_paper_status_atomic(state_dir, status):
                 ensure_ascii=True,
                 allow_nan=False,
             )
+
             file.flush()
             os.fsync(file.fileno())
 
@@ -161,12 +178,18 @@ def _write_paper_status_atomic(state_dir, status):
                 os.remove(tmp_path)
             except OSError:
                 pass
+
         raise
 
 
 def _create_order_from_event(ev, symbol, leverage=1):
     intent = ev.get("intent")
-    order_intent = "EXIT" if intent == "TP1_HIT" else intent
+
+    order_intent = (
+        "EXIT"
+        if intent == "TP1_HIT"
+        else intent
+    )
 
     qty = ev.get("qty")
     price = ev.get("price", 0.0)
@@ -185,7 +208,8 @@ def _create_order_from_event(ev, symbol, leverage=1):
 
 
 def _refresh_status_from_state(state):
-    """Read reporting values from the latest in-memory trading state."""
+    """Read reporting values from the latest in-memory state."""
+
     if not isinstance(state, dict):
         return None, None, None, None
 
@@ -198,9 +222,20 @@ def _refresh_status_from_state(state):
 
 
 def main() -> int:
-    state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
-    symbol = os.environ.get("SYMBOL", "BTC-SWAP-USDT")
-    interval = os.environ.get("INTERVAL", "1h")
+    state_dir = os.environ.get(
+        "STATE_DIR",
+        "./paper_state_dir",
+    )
+
+    symbol = os.environ.get(
+        "SYMBOL",
+        "BTC-SWAP-USDT",
+    )
+
+    interval = os.environ.get(
+        "INTERVAL",
+        "1h",
+    )
 
     start_iso = datetime.now(timezone.utc).isoformat()
 
@@ -226,17 +261,29 @@ def main() -> int:
     engine_config = None
     em = None
 
-    safe_mode = os.environ.get("APEX_SAFE_MODE", "1") == "1"
+    # Strict interpretation:
+    # only the exact value "1" enables this runner.
+    safe_mode = (
+        os.environ.get("APEX_SAFE_MODE") == "1"
+    )
 
     def execution_callback(pending_info, state_ref):
-        if em is None or specs is None or engine_config is None:
-            logger.error("Execution callback called before initialization.")
+        if (
+            em is None
+            or specs is None
+            or engine_config is None
+        ):
+            logger.error(
+                "Execution callback called before initialization."
+            )
             return False
 
-        request, ref_price, original_intent = _create_order_from_event(
-            pending_info,
-            symbol,
-            engine_config.get("leverage", 1),
+        request, ref_price, _original_intent = (
+            _create_order_from_event(
+                pending_info,
+                symbol,
+                engine_config.get("leverage", 1),
+            )
         )
 
         if request.intent == "ENTRY":
@@ -251,7 +298,7 @@ def main() -> int:
                 else:
                     return False
 
-        # Persist state before the execution manager's external action.
+        # Persist state before execution-manager action.
         decision = em.execute(
             request,
             specs,
@@ -259,7 +306,8 @@ def main() -> int:
             engine_config,
             ref_price=ref_price,
             save_state_fn=lambda current_state: save_state(
-                state_dir, current_state
+                state_dir,
+                current_state,
             ),
         )
 
@@ -267,22 +315,49 @@ def main() -> int:
 
     try:
         print("=" * 70)
-        print("🛡️  MOCK LIVE TRADING RUN")
+        print("MOCK LIVE TRADING RUN")
         print("=" * 70)
         print(f"STATE_DIR: {state_dir}")
         print(f"SYMBOL: {symbol}")
         print(f"INTERVAL: {interval}")
         print(f"SAFE_MODE: {safe_mode}")
+        print(f"EXECUTION_MODE: {EXECUTION_MODE}")
         print("=" * 70)
+
+        # P0 guard:
+        # Do not load, initialize, or mutate trading state unless
+        # the explicit safety flag is enabled.
+        if not safe_mode:
+            raise _RunComplete(
+                1,
+                "aborted",
+                (
+                    "APEX_SAFE_MODE must be exactly '1'. "
+                    "Runner stopped before state access."
+                ),
+            )
+
+        # Defense in depth: this runner must never select LIVE.
+        if EXECUTION_MODE != "MOCK_LIVE":
+            raise _RunComplete(
+                1,
+                "aborted",
+                "Execution mode safety invariant violated.",
+            )
 
         try:
             strategy_hash = compute_strategy_hash()
+
             print(f"Strategy hash: {strategy_hash}")
+
         except Exception as exc:
             raise _RunComplete(
                 1,
                 "failed",
-                f"strategy_hash: {type(exc).__name__}: {exc}",
+                (
+                    f"strategy_hash: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
             )
 
         was_existing = state_exists(state_dir)
@@ -290,21 +365,25 @@ def main() -> int:
         if was_existing:
             try:
                 state = load_state(state_dir)
+
             except ValueError as exc:
-                print(f"❌ State validation failed: {exc}")
+                print(
+                    f"State validation failed: {exc}"
+                )
+
                 raise _RunComplete(
                     1,
                     "aborted",
                     f"state_validation: {exc}",
                 )
 
-            print("✅ State loaded (existing)")
+            print("State loaded (existing)")
 
             if state.get("pending_events"):
                 pending_events = state["pending_events"]
 
                 print(
-                    "⚠️ Recovering "
+                    "Recovering "
                     f"{len(pending_events)} pending events."
                 )
 
@@ -319,7 +398,7 @@ def main() -> int:
 
             if state.get("halt_trading"):
                 print(
-                    "⚠️ SYSTEM HALTED: "
+                    "SYSTEM HALTED: "
                     "No new entries will be permitted."
                 )
 
@@ -330,7 +409,7 @@ def main() -> int:
                 symbol=symbol,
             )
 
-            print("✅ State initialized")
+            print("State initialized")
 
             state["pending_events"] = []
             state["halt_trading"] = False
@@ -349,7 +428,8 @@ def main() -> int:
         print(f"Peak equity: {peak_equity}")
         print(f"Position open: {has_position}")
 
-        print("📋 Fetching symbol specifications...")
+        print("Fetching symbol specifications...")
+
         specs = get_symbol_specs(symbol)
 
         print(
@@ -357,15 +437,25 @@ def main() -> int:
             f"{specs['contract_multiplier']}"
         )
 
-        print(f"📥 Fetching closed {interval} candles...")
+        print(
+            f"Fetching closed {interval} candles..."
+        )
+
         klines = fetch_closed_klines(
             symbol,
             interval,
             limit=300,
         )
 
-        candle_count = len(klines) if klines is not None else 0
-        print(f"Received closed candles: {candle_count}")
+        candle_count = (
+            len(klines)
+            if klines is not None
+            else 0
+        )
+
+        print(
+            f"Received closed candles: {candle_count}"
+        )
 
         if candle_count < MIN_REQUIRED_CANDLES:
             raise _RunComplete(
@@ -377,10 +467,11 @@ def main() -> int:
                 ),
             )
 
-        print("🧠 Computing indicators...")
+        print("Computing indicators...")
         indicators = _build_indicators(klines)
 
-        print("🔍 Reconciler check...")
+        print("Reconciler check...")
+
         now_ms = int(time.time() * 1000)
 
         rec = reconcile_with_data(
@@ -393,8 +484,13 @@ def main() -> int:
         reconciler_status = rec.get("status")
         reconciler_summary = rec.get("summary")
 
-        print(f"Reconciler status: {reconciler_status}")
-        print(f"Reconciler summary: {reconciler_summary}")
+        print(
+            f"Reconciler status: {reconciler_status}"
+        )
+
+        print(
+            f"Reconciler summary: {reconciler_summary}"
+        )
 
         if reconciler_status == "ERROR":
             raise _RunComplete(
@@ -414,14 +510,18 @@ def main() -> int:
             latest_ts = int(klines[-1][0])
 
             print(
-                "🆕 BOOTSTRAP: "
+                "BOOTSTRAP: "
                 f"Setting last_processed to {latest_ts}"
             )
 
             state["last_processed_candle_ts"] = latest_ts
             state["symbol"] = symbol
-            state["contract_multiplier"] = specs["contract_multiplier"]
-            state["last_close_price"] = float(klines[-1][4])
+            state["contract_multiplier"] = (
+                specs["contract_multiplier"]
+            )
+            state["last_close_price"] = float(
+                klines[-1][4]
+            )
 
             save_state(state_dir, state)
 
@@ -432,7 +532,10 @@ def main() -> int:
                 has_position,
             ) = _refresh_status_from_state(state)
 
-            raise _RunComplete(0, "bootstrap")
+            raise _RunComplete(
+                0,
+                "bootstrap",
+            )
 
         new_indices = _find_new_candles(
             klines,
@@ -441,15 +544,22 @@ def main() -> int:
 
         if not new_indices:
             print(
-                "⏭ No new closed candle. "
+                "No new closed candle. "
                 f"Last processed: {last_processed}"
             )
-            raise _RunComplete(0, "no_op")
+
+            raise _RunComplete(
+                0,
+                "no_op",
+            )
 
         total_new = len(new_indices)
 
         to_process = new_indices[:MAX_CATCHUP_CANDLES]
-        catchup_lag = total_new - len(to_process)
+
+        catchup_lag = (
+            total_new - len(to_process)
+        )
 
         print(f"New candles detected: {total_new}")
         print(f"Candles to process: {len(to_process)}")
@@ -462,8 +572,10 @@ def main() -> int:
             repo_root=os.getcwd(),
         )
 
+        # Do not make this mode configurable through environment
+        # variables. The runner is simulation-only.
         em = ExecutionManager(
-            mode="MOCK_LIVE",
+            mode=EXECUTION_MODE,
             client=None,
         )
 
@@ -495,20 +607,28 @@ def main() -> int:
                 exit_callback=execution_callback,
             )
 
-            # Persist the latest candle and reporting values as part
-            # of the same state snapshot used by the existing outbox.
+            # Persist latest candle and reporting values together
+            # with the existing pending-event outbox.
             state["last_processed_candle_ts"] = candle_ts
             state["symbol"] = symbol
-            state["contract_multiplier"] = specs["contract_multiplier"]
-            state["last_close_price"] = float(klines[idx][4])
+            state["contract_multiplier"] = (
+                specs["contract_multiplier"]
+            )
+            state["last_close_price"] = float(
+                klines[idx][4]
+            )
             state["catchup_lag_candles"] = catchup_lag
 
-            # OUTBOX PATTERN:
-            # 1. Persist state with pending events.
+            # OUTBOX:
+            # 1. Persist pending events in state.
             # 2. Append events to the event log.
             # 3. Clear pending events and persist again.
             state["pending_events"] = events
-            save_state(state_dir, state)
+
+            save_state(
+                state_dir,
+                state,
+            )
 
             if events:
                 append_events(
@@ -518,7 +638,11 @@ def main() -> int:
                 )
 
             state["pending_events"] = []
-            save_state(state_dir, state)
+
+            save_state(
+                state_dir,
+                state,
+            )
 
             candles_processed += 1
 
@@ -551,12 +675,16 @@ def main() -> int:
     except Exception as exc:
         run_status = "failed"
         exit_code = 1
-        error_message = f"{type(exc).__name__}: {exc}"
 
-        logger.exception("MOCK_LIVE run failed.")
+        error_message = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        logger.exception(
+            "MOCK_LIVE run failed."
+        )
 
     finally:
-        # Refresh final reporting values from the latest in-memory state.
         if isinstance(state, dict):
             (
                 last_processed,
@@ -565,7 +693,9 @@ def main() -> int:
                 has_position,
             ) = _refresh_status_from_state(state)
 
-        finished_iso = datetime.now(timezone.utc).isoformat()
+        finished_iso = datetime.now(
+            timezone.utc
+        ).isoformat()
 
         status = {
             "schema_version": PAPER_STATUS_SCHEMA,
@@ -577,6 +707,8 @@ def main() -> int:
             "state_dir": state_dir,
             "symbol": symbol,
             "interval": interval,
+            "execution_mode": EXECUTION_MODE,
+            "safe_mode_enabled": safe_mode,
             "reconciler_status": reconciler_status,
             "reconciler_summary": reconciler_summary,
             "last_processed_candle_ts": last_processed,
@@ -589,8 +721,8 @@ def main() -> int:
             "error_message": error_message,
         }
 
-        # Status persistence and Telegram delivery are independent.
-        # A Telegram problem must never alter trading state.
+        # Status persistence failure is itself a failed run.
+        # The notification must report the corrected result.
         try:
             _write_paper_status_atomic(
                 state_dir,
@@ -598,8 +730,9 @@ def main() -> int:
             )
 
             print(
-                "📝 paper_status.json written "
-                f"(run_status={run_status}, exit_code={exit_code})"
+                "paper_status.json written "
+                f"(run_status={run_status}, "
+                f"exit_code={exit_code})"
             )
 
         except Exception as write_exc:
@@ -607,29 +740,32 @@ def main() -> int:
                 "Could not write paper_status.json."
             )
 
-            if exit_code == 0:
-                exit_code = 1
-
-            if error_message is None:
-                error_message = (
-                    "paper_status_write: "
-                    f"{type(write_exc).__name__}: {write_exc}"
-                )
-
-            status["run_status"] = (
-                "failed" if run_status in ("success", "partial_catchup")
-                else run_status
+            write_error = (
+                "paper_status_write: "
+                f"{type(write_exc).__name__}: {write_exc}"
             )
-            status["run_exit_code"] = exit_code
+
+            if error_message:
+                error_message = (
+                    f"{error_message}; {write_error}"
+                )
+            else:
+                error_message = write_error
+
+            run_status = "failed"
+            exit_code = 1
+
+            status["run_status"] = "failed"
+            status["run_exit_code"] = 1
             status["error_message"] = error_message
 
         try:
             notify_run_status(status)
+
         except Exception as notify_exc:
-            # Do not modify trading state or the run result because
-            # Telegram notification failed.
+            # Telegram must never alter trading state or run result.
             logger.warning(
-                "Telegram status notification raised: %s",
+                "Telegram notifier raised: %s",
                 type(notify_exc).__name__,
             )
 
