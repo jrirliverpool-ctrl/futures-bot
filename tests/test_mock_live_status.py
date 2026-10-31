@@ -1,4 +1,4 @@
-"""Tests for MOCK_LIVE status reporting and safe finalization."""
+"""Tests for MOCK_LIVE status reporting and safety guards."""
 
 import copy
 import json
@@ -41,6 +41,8 @@ REQUIRED_FIELDS = {
     "state_dir",
     "symbol",
     "interval",
+    "execution_mode",
+    "safe_mode_enabled",
     "reconciler_status",
     "reconciler_summary",
     "last_processed_candle_ts",
@@ -91,8 +93,14 @@ def make_state(last_processed):
 
 
 def read_status(state_dir):
-    path = os.path.join(state_dir, "paper_status.json")
-    assert os.path.exists(path), "paper_status.json was not created"
+    path = os.path.join(
+        state_dir,
+        "paper_status.json",
+    )
+
+    assert os.path.exists(path), (
+        "paper_status.json was not created"
+    )
 
     with open(path, "r", encoding="utf-8") as file:
         return json.load(file)
@@ -109,51 +117,85 @@ def run_with_mocks(
     status_writer=None,
     load_state_mock=None,
     reconciler_mock=None,
+    state_exists_mock=None,
+    safe_mode="1",
 ):
-    monkeypatch.setenv("STATE_DIR", state_dir)
-    monkeypatch.setenv("SYMBOL", "BTC-SWAP-USDT")
-    monkeypatch.setenv("INTERVAL", "1h")
-    monkeypatch.setenv("APEX_SAFE_MODE", "1")
+    monkeypatch.setenv(
+        "STATE_DIR",
+        state_dir,
+    )
+
+    monkeypatch.setenv(
+        "SYMBOL",
+        "BTC-SWAP-USDT",
+    )
+
+    monkeypatch.setenv(
+        "INTERVAL",
+        "1h",
+    )
+
+    if safe_mode is None:
+        monkeypatch.delenv(
+            "APEX_SAFE_MODE",
+            raising=False,
+        )
+    else:
+        monkeypatch.setenv(
+            "APEX_SAFE_MODE",
+            safe_mode,
+        )
 
     monkeypatch.setattr(
         rm,
         "compute_strategy_hash",
         lambda: FAKE_HASH,
     )
+
+    if state_exists_mock is None:
+        state_exists_mock = lambda _: True
+
     monkeypatch.setattr(
         rm,
         "state_exists",
-        lambda _: True,
+        state_exists_mock,
     )
 
     if load_state_mock is None:
-        load_state_mock = lambda _: copy.deepcopy(state)
+        load_state_mock = (
+            lambda _: copy.deepcopy(state)
+        )
 
     monkeypatch.setattr(
         rm,
         "load_state",
         load_state_mock,
     )
+
     monkeypatch.setattr(
         rm,
         "save_state",
         lambda *_args, **_kwargs: None,
     )
+
     monkeypatch.setattr(
         rm,
         "append_events",
         lambda *_args, **_kwargs: (0, 0),
     )
+
     monkeypatch.setattr(
         rm,
         "get_symbol_specs",
         lambda _: FAKE_SPECS,
     )
+
     monkeypatch.setattr(
         rm,
         "fetch_closed_klines",
         lambda *_args, **_kwargs: klines,
     )
+
     monkeypatch.setattr(
         rm,
         "_build_indicators",
@@ -161,10 +203,12 @@ def run_with_mocks(
     )
 
     if reconciler_mock is None:
-        reconciler_mock = lambda *_args, **_kwargs: {
-            "status": "OK",
-            "summary": "test reconciliation passed",
-        }
+        reconciler_mock = (
+            lambda *_args, **_kwargs: {
+                "status": "OK",
+                "summary": "test reconciliation passed",
+            }
+        )
 
     monkeypatch.setattr(
         rm,
@@ -184,7 +228,10 @@ def run_with_mocks(
 
     class FakeExecutionManager:
         def __init__(self, *args, **kwargs):
-            pass
+            self.mode = kwargs.get(
+                "mode",
+                args[0] if args else None,
+            )
 
         def execute(self, *args, **kwargs):
             raise AssertionError(
@@ -206,10 +253,15 @@ def run_with_mocks(
             },
         )
 
-        def fake_process_candle(current_state, *_args, **_kwargs):
+        def fake_process_candle(
+            current_state,
+            *_args,
+            **_kwargs,
+        ):
             updated = copy.deepcopy(current_state)
             updated["equity"] = 1001.0
             updated["peak_equity"] = 1001.0
+
             return updated, []
 
         monkeypatch.setattr(
@@ -244,14 +296,21 @@ def test_atomic_status_writer_creates_valid_json():
             "run_status": "success",
         }
 
-        rm._write_paper_status_atomic(td, expected)
+        rm._write_paper_status_atomic(
+            td,
+            expected,
+        )
 
         assert read_status(td) == expected
 
 
 def test_atomic_status_writer_creates_directory():
     with tempfile.TemporaryDirectory() as td:
-        nested = os.path.join(td, "a", "b")
+        nested = os.path.join(
+            td,
+            "a",
+            "b",
+        )
 
         rm._write_paper_status_atomic(
             nested,
@@ -259,14 +318,19 @@ def test_atomic_status_writer_creates_directory():
         )
 
         assert os.path.isfile(
-            os.path.join(nested, "paper_status.json")
+            os.path.join(
+                nested,
+                "paper_status.json",
+            )
         )
 
 
 def test_no_op_writes_complete_status(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[-1][0]))
+        state = make_state(
+            int(klines[-1][0])
+        )
 
         exit_code = run_with_mocks(
             monkeypatch,
@@ -285,12 +349,16 @@ def test_no_op_writes_complete_status(monkeypatch):
         assert status["peak_equity"] == 1000.0
         assert status["has_position"] is False
         assert status["reconciler_status"] == "OK"
+        assert status["safe_mode_enabled"] is True
+        assert status["execution_mode"] == "MOCK_LIVE"
 
 
 def test_status_contains_all_required_fields(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[-1][0]))
+        state = make_state(
+            int(klines[-1][0])
+        )
 
         run_with_mocks(
             monkeypatch,
@@ -300,9 +368,12 @@ def test_status_contains_all_required_fields(monkeypatch):
         )
 
         status = read_status(td)
+
         missing = REQUIRED_FIELDS - set(status)
 
-        assert not missing, f"Missing fields: {sorted(missing)}"
+        assert not missing, (
+            f"Missing fields: {sorted(missing)}"
+        )
 
 
 def test_bootstrap_writes_latest_candle_timestamp(monkeypatch):
@@ -331,6 +402,7 @@ def test_bootstrap_rejects_existing_position(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
         state = make_state(None)
+
         state["position"] = {
             "side": "LONG",
             "entry_price": 100.0,
@@ -379,7 +451,9 @@ def test_insufficient_data_does_not_call_reconciler(monkeypatch):
 def test_reconciler_error_aborts_run(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[298][0]))
+        state = make_state(
+            int(klines[298][0])
+        )
 
         def reconciler_error(*_args, **_kwargs):
             return {
@@ -406,7 +480,9 @@ def test_reconciler_error_aborts_run(monkeypatch):
 def test_success_updates_candle_timestamp_and_equity(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[298][0]))
+        state = make_state(
+            int(klines[298][0])
+        )
 
         exit_code = run_with_mocks(
             monkeypatch,
@@ -432,7 +508,9 @@ def test_success_updates_candle_timestamp_and_equity(monkeypatch):
 def test_partial_catchup_is_reported(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[197][0]))
+        state = make_state(
+            int(klines[197][0])
+        )
 
         exit_code = run_with_mocks(
             monkeypatch,
@@ -457,7 +535,9 @@ def test_partial_catchup_is_reported(monkeypatch):
 def test_notifier_failure_does_not_change_run_result(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[-1][0]))
+        state = make_state(
+            int(klines[-1][0])
+        )
 
         def failing_notifier(_status):
             raise RuntimeError("telegram unavailable")
@@ -477,17 +557,24 @@ def test_notifier_failure_does_not_change_run_result(monkeypatch):
         assert status["run_exit_code"] == 0
 
 
-def test_status_write_failure_still_notifies(monkeypatch):
+def test_status_write_failure_reports_failed_consistently(
+    monkeypatch,
+):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[-1][0]))
+        state = make_state(
+            int(klines[-1][0])
+        )
+
         notifications = []
 
         def failing_writer(*_args, **_kwargs):
             raise OSError("disk full")
 
         def capture_notification(status):
-            notifications.append(copy.deepcopy(status))
+            notifications.append(
+                copy.deepcopy(status)
+            )
             return True
 
         exit_code = run_with_mocks(
@@ -501,15 +588,92 @@ def test_status_write_failure_still_notifies(monkeypatch):
 
         assert exit_code == 1
         assert len(notifications) == 1
-        assert notifications[0]["run_exit_code"] == 1
-        assert notifications[0]["run_status"] == "no_op"
-        assert "paper_status_write" in notifications[0]["error_message"]
+
+        notified = notifications[0]
+
+        assert notified["run_exit_code"] == 1
+        assert notified["run_status"] == "failed"
+        assert "paper_status_write" in notified["error_message"]
+
+
+def test_safe_mode_disabled_aborts_before_state_access(
+    monkeypatch,
+):
+    with tempfile.TemporaryDirectory() as td:
+        klines = make_candles(300)
+        state = make_state(
+            int(klines[-1][0])
+        )
+
+        state_access = []
+
+        def state_exists_must_not_run(_state_dir):
+            state_access.append("state_exists")
+
+            raise AssertionError(
+                "State must not be accessed when Safe Mode is disabled."
+            )
+
+        exit_code = run_with_mocks(
+            monkeypatch,
+            td,
+            state,
+            klines,
+            state_exists_mock=state_exists_must_not_run,
+            safe_mode="0",
+        )
+
+        status = read_status(td)
+
+        assert exit_code == 1
+        assert status["run_status"] == "aborted"
+        assert status["run_exit_code"] == 1
+        assert status["safe_mode_enabled"] is False
+        assert status["execution_mode"] == "MOCK_LIVE"
+        assert "APEX_SAFE_MODE" in status["error_message"]
+        assert state_access == []
+
+
+@pytest.mark.parametrize(
+    "safe_mode",
+    [
+        None,
+        "",
+        "true",
+        "TRUE",
+        "yes",
+        "0",
+    ],
+)
+def test_safe_mode_requires_exact_one(monkeypatch, safe_mode):
+    with tempfile.TemporaryDirectory() as td:
+        klines = make_candles(300)
+        state = make_state(
+            int(klines[-1][0])
+        )
+
+        exit_code = run_with_mocks(
+            monkeypatch,
+            td,
+            state,
+            klines,
+            safe_mode=safe_mode,
+        )
+
+        status = read_status(td)
+
+        assert exit_code == 1
+        assert status["run_status"] == "aborted"
+        assert status["safe_mode_enabled"] is False
+        assert status["run_exit_code"] == 1
 
 
 def test_state_load_validation_error_is_aborted(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         klines = make_candles(300)
-        state = make_state(int(klines[-1][0]))
+        state = make_state(
+            int(klines[-1][0])
+        )
 
         def invalid_state_loader(_state_dir):
             raise ValueError("strategy hash mismatch")
