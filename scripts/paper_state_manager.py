@@ -414,4 +414,4 @@ def max_seq(events):
 
         seqs.append(value)
 
-    return max(seqs, default=0
+    return max(seqs, default=0)
