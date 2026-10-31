@@ -1,3 +1,4 @@
+
 import json
 import os
 import sys
@@ -219,6 +220,60 @@ def _refresh_status_from_state(state):
         state.get("peak_equity"),
         state.get("position") is not None,
     )
+
+
+def _log_reconciler_result(result, phase):
+    """
+    Log reconciliation status and detailed information about
+    every failed check.
+
+    The Reconciler result contract remains unchanged:
+    status, checks, summary.
+    """
+
+    if not isinstance(result, dict):
+        raise TypeError(
+            f"Reconciler {phase} result must be a dictionary."
+        )
+
+    status = result.get("status")
+    summary = result.get("summary")
+    checks = result.get("checks", [])
+
+    if not isinstance(checks, list):
+        raise TypeError(
+            f"Reconciler {phase} checks must be a list."
+        )
+
+    failed_checks = [
+        check
+        for check in checks
+        if (
+            isinstance(check, dict)
+            and check.get("ok") is False
+        )
+    ]
+
+    print(
+        f"RECONCILER[{phase}] "
+        f"status={status} "
+        f"summary={summary} "
+        f"failed_checks={len(failed_checks)}"
+    )
+
+    for check in failed_checks:
+        name = check.get("name", "UNKNOWN")
+        level = check.get("level", "unknown")
+        detail = check.get("detail", "")
+
+        print(
+            f"RECONCILER[{phase}] FAILED "
+            f"name={name} "
+            f"level={level} "
+            f"detail={detail}"
+        )
+
+    return status, summary
 
 
 def main() -> int:
@@ -470,7 +525,10 @@ def main() -> int:
         print("Computing indicators...")
         indicators = _build_indicators(klines)
 
-        print("Reconciler check...")
+        # PRE-CHECK:
+        # The state may naturally be behind the latest closed candle.
+        # A WARNING is not an automatic reason to abort catch-up.
+        print("Reconciler pre-processing check...")
 
         now_ms = int(time.time() * 1000)
 
@@ -481,15 +539,11 @@ def main() -> int:
             now_ms,
         )
 
-        reconciler_status = rec.get("status")
-        reconciler_summary = rec.get("summary")
-
-        print(
-            f"Reconciler status: {reconciler_status}"
-        )
-
-        print(
-            f"Reconciler summary: {reconciler_summary}"
+        reconciler_status, reconciler_summary = (
+            _log_reconciler_result(
+                rec,
+                "PRE",
+            )
         )
 
         if reconciler_status == "ERROR":
@@ -531,6 +585,33 @@ def main() -> int:
                 peak_equity,
                 has_position,
             ) = _refresh_status_from_state(state)
+
+            # Verify the state after bootstrap has been persisted.
+            print("Reconciler post-bootstrap check...")
+
+            post_rec = reconcile_with_data(
+                state,
+                klines,
+                interval,
+                int(time.time() * 1000),
+            )
+
+            reconciler_status, reconciler_summary = (
+                _log_reconciler_result(
+                    post_rec,
+                    "POST_BOOTSTRAP",
+                )
+            )
+
+            if reconciler_status == "ERROR":
+                raise _RunComplete(
+                    1,
+                    "aborted",
+                    (
+                        "post_bootstrap_reconciler: "
+                        f"{reconciler_summary}"
+                    ),
+                )
 
             raise _RunComplete(
                 0,
@@ -658,6 +739,36 @@ def main() -> int:
                 f"ts={candle_ts} "
                 f"events={len(events)} "
                 f"equity={equity}"
+            )
+
+        # POST-CHECK:
+        # Reconcile again after all selected candles have been processed.
+        # This should detect persistent inconsistencies and confirm that
+        # a temporary pre-check catch-up gap has been resolved.
+        print("Reconciler post-processing check...")
+
+        post_rec = reconcile_with_data(
+            state,
+            klines,
+            interval,
+            int(time.time() * 1000),
+        )
+
+        reconciler_status, reconciler_summary = (
+            _log_reconciler_result(
+                post_rec,
+                "POST",
+            )
+        )
+
+        if reconciler_status == "ERROR":
+            raise _RunComplete(
+                1,
+                "aborted",
+                (
+                    "post_reconciler: "
+                    f"{reconciler_summary}"
+                ),
             )
 
         if catchup_lag > 0:
