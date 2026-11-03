@@ -10,7 +10,7 @@ permissions:
 jobs:
   preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout main
@@ -24,16 +24,45 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: python -m pip install requests pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run durable order intent tests
+        run: |
+          python -m pytest -q tests/test_order_intent_store.py
+
+      - name: Run fill ledger tests
+        run: |
+          python -m pytest -q tests/test_fill_ledger.py
+
+      - name: Run read-only order recovery tests
+        run: |
+          python -m pytest -q tests/test_order_recovery_probe.py
+
+      - name: Run execution manager safety tests
+        run: |
+          python -m pytest -q tests/test_execution_manager.py
+
+      - name: Run Toobit client tests
+        run: |
+          python -m pytest -q tests/test_toobit_client.py
+          python -m pytest -q tests/test_toobit_user_trades.py
 
       - name: Run Toobit protection safety tests
-        run: python -m pytest -q tests/test_toobit_protection.py
+        run: |
+          python -m pytest -q tests/test_toobit_protection.py
 
       - name: Run read-only preflight unit tests
-        run: python -m unittest discover -s tests -p 'test_toobit_readonly_preflight.py' -v
+        run: |
+          python -m unittest discover \
+            -s tests \
+            -p 'test_toobit_readonly_preflight.py' \
+            -v
 
       - name: Run read-only account preflight
         env:
           TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
           TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
-        run: python scripts/toobit_readonly_preflight.py
+        run: |
+          python scripts/toobit_readonly_preflight.py
