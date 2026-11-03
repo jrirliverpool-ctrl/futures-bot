@@ -1,3 +1,4 @@
+
 name: Toobit Private Read-Only Preflight
 
 on:
@@ -10,6 +11,7 @@ jobs:
   preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -21,10 +23,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependency
-        run: python -m pip install requests
+      - name: Install dependencies
+        run: python -m pip install requests pytest
 
-      - name: Run preflight unit tests (no network)
+      - name: Run Toobit protection safety tests
+        run: python -m pytest -q tests/test_toobit_protection.py
+
+      - name: Run read-only preflight unit tests
         run: python -m unittest discover -s tests -p 'test_toobit_readonly_preflight.py' -v
 
       - name: Run read-only account preflight
