@@ -53,7 +53,7 @@ jobs:
         run: |
           python -m pytest -q tests/test_toobit_protection.py
 
-      - name: Run new live readiness gate tests
+      - name: Run live readiness gate unit tests
         run: |
           python -m pytest -q tests/test_toobit_live_readiness_gate.py
 
@@ -64,9 +64,9 @@ jobs:
             -p 'test_toobit_readonly_preflight.py' \
             -v
 
-      - name: Run read-only account preflight
+      - name: Run read-only account readiness gate
         env:
           TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
           TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
         run: |
-          python scripts/toobit_readonly_preflight.py
+          python scripts/toobit_live_readiness_gate.py
