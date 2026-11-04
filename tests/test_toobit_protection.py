@@ -26,7 +26,6 @@ class FakeClient:
         post_error=False,
         get_error=False,
     ):
-        # Realistic success envelope: no echo of submitted parameters.
         self.post = (
             post
             if post is not None
@@ -42,6 +41,7 @@ class FakeClient:
             if rows is not None
             else [
                 {
+                    "orderId": "102",
                     "symbol": "BTC-SWAP-USDT",
                     "type": "STOP_PROFIT_LOSS",
                     "orderType": "STOP_LONG_LOSS",
@@ -51,6 +51,7 @@ class FakeClient:
                     "origQty": "2",
                 },
                 {
+                    "orderId": "101",
                     "symbol": "BTC-SWAP-USDT",
                     "type": "STOP_PROFIT_LOSS",
                     "orderType": "STOP_LONG_PROFIT",
@@ -67,7 +68,7 @@ class FakeClient:
         self.calls = []
 
     def _request(self, method, path, params):
-        self.calls.append((method, path, params))
+        self.calls.append((method, path, dict(params)))
 
         if method == "POST":
             if self.post_error:
@@ -76,6 +77,9 @@ class FakeClient:
 
         if self.get_error:
             return {"_transport": "UNKNOWN"}
+
+        if params.get("orderId") is not None:
+            return []
 
         return self.rows
 
@@ -98,7 +102,7 @@ def call(client, **overrides):
     )
 
 
-def test_success_envelope_verified_from_exchange_orders():
+def test_success_envelope_verified_from_two_stable_scans():
     client = FakeClient()
 
     result = call(client)
@@ -108,8 +112,14 @@ def test_success_envelope_verified_from_exchange_orders():
     assert result["take_profit_quantity"] == "1"
     assert result["stop_loss_verified"] is True
     assert result["take_profit_verified"] is True
+    assert result["verification_scans"] == 2
 
-    assert len(client.calls) == 2
+    assert len(client.calls) == 5
+    assert client.calls[0][0] == "POST"
+    assert all(
+        item[0] == "GET"
+        for item in client.calls[1:]
+    )
 
     assert client.calls[0][2]["slSize"] == "2"
     assert client.calls[0][2]["tpSize"] == "1"
@@ -145,11 +155,14 @@ def test_missing_sl_fails_closed():
     with pytest.raises(ProtectionError):
         call(client)
 
+    assert len(client.calls) == 3
+
 
 def test_wrong_tp_size_fails_closed():
     client = FakeClient(
         rows=[
             {
+                "orderId": "102",
                 "symbol": "BTC-SWAP-USDT",
                 "type": "STOP_PROFIT_LOSS",
                 "orderType": "STOP_LONG_LOSS",
@@ -159,6 +172,7 @@ def test_wrong_tp_size_fails_closed():
                 "origQty": "2",
             },
             {
+                "orderId": "101",
                 "symbol": "BTC-SWAP-USDT",
                 "type": "STOP_PROFIT_LOSS",
                 "orderType": "STOP_LONG_PROFIT",
@@ -223,6 +237,7 @@ def test_invalid_inputs_never_touch_exchange(kwargs):
 def test_no_tp_is_allowed_with_sl_only():
     rows = [
         {
+            "orderId": "102",
             "symbol": "BTC-SWAP-USDT",
             "type": "STOP_PROFIT_LOSS",
             "orderType": "STOP_LONG_LOSS",
@@ -243,3 +258,5 @@ def test_no_tp_is_allowed_with_sl_only():
 
     assert result["stop_loss_verified"] is True
     assert result["take_profit_verified"] is False
+    assert result["verification_scans"] == 2
+    assert len(client.calls) == 5
