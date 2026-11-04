@@ -48,6 +48,9 @@ jobs:
           python -m pytest -q tests/test_toobit_client.py
           python -m pytest -q tests/test_toobit_user_trades.py
 
+      - name: Run Toobit client redaction tests
+        run: python -m pytest -q tests/test_toobit_client_redaction.py
+
       - name: Run Toobit protection safety tests
         run: python -m pytest -q tests/test_toobit_protection.py
 
