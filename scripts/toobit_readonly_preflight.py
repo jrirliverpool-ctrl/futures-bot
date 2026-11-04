@@ -13,7 +13,7 @@ Required environment variables:
 
 A successful preflight is NOT authorization to trade.
 Any open position, open order, malformed response, missing leverage
-setting, or API error halts the check.
+setting, incomplete order scan, or API error halts the check.
 """
 from __future__ import annotations
 
@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+from toobit_open_orders import (
+    fetch_all_open_orders,
+    OpenOrdersReadError,
+)
 
 
 ENDPOINTS = {
@@ -50,26 +55,41 @@ def load_symbols(path: Path = WHITELIST_PATH) -> list[str]:
         with path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
     except FileNotFoundError:
-        raise PreflightError("symbol whitelist: configuration file is missing") from None
+        raise PreflightError(
+            "symbol whitelist: configuration file is missing"
+        ) from None
     except (OSError, json.JSONDecodeError):
-        raise PreflightError("symbol whitelist: configuration file is unreadable") from None
+        raise PreflightError(
+            "symbol whitelist: configuration file is unreadable"
+        ) from None
 
     if not isinstance(config, dict):
-        raise PreflightError("symbol whitelist: expected a JSON object")
+        raise PreflightError(
+            "symbol whitelist: expected a JSON object"
+        )
 
     symbols = config.get("symbols")
+
     if not isinstance(symbols, list) or not symbols:
-        raise PreflightError("symbol whitelist: symbols must be a non-empty array")
+        raise PreflightError(
+            "symbol whitelist: symbols must be a non-empty array"
+        )
 
     if not all(isinstance(item, str) for item in symbols):
-        raise PreflightError("symbol whitelist: every symbol must be text")
+        raise PreflightError(
+            "symbol whitelist: every symbol must be text"
+        )
 
     if len(symbols) != len(set(symbols)):
-        raise PreflightError("symbol whitelist: duplicate symbols found")
+        raise PreflightError(
+            "symbol whitelist: duplicate symbols found"
+        )
 
     for symbol in symbols:
         if not re.fullmatch(r"[A-Z0-9]+-SWAP-USDT", symbol):
-            raise PreflightError("symbol whitelist: invalid USDT-M symbol format")
+            raise PreflightError(
+                "symbol whitelist: invalid USDT-M symbol format"
+            )
 
     return symbols
 
@@ -78,21 +98,31 @@ def _as_list(payload: Any, label: str) -> list[dict]:
     """Accept only confirmed successful V1 list responses; fail closed."""
     if isinstance(payload, dict):
         if payload.get("_transport"):
-            raise PreflightError(f"{label}: transport failure")
+            raise PreflightError(
+                f"{label}: transport failure"
+            )
 
         code = payload.get("code")
-        if code not in (None, 0, 200, "0", "200"):
-            # Include only the exchange code, never the raw response body.
-            safe_code = str(code)[:32]
-            raise PreflightError(f"{label}: exchange error code {safe_code}")
 
-        raise PreflightError(f"{label}: unexpected object response")
+        if code not in (None, 0, 200, "0", "200"):
+            safe_code = str(code)[:32]
+            raise PreflightError(
+                f"{label}: exchange error code {safe_code}"
+            )
+
+        raise PreflightError(
+            f"{label}: unexpected object response"
+        )
 
     if not isinstance(payload, list):
-        raise PreflightError(f"{label}: expected a JSON array")
+        raise PreflightError(
+            f"{label}: expected a JSON array"
+        )
 
     if not all(isinstance(row, dict) for row in payload):
-        raise PreflightError(f"{label}: array contains a non-object row")
+        raise PreflightError(
+            f"{label}: array contains a non-object row"
+        )
 
     return payload
 
@@ -104,19 +134,25 @@ def _decimal(
     allow_zero: bool = True,
 ) -> Decimal:
     if isinstance(value, bool) or value is None:
-        raise PreflightError(f"{label}: missing or invalid numeric value")
+        raise PreflightError(
+            f"{label}: missing or invalid numeric value"
+        )
 
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
-        raise PreflightError(f"{label}: invalid numeric value") from None
+        raise PreflightError(
+            f"{label}: invalid numeric value"
+        ) from None
 
     if (
         not number.is_finite()
         or (not allow_negative and number < 0)
         or (not allow_zero and number == 0)
     ):
-        raise PreflightError(f"{label}: out-of-range numeric value")
+        raise PreflightError(
+            f"{label}: out-of-range numeric value"
+        )
 
     return number
 
@@ -127,17 +163,41 @@ def _get_list(
     params: dict,
     label: str,
 ) -> list[dict]:
-    """Perform one GET and convert all transport failures to safe errors."""
+    """Perform one GET and convert transport failures to safe errors."""
     try:
         payload = client._request("GET", path, params)
     except Exception:
-        # Do not expose exception text: it may contain request details.
-        raise PreflightError(f"{label}: request failed") from None
+        raise PreflightError(
+            f"{label}: request failed"
+        ) from None
 
     return _as_list(payload, label)
 
 
-def _read_leverage_for_symbol(client: Any, symbol: str) -> dict:
+def _read_all_open_orders(client: Any) -> list[dict]:
+    """Read the complete open-order set using descending orderId pages.
+
+    Two consecutive scans must return the same order IDs and row contents.
+    A failed, incomplete, or unstable scan blocks the preflight.
+    """
+    try:
+        return fetch_all_open_orders(
+            client,
+            limit=1000,
+            max_pages=100,
+            verify_stable=True,
+        )
+    except (OpenOrdersReadError, ValueError):
+        raise PreflightError(
+            "futures open orders: complete stable snapshot "
+            "could not be proven"
+        ) from None
+
+
+def _read_leverage_for_symbol(
+    client: Any,
+    symbol: str,
+) -> dict:
     """Read and validate leverage for exactly one requested symbol."""
     rows = _get_list(
         client,
@@ -146,16 +206,26 @@ def _read_leverage_for_symbol(client: Any, symbol: str) -> dict:
         f"futures leverage {symbol}",
     )
 
-    matching = [row for row in rows if row.get("symbolId") == symbol]
+    matching = [
+        row for row in rows
+        if row.get("symbolId") == symbol
+    ]
+
     if len(matching) != 1:
         raise PreflightError(
-            f"futures leverage {symbol}: expected exactly one matching row"
+            f"futures leverage {symbol}: "
+            "expected exactly one matching row"
         )
 
     row = matching[0]
 
-    if not isinstance(row.get("symbolId"), str) or not row["symbolId"]:
-        raise PreflightError(f"futures leverage {symbol}: missing symbolId")
+    if (
+        not isinstance(row.get("symbolId"), str)
+        or not row["symbolId"]
+    ):
+        raise PreflightError(
+            f"futures leverage {symbol}: missing symbolId"
+        )
 
     _decimal(
         row.get("leverage"),
@@ -164,7 +234,9 @@ def _read_leverage_for_symbol(client: Any, symbol: str) -> dict:
     )
 
     if row.get("marginType") not in ("CROSS", "ISOLATED"):
-        raise PreflightError(f"futures leverage {symbol}: invalid marginType")
+        raise PreflightError(
+            f"futures leverage {symbol}: invalid marginType"
+        )
 
     return row
 
@@ -174,17 +246,20 @@ def build_snapshot(client) -> dict:
     symbols = load_symbols()
 
     balance_rows = _get_list(
-        client, ENDPOINTS["balance"], {}, "futures balance"
-    )
-    position_rows = _get_list(
-        client, ENDPOINTS["positions"], {}, "futures positions"
-    )
-    open_order_rows = _get_list(
         client,
-        ENDPOINTS["open_orders"],
-        {"limit": 1000},
-        "futures open orders",
+        ENDPOINTS["balance"],
+        {},
+        "futures balance",
     )
+
+    position_rows = _get_list(
+        client,
+        ENDPOINTS["positions"],
+        {},
+        "futures positions",
+    )
+
+    open_order_rows = _read_all_open_orders(client)
 
     # The Toobit accountLeverage endpoint requires a symbol parameter.
     # Query each configured candidate independently and verify the response.
@@ -197,6 +272,7 @@ def build_snapshot(client) -> dict:
         row for row in balance_rows
         if row.get("coin") == "USDT"
     ]
+
     if len(usdt_rows) != 1:
         raise PreflightError(
             "futures balance: expected exactly one USDT wallet row"
@@ -228,10 +304,14 @@ def build_snapshot(client) -> dict:
         side = row.get("side")
 
         if not isinstance(symbol, str) or not symbol.strip():
-            raise PreflightError(f"position[{index}]: missing symbol")
+            raise PreflightError(
+                f"position[{index}]: missing symbol"
+            )
 
         if side not in ("LONG", "SHORT"):
-            raise PreflightError(f"position[{index}]: invalid side")
+            raise PreflightError(
+                f"position[{index}]: invalid side"
+            )
 
         quantity = _decimal(
             row.get("position"),
@@ -257,7 +337,7 @@ def build_snapshot(client) -> dict:
         blockers.append("open_orders_exist")
 
     return {
-        "schema": "apexquant_toobit_readonly_preflight_v2",
+        "schema": "apexquant_toobit_readonly_preflight_v3",
         "checked_at_utc": datetime.now(timezone.utc).isoformat(),
         "read_only": True,
         "orders_submitted": 0,
@@ -288,12 +368,18 @@ def public_summary(report: dict) -> dict:
         "usdt_wallet_found": (
             report.get("wallet", {}).get("coin") == "USDT"
         ),
-        "active_positions_count": len(report.get("positions", [])),
-        "open_orders_count": len(report.get("open_orders", [])),
+        "active_positions_count": len(
+            report.get("positions", [])
+        ),
+        "open_orders_count": len(
+            report.get("open_orders", [])
+        ),
         "leverage_settings_count": len(
             report.get("leverage_settings", [])
         ),
-        "symbols_checked_count": len(report.get("symbols_checked", [])),
+        "symbols_checked_count": len(
+            report.get("symbols_checked", [])
+        ),
         "halt_live": bool(report.get("halt_live", True)),
         "blockers": list(report.get("blockers", [])),
         "account_values_redacted": True,
@@ -321,7 +407,10 @@ def main() -> int:
                 "error_type": "PreflightError",
                 "stage": stage,
                 "diagnostic": str(exc),
-                "message": "Read-only preflight failed; do not enable LIVE.",
+                "message": (
+                    "Read-only preflight failed; "
+                    "do not enable LIVE."
+                ),
             },
             indent=2,
             ensure_ascii=False,
@@ -337,7 +426,10 @@ def main() -> int:
                 "halt_live": True,
                 "error_type": type(exc).__name__,
                 "stage": stage,
-                "message": "Read-only preflight failed; do not enable LIVE.",
+                "message": (
+                    "Read-only preflight failed; "
+                    "do not enable LIVE."
+                ),
             },
             indent=2,
             ensure_ascii=False,
