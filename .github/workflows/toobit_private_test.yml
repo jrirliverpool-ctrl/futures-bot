@@ -34,6 +34,9 @@ jobs:
       - name: Run fill ledger tests
         run: python -m pytest -q tests/test_fill_ledger.py
 
+      - name: Run fill ledger accounting tests
+        run: python -m pytest -q tests/test_fill_ledger_accounting.py
+
       - name: Run read-only order recovery tests
         run: python -m pytest -q tests/test_order_recovery_probe.py
 
