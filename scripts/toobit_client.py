@@ -1,3 +1,4 @@
+
 import os
 import time
 import hmac
@@ -12,7 +13,6 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 BASE_URL = "https://api.toobit.com"
 
-# Transitional states are valid but are not terminal.
 VALID_STATUSES = (
     "PENDING_NEW",
     "NEW",
@@ -59,12 +59,7 @@ class ToobitClient:
         ).hexdigest()
 
     def _request(self, method: str, path: str, params: dict):
-        """Perform exactly one HTTP request; never retry ambiguous POSTs.
-
-        Toobit v1 userTrades returns a JSON array, while order endpoints
-        return objects. Both shapes are supported without treating a list
-        response as an error.
-        """
+        """Perform exactly one HTTP request; never retry ambiguous POSTs."""
         if method not in ("GET", "POST"):
             raise ValueError(f"Unsupported method: {method}")
 
@@ -91,12 +86,17 @@ class ToobitClient:
                 "error": "timeout; request outcome may be unknown",
             }
         except requests.exceptions.RequestException as exc:
+            # Exception text may contain a signed URL or request details.
             return {
                 "_transport": "UNKNOWN",
-                "error": f"request exception; outcome may be unknown: {exc}",
+                "error": (
+                    "request exception; outcome may be unknown "
+                    f"({type(exc).__name__})"
+                ),
             }
 
         status_code = getattr(response, "status_code", None)
+
         try:
             body = response.json()
         except ValueError:
@@ -130,7 +130,6 @@ class ToobitClient:
                 "_transport": "UNKNOWN",
                 "_http_status": status_code,
                 "error": f"unexpected JSON response type (HTTP {status_code})",
-                "body": body,
             }
 
         result = dict(body)
@@ -151,12 +150,15 @@ class ToobitClient:
     def _is_success(self, data: dict) -> bool:
         if not isinstance(data, dict) or data.get("_transport"):
             return False
+
         http_status = data.get("_http_status")
         if http_status is not None and not 200 <= http_status < 300:
             return False
+
         if "orderId" in data or "status" in data:
             code = data.get("code")
             return code in (200, 0) if code is not None else True
+
         return data.get("code") in (200, 0)
 
     def _parse_order(
@@ -179,20 +181,31 @@ class ToobitClient:
 
         executed = safe_float(data.get("executedQty"))
         original = safe_float(data.get("origQty"))
+
         if executed is None:
-            return self._unknown_from(raw_data, requested_qty, "executedQty invalid")
+            return self._unknown_from(
+                raw_data, requested_qty, "executedQty invalid"
+            )
+
         if original is None or original == 0:
             original = requested_qty
         elif executed > original + 1e-8:
-            return self._unknown_from(raw_data, requested_qty, "executedQty > origQty")
+            return self._unknown_from(
+                raw_data, requested_qty, "executedQty > origQty"
+            )
 
         avg_price = safe_float(data.get("avgPrice"))
         status = data.get("status", "UNKNOWN")
+
         if status not in VALID_STATUSES:
             status = "UNKNOWN"
 
         return StandardOrderResponse(
-            exchange_order_id=(str(data.get("orderId")) if data.get("orderId") is not None else None),
+            exchange_order_id=(
+                str(data.get("orderId"))
+                if data.get("orderId") is not None
+                else None
+            ),
             client_order_id=data.get("clientOrderId"),
             symbol=data.get("symbol", ""),
             requested_qty=original,
@@ -203,8 +216,35 @@ class ToobitClient:
         )
 
     def _unknown_from(self, data: dict, requested_qty: float, reason: str):
-        logger.critical("UNKNOWN: %s; response=%r", reason, data)
-        return StandardOrderResponse(None, None, "", requested_qty, 0.0, None, "UNKNOWN", data)
+        # Never log raw exchange payloads.
+        metadata = {}
+
+        if isinstance(data, dict):
+            if data.get("_http_status") is not None:
+                metadata["http_status"] = data.get("_http_status")
+
+            if data.get("_transport") is not None:
+                metadata["transport"] = str(data.get("_transport"))[:32]
+
+            if data.get("code") is not None:
+                metadata["exchange_code"] = str(data.get("code"))[:32]
+
+        logger.critical(
+            "UNKNOWN: %s; safe_metadata=%s",
+            str(reason)[:160],
+            metadata,
+        )
+
+        return StandardOrderResponse(
+            None,
+            None,
+            "",
+            requested_qty,
+            0.0,
+            None,
+            "UNKNOWN",
+            data,
+        )
 
     def place_order(
         self,
@@ -216,10 +256,13 @@ class ToobitClient:
         client_order_id: str,
         intent: str,
     ) -> StandardOrderResponse:
+
         try:
             toobit_side = self._map_side(side, intent)
         except ValueError as exc:
-            return self._unknown_from({"error": str(exc)}, quantity, str(exc))
+            return self._unknown_from(
+                {"error": str(exc)}, quantity, str(exc)
+            )
 
         params = {
             "symbol": symbol,
@@ -227,27 +270,66 @@ class ToobitClient:
             "quantity": quantity,
             "newClientOrderId": client_order_id,
         }
+
         if order_type == "MARKET":
             params["type"] = "LIMIT"
             params["priceType"] = "MARKET"
+
         elif order_type == "LIMIT":
             if price is None:
-                return self._unknown_from({"error": "LIMIT price is required"}, quantity, "bad LIMIT price")
+                return self._unknown_from(
+                    {"error": "LIMIT price is required"},
+                    quantity,
+                    "bad LIMIT price",
+                )
+
             params["type"] = "LIMIT"
             params["price"] = price
-        else:
-            return self._unknown_from({"error": "bad order_type"}, quantity, "bad order_type")
 
-        data = self._request("POST", "/api/v1/futures/order", params)
+        else:
+            return self._unknown_from(
+                {"error": "bad order_type"},
+                quantity,
+                "bad order_type",
+            )
+
+        data = self._request(
+            "POST",
+            "/api/v1/futures/order",
+            params,
+        )
+
         if not self._is_success(data):
-            return self._unknown_from(data, quantity, "API_ERROR or ambiguous response")
+            return self._unknown_from(
+                data,
+                quantity,
+                "API_ERROR or ambiguous response",
+            )
+
         return self._parse_order(data, quantity)
 
-    def get_order_status(self, symbol: str, client_order_id: str) -> StandardOrderResponse:
-        params = {"symbol": symbol, "origClientOrderId": client_order_id}
-        data = self._request("GET", "/api/v1/futures/order", params)
+    def get_order_status(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> StandardOrderResponse:
+
+        params = {
+            "symbol": symbol,
+            "origClientOrderId": client_order_id,
+        }
+
+        data = self._request(
+            "GET",
+            "/api/v1/futures/order",
+            params,
+        )
+
         if not self._is_success(data):
-            return self._unknown_from(data, 0.0, "query failed")
+            return self._unknown_from(
+                data, 0.0, "query failed"
+            )
+
         return self._parse_order(data, 0.0)
 
     def get_user_trades(
@@ -261,16 +343,24 @@ class ToobitClient:
     ) -> list:
         """Read trade-level fills from GET /api/v1/futures/userTrades.
 
-        Raises RuntimeError on transport/API/shape failures. An empty list is
-        returned only for a successful exchange response containing no rows.
-        This method is read-only and does not place or modify orders.
+        An empty list is returned only for a successful empty response.
+        This method is read-only.
         """
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("symbol is required")
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
             raise ValueError("limit must be an integer from 1 to 1000")
 
-        params = {"symbol": symbol, "limit": limit}
+        params = {
+            "symbol": symbol,
+            "limit": limit,
+        }
+
         for name, value in (
             ("startTime", start_time),
             ("endTime", end_time),
@@ -278,13 +368,47 @@ class ToobitClient:
             ("toId", to_id),
         ):
             if value is not None:
-                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                    raise ValueError(f"{name} must be a non-negative integer")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                ):
+                    raise ValueError(
+                        f"{name} must be a non-negative integer"
+                    )
                 params[name] = value
-        if start_time is not None and end_time is not None and end_time < start_time:
+
+        if (
+            start_time is not None
+            and end_time is not None
+            and end_time < start_time
+        ):
             raise ValueError("end_time must be >= start_time")
 
-        data = self._request("GET", "/api/v1/futures/userTrades", params)
+        data = self._request(
+            "GET",
+            "/api/v1/futures/userTrades",
+            params,
+        )
+
         if not isinstance(data, list):
-            raise RuntimeError(f"userTrades query failed or returned invalid shape: {data!r}")
+            # Do not include raw response bodies or exchange messages.
+            if isinstance(data, dict):
+                transport = str(
+                    data.get("_transport", "API_ERROR")
+                )[:32]
+                http_status = data.get("_http_status")
+                code = data.get("code")
+
+                raise RuntimeError(
+                    "userTrades query failed or returned invalid shape "
+                    f"(transport={transport}, http_status={http_status}, "
+                    f"exchange_code="
+                    f"{str(code)[:32] if code is not None else None})"
+                )
+
+            raise RuntimeError(
+                "userTrades query failed or returned invalid response shape"
+            )
+
         return data
