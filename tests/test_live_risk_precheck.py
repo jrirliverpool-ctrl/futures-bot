@@ -30,7 +30,7 @@ def run(**overrides):
         "symbol": "BTC-SWAP-USDT",
         "side": "LONG",
         "entry_price": "60000",
-        "stop_price": "59000",
+        "stop_price": "59500",
         "available_usdt": "1000",
         "risk_fraction": "0.001",
         "leverage": "3",
