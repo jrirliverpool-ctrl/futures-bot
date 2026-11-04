@@ -1,19 +1,20 @@
 """Fail-closed Toobit V1 fixed-position protection helper.
 
-This helper is deliberately not connected to the trading runner. It sends
-one trading-stop POST, then verifies the resulting conditional orders through
-read-only openOrders. It never retries a POST.
+This helper is deliberately not connected to the trading runner.
+It sends one trading-stop POST, then verifies the resulting conditional
+orders through a complete, stable, read-only openOrders scan.
 
-For a strategy with a partial TP, pass take_profit_quantity explicitly. The
-stop-loss covers the full current position quantity; TP covers only the
-requested partial quantity. This module does not implement trailing-stop
-updates or position-size changes after fills.
+It never retries a POST.
 """
 from decimal import Decimal, InvalidOperation
 import re
 
+from toobit_open_orders import (
+    fetch_all_open_orders,
+    OpenOrdersReadError,
+)
+
 ENDPOINT = "/api/v1/futures/position/trading-stop"
-OPEN_ORDERS_ENDPOINT = "/api/v1/futures/openOrders"
 SUCCESS_CODES = (0, 200, "0", "200")
 
 
@@ -49,10 +50,6 @@ def _same(left, right):
 
 
 def _validate_post_result(payload):
-    """Validate transport/HTTP/API success without requiring a response echo.
-
-    The subsequent openOrders snapshot is the authoritative verification.
-    """
     if not isinstance(payload, dict):
         raise ProtectionError(
             "trading-stop POST returned a non-object response"
@@ -131,11 +128,7 @@ def _verify_orders(
             )
         ]
 
-    sl_matches = exact(
-        sl_type,
-        stop_qty,
-        stop_price,
-    )
+    sl_matches = exact(sl_type, stop_qty, stop_price)
 
     if len(sl_matches) != 1:
         raise ProtectionError(
@@ -145,11 +138,7 @@ def _verify_orders(
     tp_verified = False
 
     if tp_qty is not None:
-        tp_matches = exact(
-            tp_type,
-            tp_qty,
-            tp_price,
-        )
+        tp_matches = exact(tp_type, tp_qty, tp_price)
 
         if len(tp_matches) != 1:
             raise ProtectionError(
@@ -171,6 +160,7 @@ def _verify_orders(
         "orders_submitted": 0,
         "orders_canceled": 0,
         "halt_trading": False,
+        "verification_scans": 2,
     }
 
 
@@ -185,13 +175,7 @@ def set_and_verify_fixed_protection(
     take_profit_quantity=None,
     trigger_by="MARK_PRICE",
 ):
-    """Set full-size fixed SL and optional explicitly sized partial TP.
-
-    `quantity` is the full currently open position size and is assigned to SL.
-
-    If TP is requested, `take_profit_quantity` is mandatory and must be <=
-    `quantity`; it is never silently defaulted to full size.
-    """
+    """Set full-size fixed SL and optional explicitly sized partial TP."""
     if client is None or not callable(
         getattr(client, "_request", None)
     ):
@@ -278,26 +262,19 @@ def set_and_verify_fixed_protection(
 
     _validate_post_result(post_result)
 
-    # Read-only verification after the POST.
     try:
-        rows = client._request(
-            "GET",
-            OPEN_ORDERS_ENDPOINT,
-            {
-                "symbol": symbol,
-                "type": "STOP_PROFIT_LOSS",
-                "limit": 1000,
-            },
+        rows = fetch_all_open_orders(
+            client,
+            symbol=symbol,
+            order_type="STOP_PROFIT_LOSS",
+            limit=1000,
+            max_pages=100,
+            verify_stable=True,
         )
-    except Exception:
+    except (OpenOrdersReadError, ValueError):
         raise ProtectionError(
-            "protection POST may have succeeded but verification GET failed; halt"
+            "complete stable protection-order snapshot could not be proven; halt"
         ) from None
-
-    if isinstance(rows, dict) and rows.get("_transport"):
-        raise ProtectionError(
-            "protection POST may have succeeded but verification GET is unknown; halt"
-        )
 
     return _verify_orders(
         rows,
