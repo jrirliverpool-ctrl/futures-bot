@@ -82,6 +82,15 @@ class FakeClient:
                 }
             ]
 
+        if path == ENDPOINTS["open_orders"]:
+            # The V1 endpoint uses orderId as a descending cursor.
+            # The first request in each scan returns the fixture.
+            # A subsequent request with orderId returns the next page.
+            if params.get("orderId") is not None:
+                return []
+
+            return self.responses[path]
+
         return self.responses[path]
 
 
@@ -107,10 +116,24 @@ class ReadOnlyPreflightTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            client.calls[:3],
+            client.calls[0],
+            ("GET", ENDPOINTS["balance"], {}),
+        )
+        self.assertEqual(
+            client.calls[1],
+            ("GET", ENDPOINTS["positions"], {}),
+        )
+
+        open_order_calls = [
+            call for call in client.calls
+            if call[1] == ENDPOINTS["open_orders"]
+        ]
+
+        # Empty account: one empty response per stable scan.
+        self.assertEqual(
+            open_order_calls,
             [
-                ("GET", ENDPOINTS["balance"], {}),
-                ("GET", ENDPOINTS["positions"], {}),
+                ("GET", ENDPOINTS["open_orders"], {"limit": 1000}),
                 ("GET", ENDPOINTS["open_orders"], {"limit": 1000}),
             ],
         )
@@ -189,6 +212,47 @@ class ReadOnlyPreflightTests(unittest.TestCase):
         self.assertIn(
             "open_orders_exist",
             report["blockers"],
+        )
+
+    def test_open_orders_are_read_with_two_complete_scans(self):
+        order = {
+            "orderId": "123",
+            "symbol": "BTC-SWAP-USDT",
+            "side": "BUY_CLOSE",
+            "status": "ORDER_NEW",
+            "type": "STOP_PROFIT_LOSS",
+        }
+
+        client = FakeClient({
+            ENDPOINTS["open_orders"]: [order]
+        })
+
+        report = build_snapshot(client)
+
+        self.assertTrue(report["halt_live"])
+        self.assertEqual(report["open_orders"], [order])
+
+        open_order_calls = [
+            call for call in client.calls
+            if call[1] == ENDPOINTS["open_orders"]
+        ]
+
+        self.assertEqual(
+            open_order_calls,
+            [
+                ("GET", ENDPOINTS["open_orders"], {"limit": 1000}),
+                (
+                    "GET",
+                    ENDPOINTS["open_orders"],
+                    {"limit": 1000, "orderId": 123},
+                ),
+                ("GET", ENDPOINTS["open_orders"], {"limit": 1000}),
+                (
+                    "GET",
+                    ENDPOINTS["open_orders"],
+                    {"limit": 1000, "orderId": 123},
+                ),
+            ],
         )
 
     def test_zero_position_is_not_active(self):
