@@ -157,7 +157,7 @@ def test_min_notional_primary_filter_is_used():
     )
 
 
-def test_trade_amount_min_amount_is_used_as_fallback():
+def test_trade_amount_min_amount_is_used_when_primary_missing():
     contract = make_contract("BTC-SWAP-USDT")
 
     contract["filters"] = [
@@ -165,6 +165,26 @@ def test_trade_amount_min_amount_is_used_as_fallback():
         for item in contract["filters"]
         if item["filterType"] != "MIN_NOTIONAL"
     ]
+
+    contract["filters"].append({
+        "filterType": "TRADE_AMOUNT",
+        "minAmount": "10",
+    })
+
+    specs = parse_symbol_specs(contract)
+
+    assert specs["min_notional"] == 10
+    assert (
+        specs["min_notional_source"]
+        == "TRADE_AMOUNT.minAmount"
+    )
+
+
+def test_zero_primary_uses_positive_trade_amount_fallback():
+    contract = make_contract(
+        "BTC-SWAP-USDT",
+        min_notional="0",
+    )
 
     contract["filters"].append({
         "filterType": "TRADE_AMOUNT",
@@ -215,7 +235,7 @@ def test_missing_both_minimum_filters_is_rejected():
     try:
         parse_symbol_specs(contract)
     except ValueError as exc:
-        assert "minimum_order_value_missing" in str(exc)
+        assert "minimum_order_value_missing_or_zero" in str(exc)
         return
 
     raise AssertionError(
@@ -223,7 +243,29 @@ def test_missing_both_minimum_filters_is_rejected():
     )
 
 
-def test_zero_trade_amount_is_rejected():
+def test_both_zero_minimum_values_are_rejected():
+    contract = make_contract(
+        "BTC-SWAP-USDT",
+        min_notional="0",
+    )
+
+    contract["filters"].append({
+        "filterType": "TRADE_AMOUNT",
+        "minAmount": "0",
+    })
+
+    try:
+        parse_symbol_specs(contract)
+    except ValueError as exc:
+        assert "minimum_order_value_zero" in str(exc)
+        return
+
+    raise AssertionError(
+        "zero minimum values must be rejected"
+    )
+
+
+def test_zero_trade_amount_without_primary_is_rejected():
     contract = make_contract("BTC-SWAP-USDT")
 
     contract["filters"] = [
@@ -240,7 +282,7 @@ def test_zero_trade_amount_is_rejected():
     try:
         parse_symbol_specs(contract)
     except ValueError as exc:
-        assert "must be positive" in str(exc)
+        assert "minimum_order_value_zero" in str(exc)
         return
 
     raise AssertionError(
@@ -270,6 +312,28 @@ def test_invalid_trade_amount_is_rejected():
 
     raise AssertionError(
         "invalid minimum amount must be rejected"
+    )
+
+
+def test_negative_primary_is_rejected_without_fallback():
+    contract = make_contract(
+        "BTC-SWAP-USDT",
+        min_notional="-1",
+    )
+
+    contract["filters"].append({
+        "filterType": "TRADE_AMOUNT",
+        "minAmount": "10",
+    })
+
+    try:
+        parse_symbol_specs(contract)
+    except ValueError as exc:
+        assert "negative" in str(exc)
+        return
+
+    raise AssertionError(
+        "negative primary value must be rejected"
     )
 
 
