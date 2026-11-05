@@ -1,14 +1,16 @@
 
-"""symbol_specs.py — Strict Toobit USDT-M futures contract specifications.
+"""Strict Toobit USDT-M futures contract specifications.
 
-v3.9.3
-- Supports MIN_NOTIONAL.minNotional as the primary minimum-order source.
-- Supports TRADE_AMOUNT.minAmount as the documented fallback.
-- Rejects missing, zero, negative, non-finite, malformed or ambiguous filters.
-- Never invents a minimum order value.
+v3.9.4
+- Reads MIN_NOTIONAL.minNotional as the preferred minimum.
+- If MIN_NOTIONAL is exactly zero, checks TRADE_AMOUNT.minAmount.
+- Uses only a verified positive minimum value.
+- Rejects missing, malformed, negative, non-finite or ambiguous filters.
+- Never invents contract specifications.
 """
 
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 import requests
@@ -83,61 +85,18 @@ def _extract_filter(contract, filter_type):
     return matches[0] if matches else {}
 
 
-def _safe_positive_float(value, field_name, symbol):
-    if value is None:
-        raise ValueError(f"{field_name} missing for {symbol}")
-
-    if isinstance(value, bool):
-        raise ValueError(f"{field_name} boolean value invalid for {symbol}")
+def _decimal_value(value, field_name, symbol):
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{field_name} missing or invalid for {symbol}")
 
     try:
-        number = float(value)
-    except (ValueError, TypeError):
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
         raise ValueError(
             f"{field_name}={value!r} not numeric for {symbol}"
         ) from None
 
-    if (
-        number != number
-        or number in (float("inf"), float("-inf"))
-    ):
-        raise ValueError(
-            f"{field_name}={value!r} not finite for {symbol}"
-        )
-
-    if number <= 0:
-        raise ValueError(
-            f"{field_name}={value!r} must be positive for {symbol}"
-        )
-
-    return number
-
-
-def _safe_non_negative_float(
-    value,
-    field_name,
-    symbol,
-    default=0.0,
-):
-    if value is None:
-        return default
-
-    if isinstance(value, bool):
-        raise ValueError(
-            f"{field_name} boolean value invalid for {symbol}"
-        )
-
-    try:
-        number = float(value)
-    except (ValueError, TypeError):
-        raise ValueError(
-            f"{field_name}={value!r} not numeric for {symbol}"
-        ) from None
-
-    if (
-        number != number
-        or number in (float("inf"), float("-inf"))
-    ):
+    if not number.is_finite():
         raise ValueError(
             f"{field_name}={value!r} not finite for {symbol}"
         )
@@ -150,16 +109,43 @@ def _safe_non_negative_float(
     return number
 
 
+def _safe_positive_float(value, field_name, symbol):
+    number = _decimal_value(value, field_name, symbol)
+
+    if number <= 0:
+        raise ValueError(
+            f"{field_name}={value!r} must be positive for {symbol}"
+        )
+
+    return float(number)
+
+
+def _safe_non_negative_float(
+    value,
+    field_name,
+    symbol,
+    default=0.0,
+):
+    if value is None:
+        return default
+
+    number = _decimal_value(value, field_name, symbol)
+    return float(number)
+
+
 def _resolve_min_notional(contract, symbol):
     """
     Resolve the minimum futures transaction value.
 
     Priority:
-      1. MIN_NOTIONAL.minNotional
-      2. TRADE_AMOUNT.minAmount
+      1. Positive MIN_NOTIONAL.minNotional
+      2. Positive TRADE_AMOUNT.minAmount
 
-    A present but malformed or non-positive primary value is rejected.
-    It is not silently replaced by a different filter.
+    A zero MIN_NOTIONAL value is treated as unavailable for this
+    calculation, so the documented TRADE_AMOUNT field is checked.
+
+    A malformed or negative primary value is rejected.
+    If neither field supplies a positive value, the contract is rejected.
     """
 
     min_notional_filter = _extract_filter(
@@ -172,31 +158,48 @@ def _resolve_min_notional(contract, symbol):
         "TRADE_AMOUNT",
     )
 
-    primary_value = min_notional_filter.get("minNotional")
+    primary_raw = min_notional_filter.get("minNotional")
+    fallback_raw = trade_amount_filter.get("minAmount")
 
-    if primary_value is not None:
-        value = _safe_positive_float(
-            primary_value,
+    if primary_raw is not None:
+        primary = _decimal_value(
+            primary_raw,
             "MIN_NOTIONAL.minNotional",
             symbol,
         )
 
-        return value, "MIN_NOTIONAL.minNotional"
+        if primary > 0:
+            return (
+                float(primary),
+                "MIN_NOTIONAL.minNotional",
+            )
 
-    fallback_value = trade_amount_filter.get("minAmount")
+        # A zero primary value is not used as an order minimum.
+        # Check the documented alternative field instead.
 
-    if fallback_value is not None:
-        value = _safe_positive_float(
-            fallback_value,
+    if fallback_raw is not None:
+        fallback = _decimal_value(
+            fallback_raw,
             "TRADE_AMOUNT.minAmount",
             symbol,
         )
 
-        return value, "TRADE_AMOUNT.minAmount"
+        if fallback > 0:
+            return (
+                float(fallback),
+                "TRADE_AMOUNT.minAmount",
+            )
+
+        raise ValueError(
+            f"{symbol}_minimum_order_value_zero:"
+            f"MIN_NOTIONAL.minNotional={primary_raw!r};"
+            f"TRADE_AMOUNT.minAmount={fallback_raw!r}"
+        )
 
     raise ValueError(
-        f"{symbol}_minimum_order_value_missing:"
-        "MIN_NOTIONAL.minNotional_and_TRADE_AMOUNT.minAmount"
+        f"{symbol}_minimum_order_value_missing_or_zero:"
+        f"MIN_NOTIONAL.minNotional={primary_raw!r};"
+        f"TRADE_AMOUNT.minAmount={fallback_raw!r}"
     )
 
 
@@ -337,12 +340,7 @@ def get_symbol_specs(symbol="BTC-SWAP-USDT"):
 
 
 def validate_specs(specs):
-    """
-    Strict contract validation.
-
-    Returns:
-        (errors, warnings)
-    """
+    """Return (errors, warnings) for parsed contract specifications."""
 
     errors = []
     warnings = []
