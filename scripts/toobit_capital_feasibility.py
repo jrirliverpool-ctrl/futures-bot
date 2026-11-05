@@ -48,6 +48,47 @@ def _decimal(value, field, *, allow_zero=False):
     return result
 
 
+def _contract_max_leverage(raw_contract, specs, symbol):
+    """
+    Read the contract leverage ceiling.
+
+    Some exchangeInfo responses expose maxLeverage directly.
+    The official Toobit exchangeInfo example exposes initialMargin
+    in riskLimits instead. In that case, derive the tier-one ceiling
+    as 1 / initialMargin.
+
+    This is only a contract ceiling estimate. The final effective
+    leverage is still capped by account and strategy leverage.
+    """
+    direct_value = specs.get("max_leverage")
+
+    if direct_value is not None:
+        return _decimal(
+            direct_value,
+            f"{symbol}_contract_max_leverage",
+        )
+
+    risk_limits = raw_contract.get("riskLimits")
+
+    if not isinstance(risk_limits, list) or not risk_limits:
+        raise ValueError(f"{symbol}_risk_limits_missing")
+
+    first_tier = risk_limits[0]
+
+    if not isinstance(first_tier, dict):
+        raise ValueError(f"{symbol}_risk_tier_invalid")
+
+    initial_margin = _decimal(
+        first_tier.get("initialMargin"),
+        f"{symbol}_initial_margin",
+    )
+
+    if initial_margin > Decimal("1"):
+        raise ValueError(f"{symbol}_initial_margin_out_of_range")
+
+    return Decimal("1") / initial_margin
+
+
 def _contract_map(exchange_info):
     if not isinstance(exchange_info, dict):
         raise CapitalReportError("exchange_info_invalid")
@@ -144,7 +185,6 @@ def evaluate_capital_feasibility(
         allow_zero=True,
     )
 
-    # Convert all configuration values to Decimal before comparisons.
     leverage_cap = _decimal(
         strategy_leverage_cap,
         "strategy_leverage_cap",
@@ -180,7 +220,6 @@ def evaluate_capital_feasibility(
     )
 
     margin_budget = available * margin_cap
-    risk_budget = available * risk_fraction
 
     reports = []
 
@@ -211,14 +250,14 @@ def evaluate_capital_feasibility(
                 f"{symbol}_min_notional",
             )
 
-            contract_max_leverage = _decimal(
-                specs.get("max_leverage"),
-                f"{symbol}_contract_max_leverage",
+            contract_max_leverage = _contract_max_leverage(
+                raw_contract,
+                specs,
+                symbol,
             )
 
             account_lev = account_leverage[symbol]
 
-            # IMPORTANT: use Decimal-converted leverage_cap here.
             allowed_leverage = min(
                 leverage_cap,
                 contract_max_leverage,
@@ -227,6 +266,9 @@ def evaluate_capital_feasibility(
 
             if allowed_leverage <= 0:
                 blockers.append("effective_leverage_invalid")
+
+            minimum_margin_estimate = None
+            margin_fits = False
 
             if not blockers:
                 minimum_margin_estimate = (
@@ -242,11 +284,8 @@ def evaluate_capital_feasibility(
                     blockers.append(
                         "minimum_order_margin_exceeds_budget"
                     )
-            else:
-                minimum_margin_estimate = None
-                margin_fits = False
 
-            # These are mandatory before any real order.
+            # These checks are still mandatory before any real order.
             blockers.extend([
                 "verified_user_fee_rate_required",
                 "entry_and_stop_prices_required",
@@ -254,18 +293,12 @@ def evaluate_capital_feasibility(
                 "fill_reconciliation_and_protection_required",
             ])
 
-            # Capital feasibility is separate from trade authorization.
+            # Capital feasibility is NOT trade authorization.
             capital_only_feasible = (
                 bool(margin_fits)
-                and not any(
-                    item in blockers
-                    for item in (
-                        "contract_not_trading",
-                        "effective_leverage_invalid",
-                        "minimum_notional_invalid",
-                        "minimum_order_margin_exceeds_budget",
-                    )
-                )
+                and "contract_not_trading" not in blockers
+                and "effective_leverage_invalid" not in blockers
+                and "minimum_order_margin_exceeds_budget" not in blockers
             )
 
             reports.append({
@@ -291,12 +324,16 @@ def evaluate_capital_feasibility(
             })
 
         except Exception as exc:
+            # Keep the report useful without exposing account secrets.
+            # Include the validation reason so future failures are diagnosable.
+            reason = str(exc).replace("\n", " ")[:160]
+
             reports.append({
                 "symbol": symbol,
                 "capital_only_feasible": False,
                 "trading_eligible": False,
                 "blockers": [
-                    f"contract_validation_failed:{type(exc).__name__}"
+                    f"contract_validation_failed:{type(exc).__name__}:{reason}"
                 ],
             })
 
@@ -399,6 +436,7 @@ def main():
             "read_only": True,
             "stage": stage,
             "error_type": type(exc).__name__,
+            "diagnostic": str(exc)[:200],
             "trading_eligible_count": 0,
             "orders_submitted": 0,
             "orders_amended": 0,
