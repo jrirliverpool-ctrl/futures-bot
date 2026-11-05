@@ -114,6 +114,10 @@ def test_success_envelope_verified_from_two_stable_scans():
     assert result["take_profit_verified"] is True
     assert result["verification_scans"] == 2
 
+    assert result["protection_requests_submitted"] == 1
+    assert result["entry_orders_submitted"] == 0
+    assert result["orders_canceled"] == 0
+
     assert len(client.calls) == 5
     assert client.calls[0][0] == "POST"
     assert all(
@@ -259,4 +263,6 @@ def test_no_tp_is_allowed_with_sl_only():
     assert result["stop_loss_verified"] is True
     assert result["take_profit_verified"] is False
     assert result["verification_scans"] == 2
+    assert result["protection_requests_submitted"] == 1
+    assert result["entry_orders_submitted"] == 0
     assert len(client.calls) == 5
