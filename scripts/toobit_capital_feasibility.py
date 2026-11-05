@@ -1,16 +1,11 @@
+
 """Read-only capital feasibility report for Toobit USDT-M futures.
 
-This script:
-- Reads the real USDT futures available balance.
-- Reads the configured symbols' actual contract specifications.
-- Reads each symbol's currently configured account leverage.
-- Estimates the initial margin for the exchange minimum notional.
-- Never submits, amends, or cancels orders.
+This diagnostic reads account balance, configured contract specifications,
+and account leverage. It NEVER submits, amends, or cancels orders.
 
-IMPORTANT:
-A capital-only pass is NOT an order approval. Actual order sizing still
-requires a live entry price, stop price, verified user fee rate, slippage,
-funding assumptions, and complete position/order reconciliation.
+A capital-only pass is NOT an order approval.
+LIVE execution remains disabled.
 """
 
 from __future__ import annotations
@@ -132,6 +127,9 @@ def evaluate_capital_feasibility(
     if not isinstance(symbols, list) or not symbols:
         raise CapitalReportError("symbols_invalid")
 
+    if not all(isinstance(item, str) and item for item in symbols):
+        raise CapitalReportError("symbol_name_invalid")
+
     if len(symbols) != len(set(symbols)):
         raise CapitalReportError("duplicate_configured_symbols")
 
@@ -146,6 +144,7 @@ def evaluate_capital_feasibility(
         allow_zero=True,
     )
 
+    # Convert all configuration values to Decimal before comparisons.
     leverage_cap = _decimal(
         strategy_leverage_cap,
         "strategy_leverage_cap",
@@ -167,10 +166,14 @@ def evaluate_capital_feasibility(
     if margin_cap > Decimal("0.50"):
         raise CapitalReportError("margin_utilization_cap_exceeds_hard_cap")
 
+    if margin_cap > Decimal("1"):
+        raise CapitalReportError("margin_utilization_cap_invalid")
+
     if risk_fraction > Decimal("0.01"):
         raise CapitalReportError("risk_fraction_exceeds_hard_cap")
 
     contracts = _contract_map(exchange_info)
+
     account_leverage = _leverage_map(
         snapshot.get("leverage_settings"),
         symbols,
@@ -183,7 +186,6 @@ def evaluate_capital_feasibility(
 
     for symbol in symbols:
         blockers = []
-
         raw_contract = contracts.get(symbol)
 
         if raw_contract is None:
@@ -216,8 +218,9 @@ def evaluate_capital_feasibility(
 
             account_lev = account_leverage[symbol]
 
+            # IMPORTANT: use Decimal-converted leverage_cap here.
             allowed_leverage = min(
-                strategy_leverage_cap,
+                leverage_cap,
                 contract_max_leverage,
                 account_lev,
             )
@@ -225,16 +228,14 @@ def evaluate_capital_feasibility(
             if allowed_leverage <= 0:
                 blockers.append("effective_leverage_invalid")
 
-            if min_notional <= 0:
-                blockers.append("minimum_notional_invalid")
-
             if not blockers:
                 minimum_margin_estimate = (
                     min_notional / allowed_leverage
                 )
 
                 margin_fits = (
-                    minimum_margin_estimate <= margin_budget
+                    available > 0
+                    and minimum_margin_estimate <= margin_budget
                 )
 
                 if not margin_fits:
@@ -245,14 +246,27 @@ def evaluate_capital_feasibility(
                 minimum_margin_estimate = None
                 margin_fits = False
 
-            # The following are intentionally NOT inferred from public
-            # contract specs. They must be verified before any order.
+            # These are mandatory before any real order.
             blockers.extend([
                 "verified_user_fee_rate_required",
                 "entry_and_stop_prices_required",
                 "actual_order_risk_precheck_required",
                 "fill_reconciliation_and_protection_required",
             ])
+
+            # Capital feasibility is separate from trade authorization.
+            capital_only_feasible = (
+                bool(margin_fits)
+                and not any(
+                    item in blockers
+                    for item in (
+                        "contract_not_trading",
+                        "effective_leverage_invalid",
+                        "minimum_notional_invalid",
+                        "minimum_order_margin_exceeds_budget",
+                    )
+                )
+            )
 
             reports.append({
                 "symbol": symbol,
@@ -271,17 +285,7 @@ def evaluate_capital_feasibility(
                     if minimum_margin_estimate is not None
                     else None
                 ),
-                "capital_only_feasible": bool(
-                    margin_fits and not any(
-                        item in blockers
-                        for item in (
-                            "contract_not_trading",
-                            "effective_leverage_invalid",
-                            "minimum_notional_invalid",
-                            "minimum_order_margin_exceeds_budget",
-                        )
-                    )
-                ),
+                "capital_only_feasible": capital_only_feasible,
                 "trading_eligible": False,
                 "blockers": blockers,
             })
