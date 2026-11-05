@@ -157,8 +157,13 @@ def _verify_orders(
         "stop_loss_verified": True,
         "take_profit_verified": tp_verified,
         "verified_open_protection_orders": 1 + int(tp_verified),
-        "orders_submitted": 0,
+
+        # One POST was sent to the exchange to configure protection.
+        # It is not an entry order.
+        "protection_requests_submitted": 1,
+        "entry_orders_submitted": 0,
         "orders_canceled": 0,
+
         "halt_trading": False,
         "verification_scans": 2,
     }
