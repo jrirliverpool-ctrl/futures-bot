@@ -1,11 +1,10 @@
 
 """Read-only Toobit USDT-M capital feasibility diagnostic.
 
-Uses official positive minimum filters when available.
-If those filters are zero/missing, estimates minimum notional from
-LOT_SIZE.minQty * current public contract ticker price.
+Official positive minimum filters are preferred.
+A public ticker price is required only when the exchange does not
+provide a usable minimum order value and an estimate is necessary.
 
-An estimated minimum is NOT an exchange-confirmed order minimum.
 This module never submits, amends, or cancels orders.
 LIVE execution remains disabled.
 """
@@ -226,8 +225,8 @@ def contract_max_leverage(raw_contract, specs, symbol):
     return Decimal("1") / initial_margin
 
 
-def resolve_specs(raw_contract, symbol, price):
-    """Resolve official minimum first, then a clearly labelled estimate."""
+def resolve_specs(raw_contract, symbol, price=None):
+    """Use official minimum first; estimate only when it is unavailable."""
 
     try:
         specs = parse_symbol_specs(raw_contract)
@@ -237,8 +236,6 @@ def resolve_specs(raw_contract, symbol, price):
     except ValueError as original_error:
         message = str(original_error)
 
-        # Only use the price-based estimate for the known missing/zero
-        # minimum-filter condition. Do not bypass unrelated validation.
         allowed_fallback = (
             "minimum_order_value_missing_or_zero" in message
             or "minimum_order_value_zero" in message
@@ -247,8 +244,14 @@ def resolve_specs(raw_contract, symbol, price):
         if not allowed_fallback:
             raise
 
-        lot = contract_filter(raw_contract, "LOT_SIZE")
+        if price is None:
+            raise ValueError(
+                f"{symbol}_price_required_for_estimated_minimum"
+            ) from None
 
+        price = dec(price, f"{symbol}_ticker_price")
+
+        lot = contract_filter(raw_contract, "LOT_SIZE")
         min_qty = dec(
             lot.get("minQty"),
             f"{symbol}_LOT_SIZE_minQty",
@@ -259,9 +262,9 @@ def resolve_specs(raw_contract, symbol, price):
         if estimated_notional <= 0:
             raise ValueError(f"{symbol}_estimated_minimum_invalid")
 
-        # Inject only into a copy. The original exchange response is untouched.
         copied = dict(raw_contract)
         copied_filters = []
+        replaced = False
 
         for item in raw_contract.get("filters", []):
             if not isinstance(item, dict):
@@ -273,14 +276,11 @@ def resolve_specs(raw_contract, symbol, price):
                     **item,
                     "minNotional": str(estimated_notional),
                 })
+                replaced = True
             else:
                 copied_filters.append(item)
 
-        if not any(
-            isinstance(item, dict)
-            and item.get("filterType") == "MIN_NOTIONAL"
-            for item in copied_filters
-        ):
+        if not replaced:
             copied_filters.append({
                 "filterType": "MIN_NOTIONAL",
                 "minNotional": str(estimated_notional),
@@ -323,7 +323,6 @@ def minimum_order_quantities(raw_contract, specs, symbol):
     if contract_step <= 0:
         raise ValueError(f"{symbol}_contract_step_invalid")
 
-    # Round UP to a valid exchange step. Never round below minimum.
     steps = (
         min_contracts_raw / contract_step
     ).to_integral_value(rounding=ROUND_CEILING)
@@ -337,6 +336,31 @@ def minimum_order_quantities(raw_contract, specs, symbol):
         "min_contract_qty": min_contracts,
         "contract_step": contract_step,
         "rounded_token_qty": rounded_token_qty,
+    }
+
+
+def base_symbol_report(symbol):
+    """Keep the report schema stable, including validation failures."""
+    return {
+        "symbol": symbol,
+        "contract_status": None,
+        "ticker_price_usdt": None,
+        "price_source": None,
+        "min_notional_usdt": None,
+        "min_notional_is_estimate": None,
+        "min_notional_source": None,
+        "contract_multiplier": None,
+        "min_token_qty": None,
+        "min_contract_qty": None,
+        "contract_step": None,
+        "rounded_token_qty": None,
+        "account_leverage": None,
+        "contract_max_leverage": None,
+        "effective_leverage_cap": None,
+        "minimum_margin_estimate_usdt": None,
+        "capital_only_feasible": False,
+        "trading_eligible": False,
+        "blockers": [],
     }
 
 
@@ -378,9 +402,18 @@ def evaluate_capital_feasibility(
         allow_zero=True,
     )
 
-    leverage_cap = dec(strategy_leverage_cap, "strategy_leverage_cap")
-    margin_cap = dec(margin_utilization_cap, "margin_utilization_cap")
-    risk_fraction = dec(risk_per_trade, "risk_per_trade")
+    leverage_cap = dec(
+        strategy_leverage_cap,
+        "strategy_leverage_cap",
+    )
+    margin_cap = dec(
+        margin_utilization_cap,
+        "margin_utilization_cap",
+    )
+    risk_fraction = dec(
+        risk_per_trade,
+        "risk_per_trade",
+    )
 
     if leverage_cap > 3:
         raise CapitalReportError("strategy_leverage_cap_exceeds_hard_cap")
@@ -394,7 +427,8 @@ def evaluate_capital_feasibility(
     if risk_fraction > Decimal("0.01"):
         raise CapitalReportError("risk_fraction_exceeds_hard_cap")
 
-    prices = prices or {}
+    prices = prices if isinstance(prices, dict) else {}
+
     contracts = contract_map(exchange_info)
     account_leverage = leverage_map(
         snapshot.get("leverage_settings"),
@@ -405,44 +439,63 @@ def evaluate_capital_feasibility(
     reports = []
 
     for symbol in symbols:
+        row = base_symbol_report(symbol)
         raw = contracts.get(symbol)
 
         if raw is None:
-            reports.append({
-                "symbol": symbol,
-                "capital_only_feasible": False,
-                "trading_eligible": False,
-                "blockers": ["contract_not_found"],
-            })
+            row["blockers"].append("contract_not_found")
+            reports.append(row)
             continue
 
-        blockers = []
-
         try:
-            price = dec(prices.get(symbol), f"{symbol}_ticker_price")
+            # A ticker price is optional when an official positive
+            # minimum-order value is present.
+            price = None
+            if prices.get(symbol) is not None:
+                price = dec(
+                    prices.get(symbol),
+                    f"{symbol}_ticker_price",
+                )
+
             specs = resolve_specs(raw, symbol, price)
 
             if specs.get("symbol") != symbol:
                 raise ValueError("contract_symbol_mismatch")
 
-            if specs.get("status") != "TRADING":
-                blockers.append("contract_not_trading")
+            row["contract_status"] = specs.get("status")
 
-            quantities = minimum_order_quantities(raw, specs, symbol)
+            if price is not None:
+                row["ticker_price_usdt"] = str(price)
+                row["price_source"] = "public_contract_ticker"
+
+            if specs.get("status") != "TRADING":
+                row["blockers"].append("contract_not_trading")
+
+            quantities = minimum_order_quantities(
+                raw,
+                specs,
+                symbol,
+            )
 
             min_notional = dec(
                 specs.get("min_notional"),
                 f"{symbol}_min_notional",
             )
 
-            # For estimated minimums, recompute notional using the rounded
-            # valid contract quantity rather than the unrounded token minimum.
+            # Recalculate estimated notional using the rounded valid
+            # quantity, not the unrounded LOT_SIZE minimum.
             if specs.get("min_notional_is_estimate"):
-                min_notional = (
-                    quantities["rounded_token_qty"] * price
-                )
+                if price is None:
+                    raise ValueError(
+                        f"{symbol}_price_required_for_estimated_minimum"
+                    )
+                min_notional = quantities["rounded_token_qty"] * price
 
-            contract_lev = contract_max_leverage(raw, specs, symbol)
+            contract_lev = contract_max_leverage(
+                raw,
+                specs,
+                symbol,
+            )
             account_lev = account_leverage[symbol]
 
             allowed_lev = min(
@@ -451,25 +504,61 @@ def evaluate_capital_feasibility(
                 account_lev,
             )
 
-            if allowed_lev <= 0:
-                blockers.append("effective_leverage_invalid")
-
             minimum_margin = None
             margin_fits = False
 
-            if not blockers:
+            if allowed_lev <= 0:
+                row["blockers"].append("effective_leverage_invalid")
+            else:
+                # Calculate margin even if the contract is HALT.
+                # Contract status and capital feasibility are separate.
                 minimum_margin = min_notional / allowed_lev
-
                 margin_fits = (
                     available > 0
                     and minimum_margin <= margin_budget
                 )
 
                 if not margin_fits:
-                    blockers.append("minimum_order_margin_exceeds_budget")
+                    row["blockers"].append(
+                        "minimum_order_margin_exceeds_budget"
+                    )
 
-            # These are mandatory before any real trade can be considered.
-            blockers.extend([
+            row.update({
+                "min_notional_usdt": str(min_notional),
+                "min_notional_is_estimate": bool(
+                    specs.get("min_notional_is_estimate")
+                ),
+                "min_notional_source": specs.get(
+                    "min_notional_source"
+                ),
+                "contract_multiplier": str(
+                    specs.get("contract_multiplier")
+                ),
+                "min_token_qty": str(
+                    quantities["min_token_qty"]
+                ),
+                "min_contract_qty": str(
+                    quantities["min_contract_qty"]
+                ),
+                "contract_step": str(
+                    quantities["contract_step"]
+                ),
+                "rounded_token_qty": str(
+                    quantities["rounded_token_qty"]
+                ),
+                "account_leverage": str(account_lev),
+                "contract_max_leverage": str(contract_lev),
+                "effective_leverage_cap": str(allowed_lev),
+                "minimum_margin_estimate_usdt": (
+                    str(minimum_margin)
+                    if minimum_margin is not None
+                    else None
+                ),
+            })
+
+            # These blockers remain until the independent execution,
+            # risk, ledger, and protection work is complete.
+            row["blockers"].extend([
                 "verified_user_fee_rate_required",
                 "entry_and_stop_prices_required",
                 "stop_loss_risk_budget_check_required",
@@ -478,65 +567,25 @@ def evaluate_capital_feasibility(
                 "exchange_protection_integration_required",
             ])
 
-            capital_only = (
+            row["capital_only_feasible"] = bool(
                 margin_fits
                 and specs.get("status") == "TRADING"
-                and "effective_leverage_invalid" not in blockers
+                and "effective_leverage_invalid" not in row["blockers"]
             )
 
-            reports.append({
-                "symbol": symbol,
-                "contract_status": specs.get("status"),
-                "ticker_price_usdt": str(price),
-                "price_source": "public_contract_ticker",
-
-                "min_notional_usdt": str(min_notional),
-                "min_notional_is_estimate": bool(
-                    specs.get("min_notional_is_estimate")
-                ),
-                "min_notional_source": specs.get(
-                    "min_notional_source"
-                ),
-
-                "contract_multiplier": str(
-                    specs.get("contract_multiplier")
-                ),
-                "min_token_qty": str(quantities["min_token_qty"]),
-                "min_contract_qty": str(
-                    quantities["min_contract_qty"]
-                ),
-                "contract_step": str(quantities["contract_step"]),
-                "rounded_token_qty": str(
-                    quantities["rounded_token_qty"]
-                ),
-
-                "account_leverage": str(account_lev),
-                "contract_max_leverage": str(contract_lev),
-                "effective_leverage_cap": str(allowed_lev),
-
-                "minimum_margin_estimate_usdt": (
-                    str(minimum_margin)
-                    if minimum_margin is not None
-                    else None
-                ),
-
-                "capital_only_feasible": bool(capital_only),
-                "trading_eligible": False,
-                "blockers": blockers,
-            })
+            # This diagnostic must never authorize a trade.
+            row["trading_eligible"] = False
 
         except Exception as exc:
             reason = str(exc).replace("\n", " ")[:180]
+            row["capital_only_feasible"] = False
+            row["trading_eligible"] = False
+            row["blockers"].append(
+                "contract_validation_failed:"
+                f"{type(exc).__name__}:{reason}"
+            )
 
-            reports.append({
-                "symbol": symbol,
-                "capital_only_feasible": False,
-                "trading_eligible": False,
-                "blockers": [
-                    f"contract_validation_failed:"
-                    f"{type(exc).__name__}:{reason}"
-                ],
-            })
+        reports.append(row)
 
     positions = snapshot.get("positions")
     open_orders = snapshot.get("open_orders")
@@ -566,7 +615,7 @@ def evaluate_capital_feasibility(
         "margin_utilization_cap": str(margin_cap),
         "strategy_leverage_cap": str(leverage_cap),
 
-        "ticker_prices_used": True,
+        "ticker_prices_used": bool(prices),
         "estimated_minimums_are_not_exchange_confirmed": True,
         "minimum_margin_formula": "minimum_notional/effective_leverage",
 
@@ -577,11 +626,10 @@ def evaluate_capital_feasibility(
 
         "symbols_checked": len(reports),
         "capital_only_feasible_count": sum(
-            1 for row in reports
-            if row.get("capital_only_feasible") is True
+            1 for item in reports
+            if item.get("capital_only_feasible") is True
         ),
 
-        # This value deliberately remains zero.
         "trading_eligible_count": 0,
         "manual_authorization_required": True,
         "live_execution_enabled": False,
@@ -621,8 +669,17 @@ def main():
         stage = "public_exchange_contract_specs"
         exchange_info = fetch_exchange_info()
 
+        # Ticker retrieval is best-effort. Official positive minimum
+        # filters can still be evaluated without ticker data.
         stage = "public_ticker_prices"
-        prices = fetch_ticker_prices()
+        try:
+            prices = fetch_ticker_prices()
+            ticker_error = None
+        except Exception as exc:
+            prices = {}
+            ticker_error = (
+                f"{type(exc).__name__}:{str(exc)[:160]}"
+            )
 
         stage = "capital_feasibility_evaluation"
         report = evaluate_capital_feasibility(
@@ -635,6 +692,8 @@ def main():
             risk_per_trade=RISK_PER_TRADE,
         )
 
+        report["ticker_fetch_error"] = ticker_error
+
     except PreflightError as exc:
         report = {
             "schema": "apexquant_toobit_capital_feasibility_v2",
@@ -644,6 +703,7 @@ def main():
             "error_type": "PreflightError",
             "diagnostic": str(exc),
             "trading_eligible_count": 0,
+            "live_execution_enabled": False,
             "orders_submitted": 0,
             "orders_amended": 0,
             "orders_canceled": 0,
@@ -658,6 +718,7 @@ def main():
             "error_type": type(exc).__name__,
             "diagnostic": str(exc)[:200],
             "trading_eligible_count": 0,
+            "live_execution_enabled": False,
             "orders_submitted": 0,
             "orders_amended": 0,
             "orders_canceled": 0,
