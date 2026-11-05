@@ -1,3 +1,4 @@
+
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -7,7 +8,10 @@ sys.path.insert(
     str(Path(__file__).resolve().parent.parent / "scripts"),
 )
 
-from toobit_capital_feasibility import evaluate_capital_feasibility
+from symbol_specs import parse_symbol_specs
+from toobit_capital_feasibility import (
+    evaluate_capital_feasibility,
+)
 
 
 SYMBOLS = [
@@ -39,11 +43,16 @@ def make_snapshot(**overrides):
             },
         ],
     }
+
     result.update(overrides)
     return result
 
 
-def make_contract(symbol, min_notional="5", max_leverage="20"):
+def make_contract(
+    symbol,
+    min_notional="5",
+    max_leverage="20",
+):
     return {
         "symbol": symbol,
         "status": "TRADING",
@@ -52,7 +61,9 @@ def make_contract(symbol, min_notional="5", max_leverage="20"):
         "marginToken": "USDT",
         "contractMultiplier": "1",
         "riskLimits": [
-            {"maxLeverage": max_leverage}
+            {
+                "maxLeverage": max_leverage,
+            }
         ],
         "filters": [
             {
@@ -95,6 +106,7 @@ def test_ten_usdt_report_is_read_only_and_never_approves_trading():
     assert result["read_only"] is True
     assert result["available_balance_redacted"] is True
     assert result["risk_budget_redacted"] is True
+
     assert result["orders_submitted"] == 0
     assert result["orders_amended"] == 0
     assert result["orders_canceled"] == 0
@@ -130,6 +142,156 @@ def test_minimum_margin_uses_account_leverage_and_strategy_cap():
     assert eth["minimum_margin_estimate_usdt"] == "2.5"
 
 
+def test_min_notional_primary_filter_is_used():
+    contract = make_contract(
+        "BTC-SWAP-USDT",
+        min_notional="7.5",
+    )
+
+    specs = parse_symbol_specs(contract)
+
+    assert specs["min_notional"] == 7.5
+    assert (
+        specs["min_notional_source"]
+        == "MIN_NOTIONAL.minNotional"
+    )
+
+
+def test_trade_amount_min_amount_is_used_as_fallback():
+    contract = make_contract("BTC-SWAP-USDT")
+
+    contract["filters"] = [
+        item
+        for item in contract["filters"]
+        if item["filterType"] != "MIN_NOTIONAL"
+    ]
+
+    contract["filters"].append({
+        "filterType": "TRADE_AMOUNT",
+        "minAmount": "10",
+    })
+
+    specs = parse_symbol_specs(contract)
+
+    assert specs["min_notional"] == 10
+    assert (
+        specs["min_notional_source"]
+        == "TRADE_AMOUNT.minAmount"
+    )
+
+
+def test_min_notional_has_priority_over_trade_amount():
+    contract = make_contract(
+        "BTC-SWAP-USDT",
+        min_notional="5",
+    )
+
+    contract["filters"].append({
+        "filterType": "TRADE_AMOUNT",
+        "minAmount": "10",
+    })
+
+    specs = parse_symbol_specs(contract)
+
+    assert specs["min_notional"] == 5
+    assert (
+        specs["min_notional_source"]
+        == "MIN_NOTIONAL.minNotional"
+    )
+
+
+def test_missing_both_minimum_filters_is_rejected():
+    contract = make_contract("BTC-SWAP-USDT")
+
+    contract["filters"] = [
+        item
+        for item in contract["filters"]
+        if item["filterType"] not in (
+            "MIN_NOTIONAL",
+            "TRADE_AMOUNT",
+        )
+    ]
+
+    try:
+        parse_symbol_specs(contract)
+    except ValueError as exc:
+        assert "minimum_order_value_missing" in str(exc)
+        return
+
+    raise AssertionError(
+        "missing minimum filters must be rejected"
+    )
+
+
+def test_zero_trade_amount_is_rejected():
+    contract = make_contract("BTC-SWAP-USDT")
+
+    contract["filters"] = [
+        item
+        for item in contract["filters"]
+        if item["filterType"] != "MIN_NOTIONAL"
+    ]
+
+    contract["filters"].append({
+        "filterType": "TRADE_AMOUNT",
+        "minAmount": "0",
+    })
+
+    try:
+        parse_symbol_specs(contract)
+    except ValueError as exc:
+        assert "must be positive" in str(exc)
+        return
+
+    raise AssertionError(
+        "zero minimum amount must be rejected"
+    )
+
+
+def test_invalid_trade_amount_is_rejected():
+    contract = make_contract("BTC-SWAP-USDT")
+
+    contract["filters"] = [
+        item
+        for item in contract["filters"]
+        if item["filterType"] != "MIN_NOTIONAL"
+    ]
+
+    contract["filters"].append({
+        "filterType": "TRADE_AMOUNT",
+        "minAmount": "not-a-number",
+    })
+
+    try:
+        parse_symbol_specs(contract)
+    except ValueError as exc:
+        assert "not numeric" in str(exc)
+        return
+
+    raise AssertionError(
+        "invalid minimum amount must be rejected"
+    )
+
+
+def test_duplicate_minimum_filter_is_rejected():
+    contract = make_contract("BTC-SWAP-USDT")
+
+    contract["filters"].append({
+        "filterType": "MIN_NOTIONAL",
+        "minNotional": "5",
+    })
+
+    try:
+        parse_symbol_specs(contract)
+    except ValueError as exc:
+        assert "duplicate_MIN_NOTIONAL_filter" in str(exc)
+        return
+
+    raise AssertionError(
+        "duplicate minimum filters must be rejected"
+    )
+
+
 def test_zero_available_balance_does_not_pass_capital_check():
     snapshot = make_snapshot()
     snapshot["wallet"]["availableBalance"] = "0"
@@ -152,8 +314,14 @@ def test_zero_available_balance_does_not_pass_capital_check():
 def test_minimum_order_margin_above_budget_is_blocked():
     exchange_info = {
         "contracts": [
-            make_contract("BTC-SWAP-USDT", min_notional="100"),
-            make_contract("ETH-SWAP-USDT", min_notional="100"),
+            make_contract(
+                "BTC-SWAP-USDT",
+                min_notional="100",
+            ),
+            make_contract(
+                "ETH-SWAP-USDT",
+                min_notional="100",
+            ),
         ]
     }
 
@@ -185,7 +353,10 @@ def test_non_trading_contract_is_blocked():
     )
 
     assert result["reports"][0]["capital_only_feasible"] is False
-    assert "contract_not_trading" in result["reports"][0]["blockers"]
+    assert (
+        "contract_not_trading"
+        in result["reports"][0]["blockers"]
+    )
 
 
 def test_missing_contract_is_blocked_without_raising():
@@ -203,12 +374,21 @@ def test_missing_contract_is_blocked_without_raising():
 
     assert result["reports"][0]["capital_only_feasible"] is True
     assert result["reports"][1]["capital_only_feasible"] is False
-    assert "contract_not_found" in result["reports"][1]["blockers"]
+
+    assert (
+        "contract_not_found"
+        in result["reports"][1]["blockers"]
+    )
 
 
 def test_account_position_or_open_order_marks_account_not_clear():
     snapshot = make_snapshot(
-        positions=[{"symbol": "BTC-SWAP-USDT", "position": "1"}]
+        positions=[
+            {
+                "symbol": "BTC-SWAP-USDT",
+                "position": "1",
+            }
+        ]
     )
 
     result = evaluate_capital_feasibility(
@@ -231,12 +411,16 @@ def test_invalid_snapshot_is_rejected():
     except RuntimeError:
         return
 
-    raise AssertionError("invalid snapshot should fail closed")
+    raise AssertionError(
+        "invalid snapshot should fail closed"
+    )
 
 
 def test_missing_account_leverage_coverage_is_rejected():
     snapshot = make_snapshot()
-    snapshot["leverage_settings"] = snapshot["leverage_settings"][:1]
+    snapshot["leverage_settings"] = (
+        snapshot["leverage_settings"][:1]
+    )
 
     try:
         evaluate_capital_feasibility(
@@ -247,4 +431,6 @@ def test_missing_account_leverage_coverage_is_rejected():
     except RuntimeError:
         return
 
-    raise AssertionError("missing leverage coverage should fail closed")
+    raise AssertionError(
+        "missing leverage coverage should fail closed"
+    )
