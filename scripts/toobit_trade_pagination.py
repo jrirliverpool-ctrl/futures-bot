@@ -1,6 +1,9 @@
 
 """Fail-closed pagination for Toobit V2 user trades.
 
+Uses the documented toId cursor direction:
+records greater than toId, in ascending order.
+
 Read-only only. Never submits, amends, or cancels orders.
 A result is returned only when pagination reaches a short or empty page.
 """
@@ -39,13 +42,17 @@ def fetch_complete_user_trades_v2(
     end_time=None,
     page_size=1000,
     max_pages=100,
-    initial_from_id=None,
+    initial_to_id=0,
 ):
-    """Fetch all pages or raise; never return a potentially partial history.
+    """Fetch all pages in ascending trade-ID order or raise.
 
-    Cursor progression uses last_trade_id + 1. IDs must be numeric and
-    strictly increasing. Duplicate IDs, malformed rows, unexpected
-    symbols, cursor stalls and page-limit exhaustion all fail closed.
+    The V2 client supports both from_id and to_id.
+    This implementation uses to_id and advances to the last
+    observed ID. The exchange must return IDs strictly greater
+    than the supplied cursor.
+
+    A short page proves completion. A full page requires another
+    request. Reaching max_pages is never treated as completeness.
     """
 
     if client is None:
@@ -68,20 +75,23 @@ def fetch_complete_user_trades_v2(
     ):
         raise ValueError("max_pages must be a positive integer")
 
-    if initial_from_id is not None and (
-        isinstance(initial_from_id, bool)
-        or not isinstance(initial_from_id, int)
-        or initial_from_id < 0
+    if (
+        isinstance(initial_to_id, bool)
+        or not isinstance(initial_to_id, int)
+        or initial_to_id < 0
     ):
-        raise ValueError("initial_from_id must be non-negative")
+        raise ValueError("initial_to_id must be non-negative")
 
     method = getattr(client, "get_user_trades_v2", None)
+
     if not callable(method):
-        raise TradePaginationError("v2_user_trades_method_unavailable")
+        raise TradePaginationError(
+            "v2_user_trades_method_unavailable"
+        )
 
     collected = []
     seen_ids = set()
-    cursor = initial_from_id
+    cursor = initial_to_id
     previous_id = None
 
     for page_number in range(1, max_pages + 1):
@@ -90,17 +100,21 @@ def fetch_complete_user_trades_v2(
             start_time=start_time,
             end_time=end_time,
             limit=page_size,
-            from_id=cursor,
+            to_id=cursor,
         )
 
         if not isinstance(rows, list):
             raise TradePaginationError("page_is_not_a_list")
 
         if not all(isinstance(row, dict) for row in rows):
-            raise TradePaginationError("page_contains_non_object_row")
+            raise TradePaginationError(
+                "page_contains_non_object_row"
+            )
 
         if len(rows) > page_size:
-            raise TradePaginationError("page_exceeds_requested_limit")
+            raise TradePaginationError(
+                "page_exceeds_requested_limit"
+            )
 
         if not rows:
             return collected
@@ -109,7 +123,9 @@ def fetch_complete_user_trades_v2(
 
         for row in rows:
             if row.get("symbol") != symbol:
-                raise TradePaginationError("trade_symbol_mismatch")
+                raise TradePaginationError(
+                    "trade_symbol_mismatch"
+                )
 
             trade_id = _numeric_trade_id(row)
 
@@ -117,25 +133,32 @@ def fetch_complete_user_trades_v2(
                 raise TradePaginationError("duplicate_trade_id")
 
             if previous_id is not None and trade_id <= previous_id:
-                raise TradePaginationError("trade_ids_not_strictly_increasing")
+                raise TradePaginationError(
+                    "trade_ids_not_strictly_increasing"
+                )
+
+            if trade_id <= cursor:
+                raise TradePaginationError(
+                    "trade_id_not_above_to_id_cursor"
+                )
 
             seen_ids.add(trade_id)
             page_ids.append(trade_id)
             previous_id = trade_id
             collected.append(row)
 
-        # A short page proves the end of this query window.
         if len(rows) < page_size:
             return collected
 
-        # A full page may have more records. Advance strictly beyond
-        # the final ID; never retry the same cursor.
-        next_cursor = page_ids[-1] + 1
+        next_cursor = page_ids[-1]
 
-        if cursor is not None and next_cursor <= cursor:
-            raise TradePaginationError("pagination_cursor_did_not_advance")
+        if next_cursor <= cursor:
+            raise TradePaginationError(
+                "pagination_cursor_did_not_advance"
+            )
 
         cursor = next_cursor
 
-    # Reaching the page cap is not proof of completeness.
-    raise TradePaginationError("pagination_page_limit_reached")
+    raise TradePaginationError(
+        "pagination_page_limit_reached"
+    )
