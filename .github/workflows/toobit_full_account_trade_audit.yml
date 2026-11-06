@@ -39,14 +39,14 @@ jobs:
             tests/test_toobit_trade_pagination.py \
             tests/test_fill_ledger.py
 
-      - name: Run authenticated read-only audit
+      - name: Run authenticated read-only pagination probe
         env:
           TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
           TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
         run: |
           python scripts/toobit_full_account_trade_audit.py \
             --whitelist config/crypto_whitelist.json \
-            --page-size 1000 \
+            --page-size 2 \
             --max-pages 100 \
             --ledger reports/toobit_fill_ledger.jsonl \
             --out reports/toobit_full_account_trade_audit.json
@@ -55,7 +55,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: toobit-full-account-audit-${{ github.run_id }}
+          name: toobit-pagination-probe-${{ github.run_id }}
           path: |
             reports/toobit_full_account_trade_audit.json
             reports/toobit_fill_ledger.jsonl
