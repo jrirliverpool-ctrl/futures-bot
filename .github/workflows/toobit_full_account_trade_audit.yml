@@ -51,13 +51,10 @@ jobs:
             --ledger reports/toobit_fill_ledger.jsonl \
             --out reports/toobit_full_account_trade_audit.json
 
-      - name: Upload audit report and fill ledger
+      - name: Confirm safety flags
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: toobit-pagination-probe-${{ github.run_id }}
-          path: |
-            reports/toobit_full_account_trade_audit.json
-            reports/toobit_fill_ledger.jsonl
-          if-no-files-found: warn
-          retention-days: 30
+        run: |
+          echo "This workflow is read-only."
+          echo "No order submission, amendment, or cancellation is permitted."
+          echo "Live execution remains disabled."
+          echo "Account reports and fill ledgers are NOT uploaded as artifacts."
