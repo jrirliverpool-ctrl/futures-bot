@@ -47,6 +47,7 @@ class FakeClient:
         end_time=None,
         limit=1000,
         from_id=None,
+        to_id=None,
     ):
         self.calls.append({
             "symbol": symbol,
@@ -54,10 +55,13 @@ class FakeClient:
             "end_time": end_time,
             "limit": limit,
             "from_id": from_id,
+            "to_id": to_id,
         })
 
         if not self.pages:
-            raise AssertionError("unexpected extra page request")
+            raise AssertionError(
+                "unexpected extra page request"
+            )
 
         result = self.pages.pop(0)
 
@@ -78,6 +82,7 @@ def test_empty_first_page_returns_empty_history():
 
     assert result == []
     assert len(client.calls) == 1
+    assert client.calls[0]["to_id"] == 0
 
 
 def test_short_page_proves_completion():
@@ -106,11 +111,12 @@ def test_full_page_then_empty_page_completes():
 
     assert [row["id"] for row in result] == ["1", "2"]
     assert len(client.calls) == 2
-    assert client.calls[0]["from_id"] is None
-    assert client.calls[1]["from_id"] == 3
+    assert [
+        call["to_id"] for call in client.calls
+    ] == [0, 2]
 
 
-def test_multiple_pages_preserve_order():
+def test_multiple_pages_preserve_ascending_order():
     client = FakeClient([
         [trade(10), trade(11)],
         [trade(12), trade(13)],
@@ -128,21 +134,21 @@ def test_multiple_pages_preserve_order():
     ] == [10, 11, 12, 13]
 
     assert [
-        call["from_id"] for call in client.calls
-    ] == [None, 12, 14]
+        call["to_id"] for call in client.calls
+    ] == [0, 11, 13]
 
 
-def test_initial_from_id_is_forwarded():
-    client = FakeClient([[trade(100)], []])
+def test_initial_to_id_is_forwarded():
+    client = FakeClient([[trade(101)], []])
 
     fetch_complete_user_trades_v2(
         client,
         SYMBOL,
         page_size=2,
-        initial_from_id=100,
+        initial_to_id=100,
     )
 
-    assert client.calls[0]["from_id"] == 100
+    assert client.calls[0]["to_id"] == 100
 
 
 def test_time_window_is_forwarded_to_every_page():
@@ -205,7 +211,7 @@ def test_duplicate_ids_fail_closed():
         )
 
 
-def test_non_increasing_ids_fail_closed():
+def test_descending_ids_fail_closed():
     client = FakeClient([
         [trade(2), trade(1)],
     ])
@@ -317,8 +323,8 @@ def test_exchange_exception_propagates():
         {"page_size": True},
         {"max_pages": 0},
         {"max_pages": True},
-        {"initial_from_id": -1},
-        {"initial_from_id": True},
+        {"initial_to_id": -1},
+        {"initial_to_id": True},
     ],
 )
 def test_invalid_pagination_configuration_is_rejected(kwargs):
