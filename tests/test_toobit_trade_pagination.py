@@ -29,7 +29,7 @@ def trade(trade_id, **overrides):
         "commissionAsset": "USDT",
         "side": "BUY",
         "positionSide": "LONG",
-        "time": 1790000000000 + trade_id,
+        "time": 1790000000000,
     }
     row.update(overrides)
     return row
