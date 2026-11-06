@@ -82,11 +82,11 @@ def test_empty_first_page_returns_empty_history():
 
     assert result == []
     assert len(client.calls) == 1
-    assert client.calls[0]["to_id"] == 0
+    assert client.calls[0]["from_id"] is None
 
 
 def test_short_page_proves_completion():
-    rows = [trade(1), trade(2)]
+    rows = [trade(10), trade(9)]
     client = FakeClient([rows])
 
     result = fetch_complete_user_trades_v2(
@@ -100,7 +100,7 @@ def test_short_page_proves_completion():
 
 
 def test_full_page_then_empty_page_completes():
-    first = [trade(1), trade(2)]
+    first = [trade(10), trade(9)]
     client = FakeClient([first, []])
 
     result = fetch_complete_user_trades_v2(
@@ -109,18 +109,18 @@ def test_full_page_then_empty_page_completes():
         page_size=2,
     )
 
-    assert [row["id"] for row in result] == ["1", "2"]
+    assert [row["id"] for row in result] == ["10", "9"]
     assert len(client.calls) == 2
     assert [
-        call["to_id"] for call in client.calls
-    ] == [0, 2]
+        call["from_id"] for call in client.calls
+    ] == [None, 9]
 
 
-def test_multiple_pages_preserve_ascending_order():
+def test_multiple_pages_preserve_descending_order():
     client = FakeClient([
-        [trade(10), trade(11)],
-        [trade(12), trade(13)],
-        [],
+        [trade(14), trade(13)],
+        [trade(12), trade(11)],
+        [trade(10)],
     ])
 
     result = fetch_complete_user_trades_v2(
@@ -131,29 +131,32 @@ def test_multiple_pages_preserve_ascending_order():
 
     assert [
         int(row["id"]) for row in result
-    ] == [10, 11, 12, 13]
+    ] == [14, 13, 12, 11, 10]
 
     assert [
-        call["to_id"] for call in client.calls
-    ] == [0, 11, 13]
+        call["from_id"] for call in client.calls
+    ] == [None, 13, 11]
 
 
-def test_initial_to_id_is_forwarded():
-    client = FakeClient([[trade(101)], []])
+def test_initial_from_id_is_forwarded():
+    client = FakeClient([
+        [trade(99), trade(98)],
+        [],
+    ])
 
     fetch_complete_user_trades_v2(
         client,
         SYMBOL,
         page_size=2,
-        initial_to_id=100,
+        initial_from_id=100,
     )
 
-    assert client.calls[0]["to_id"] == 100
+    assert client.calls[0]["from_id"] == 100
 
 
 def test_time_window_is_forwarded_to_every_page():
     client = FakeClient([
-        [trade(1), trade(2)],
+        [trade(10), trade(9)],
         [],
     ])
 
@@ -200,7 +203,7 @@ def test_boolean_trade_id_is_rejected():
 
 def test_duplicate_ids_fail_closed():
     client = FakeClient([
-        [trade(1), trade(1)],
+        [trade(10), trade(10)],
     ])
 
     with pytest.raises(TradePaginationError):
@@ -211,12 +214,15 @@ def test_duplicate_ids_fail_closed():
         )
 
 
-def test_descending_ids_fail_closed():
+def test_ascending_ids_fail_closed():
     client = FakeClient([
-        [trade(2), trade(1)],
+        [trade(9), trade(10)],
     ])
 
-    with pytest.raises(TradePaginationError):
+    with pytest.raises(
+        TradePaginationError,
+        match="trade_ids_not_strictly_decreasing",
+    ):
         fetch_complete_user_trades_v2(
             client,
             SYMBOL,
@@ -226,8 +232,8 @@ def test_descending_ids_fail_closed():
 
 def test_duplicate_across_pages_fails_closed():
     client = FakeClient([
-        [trade(1), trade(2)],
-        [trade(2)],
+        [trade(10), trade(9)],
+        [trade(9)],
     ])
 
     with pytest.raises(TradePaginationError):
@@ -238,9 +244,24 @@ def test_duplicate_across_pages_fails_closed():
         )
 
 
+def test_page_must_be_below_from_id_cursor():
+    client = FakeClient([
+        [trade(10), trade(9)],
+        [trade(9)],
+    ])
+
+    with pytest.raises(TradePaginationError):
+        fetch_complete_user_trades_v2(
+            client,
+            SYMBOL,
+            page_size=2,
+            initial_from_id=11,
+        )
+
+
 def test_symbol_mismatch_fails_closed():
     client = FakeClient([
-        [trade(1, symbol="ETH-SWAP-USDT")],
+        [trade(10, symbol="ETH-SWAP-USDT")],
     ])
 
     with pytest.raises(TradePaginationError):
@@ -257,7 +278,7 @@ def test_symbol_mismatch_fails_closed():
         None,
         {},
         "invalid",
-        [trade(1), "invalid-row"],
+        [trade(10), "invalid-row"],
     ],
 )
 def test_malformed_page_fails_closed(bad_page):
@@ -273,7 +294,7 @@ def test_malformed_page_fails_closed(bad_page):
 
 def test_page_larger_than_requested_limit_fails():
     client = FakeClient([
-        [trade(1), trade(2), trade(3)],
+        [trade(10), trade(9), trade(8)],
     ])
 
     with pytest.raises(TradePaginationError):
@@ -286,8 +307,8 @@ def test_page_larger_than_requested_limit_fails():
 
 def test_page_limit_exhaustion_does_not_return_partial_history():
     client = FakeClient([
-        [trade(1), trade(2)],
-        [trade(3), trade(4)],
+        [trade(10), trade(9)],
+        [trade(8), trade(7)],
     ])
 
     with pytest.raises(
@@ -323,8 +344,8 @@ def test_exchange_exception_propagates():
         {"page_size": True},
         {"max_pages": 0},
         {"max_pages": True},
-        {"initial_to_id": -1},
-        {"initial_to_id": True},
+        {"initial_from_id": -1},
+        {"initial_from_id": True},
     ],
 )
 def test_invalid_pagination_configuration_is_rejected(kwargs):
@@ -347,3 +368,18 @@ def test_client_without_v2_method_is_rejected():
             EmptyClient(),
             SYMBOL,
         )
+
+
+def test_zero_id_page_proves_oldest_boundary():
+    client = FakeClient([
+        [trade(2), trade(0)],
+    ])
+
+    result = fetch_complete_user_trades_v2(
+        client,
+        SYMBOL,
+        page_size=2,
+    )
+
+    assert [row["id"] for row in result] == ["2", "0"]
+    assert len(client.calls) == 1
