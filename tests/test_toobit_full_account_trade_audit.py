@@ -7,11 +7,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import toobit_full_account_trade_audit as audit
+import toobit_balance_flow as flow
 
 
 def test_load_symbols_rejects_duplicate(tmp_path):
     path = tmp_path / "symbols.json"
-
     path.write_text(
         '{"symbols":["BTC-SWAP-USDT","BTC-SWAP-USDT"]}'
     )
@@ -45,40 +45,26 @@ def test_summary_aggregates_fees_and_pnl():
     result = audit._summarize_fills(rows)
 
     assert result["fill_count"] == 2
-
-    assert (
-        Decimal(
-            result["commission_by_asset"]["USDT"]
-        )
-        == Decimal("0.07")
-    )
-
-    assert (
-        Decimal(
-            result["reported_realized_pnl_usdt"]
-        )
-        == Decimal("1")
-    )
-
+    assert Decimal(
+        result["commission_by_asset"]["USDT"]
+    ) == Decimal("0.07")
+    assert Decimal(
+        result["reported_realized_pnl_usdt"]
+    ) == Decimal("1")
     assert result["maker_fill_count"] == 1
     assert result["taker_fill_count"] == 1
 
 
 def test_summary_flags_missing_realized_pnl():
-    rows = [
-        {
-            "commission_asset": "USDT",
-            "commission": "0.05",
-            "maker_rebate": "0",
-            "realized_pnl": "0",
-            "is_maker": None,
-        }
-    ]
+    rows = [{
+        "commission_asset": "USDT",
+        "commission": "0.05",
+        "maker_rebate": "0",
+        "realized_pnl": "0",
+        "is_maker": None,
+    }]
 
-    result = audit._summarize_fills(
-        rows,
-        missing_realized_pnl=1,
-    )
+    result = audit._summarize_fills(rows, missing_realized_pnl=1)
 
     assert result["realized_pnl_complete"] is False
     assert result["realized_pnl_missing_fill_count"] == 1
@@ -129,6 +115,108 @@ def test_active_position_requires_average_price():
         return
 
     assert False, "missing avgPrice must fail closed"
+
+
+def test_positions_reject_duplicate_symbol():
+    class Client:
+        def _request(self, *args):
+            return [
+                {
+                    "symbol": "BTC-SWAP-USDT",
+                    "side": "LONG",
+                    "position": "0",
+                },
+                {
+                    "symbol": "BTC-SWAP-USDT",
+                    "side": "SHORT",
+                    "position": "0",
+                },
+            ]
+
+    try:
+        audit._read_positions(Client())
+    except audit.AuditError:
+        return
+
+    assert False, "duplicate position rows must fail closed"
+
+
+def test_balance_flow_reader_requires_stable_scan(monkeypatch):
+    calls = []
+
+    expected = [{
+        "id": "1",
+        "coin": "USDT",
+        "symbol": "BTC-SWAP-USDT",
+        "flow_type_raw": "Fund Fee",
+        "flow_type_value": 32,
+        "category": "FUNDING",
+        "change": "-0.25",
+        "total": "100",
+        "created_ms": 2000000000000,
+    }]
+
+    def fake_fetch(client, **kwargs):
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(
+        audit,
+        "fetch_all_futures_balance_flow",
+        fake_fetch,
+    )
+
+    rows, summary = audit._read_stable_balance_flow(
+        object(),
+        page_size=100,
+        max_pages=10,
+    )
+
+    assert rows == expected
+    assert summary["row_count"] == 1
+    assert summary["known_flow_categories_complete"] is True
+    assert len(calls) == 1
+    assert calls[0]["verify_stable"] is True
+
+
+def test_balance_flow_reader_rejects_unstable_snapshot(monkeypatch):
+    def fake_fetch(client, **kwargs):
+        raise flow.BalanceFlowError(
+            "balance_flow_snapshot_changed_between_scans"
+        )
+
+    monkeypatch.setattr(
+        audit,
+        "fetch_all_futures_balance_flow",
+        fake_fetch,
+    )
+
+    try:
+        audit._read_stable_balance_flow(object())
+    except audit.AuditError as exc:
+        assert "balance_flow_audit_failed" in str(exc)
+        return
+
+    assert False, "unstable balance flow must fail closed"
+
+
+def test_balance_flow_unknown_category_is_detected():
+    row = {
+        "id": "1",
+        "coin": "USDT",
+        "symbol": "BTC-SWAP-USDT",
+        "flow_type_raw": "New Unknown Type",
+        "flow_type_value": 999,
+        "category": "UNKNOWN",
+        "change": "-1",
+        "total": "99",
+        "created_ms": 2000000000000,
+    }
+
+    summary = flow.summarize_balance_flow([row])
+
+    assert summary["unknown_flow_type_count"] == 1
+    assert summary["known_flow_categories_complete"] is False
 
 
 def test_live_execution_is_never_authorized():
