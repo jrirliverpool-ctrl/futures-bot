@@ -117,7 +117,32 @@ def test_active_position_requires_average_price():
     assert False, "missing avgPrice must fail closed"
 
 
-def test_positions_reject_duplicate_symbol():
+def test_positions_accept_hedge_long_and_short_for_same_symbol():
+    class Client:
+        def _request(self, *args):
+            return [
+                {
+                    "symbol": "BTC-SWAP-USDT",
+                    "side": "LONG",
+                    "position": "0.01",
+                    "avgPrice": "60000",
+                },
+                {
+                    "symbol": "BTC-SWAP-USDT",
+                    "side": "SHORT",
+                    "position": "0.02",
+                    "avgPrice": "61000",
+                },
+            ]
+
+    rows = audit._read_positions(Client())
+
+    assert len(rows) == 2
+    assert rows[0]["side"] == "LONG"
+    assert rows[1]["side"] == "SHORT"
+
+
+def test_positions_reject_duplicate_symbol_and_same_side():
     class Client:
         def _request(self, *args):
             return [
@@ -128,17 +153,35 @@ def test_positions_reject_duplicate_symbol():
                 },
                 {
                     "symbol": "BTC-SWAP-USDT",
-                    "side": "SHORT",
+                    "side": "LONG",
                     "position": "0",
                 },
             ]
 
     try:
         audit._read_positions(Client())
-    except audit.AuditError:
+    except audit.AuditError as exc:
+        assert "duplicate_position_symbol_side" in str(exc)
         return
 
-    assert False, "duplicate position rows must fail closed"
+    assert False, "duplicate symbol-side pair must fail closed"
+
+
+def test_position_unrealized_pnl_prefers_documented_field():
+    row = {
+        "unrealizedPnL": "12.34",
+        "unRealizedProfit": "99.99",
+    }
+
+    assert audit._position_unrealized_pnl(row) == "12.34"
+
+
+def test_position_unrealized_pnl_supports_legacy_fallback():
+    row = {
+        "unRealizedProfit": "-2.50",
+    }
+
+    assert audit._position_unrealized_pnl(row) == "-2.50"
 
 
 def test_balance_flow_reader_requires_stable_scan(monkeypatch):
