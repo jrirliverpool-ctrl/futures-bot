@@ -1,11 +1,11 @@
 
 """Read-only, fail-closed pagination and accounting for Toobit futures balance flow.
 
-Uses the documented V1 USDT-M endpoint:
-GET /api/v1/futures/balanceFlow
+Endpoint: GET /api/v1/futures/balanceFlow
 
-No order placement, amendment, cancellation, or account mutation.
-The endpoint's queryable history is limited to the most recent 90 days.
+The response uses flowTypeValue for numeric codes and flowType
+for the human-readable flow name. The queryable history is limited
+to the most recent 90 days.
 """
 from __future__ import annotations
 
@@ -15,13 +15,25 @@ from decimal import Decimal, InvalidOperation
 
 ENDPOINT = "/api/v1/futures/balanceFlow"
 
-# Documented flowType numeric codes.
 FLOW_TYPES = {
     10: "FEE",
     28: "REALIZED_PNL",
     32: "FUNDING",
     700: "LIQUIDATION",
     701: "ADL",
+}
+
+FLOW_TYPE_NAMES = {
+    "fee": 10,
+    "fund fee": 32,
+    "fund_fee": 32,
+    "funding": 32,
+    "realized pnl": 28,
+    "realized_pnl": 28,
+    "force liquidation": 700,
+    "force_liquidation": 700,
+    "liquidation": 700,
+    "adl": 701,
 }
 
 
@@ -69,30 +81,68 @@ def _decimal(value, field, *, signed=False):
     return number
 
 
-def _flow_type_code(value):
-    if isinstance(value, bool) or value is None:
-        return None
+def _parse_flow_type(row):
+    raw_value = row.get("flowTypeValue")
+    raw_name = row.get("flowType")
 
-    text = str(value).strip()
+    numeric_code = None
 
-    if not text.isdigit():
-        return None
+    if raw_value is not None:
+        if isinstance(raw_value, bool):
+            raise BalanceFlowError("flow_type_value_invalid")
 
-    return int(text)
+        text = str(raw_value).strip()
+
+        if not text.isdigit():
+            raise BalanceFlowError("flow_type_value_not_integer")
+
+        numeric_code = int(text)
+
+    name_code = None
+
+    if raw_name is not None:
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise BalanceFlowError("flow_type_name_invalid")
+
+        normalized_name = raw_name.strip().lower()
+        name_code = FLOW_TYPE_NAMES.get(normalized_name)
+
+    if (
+        numeric_code is not None
+        and name_code is not None
+        and numeric_code != name_code
+    ):
+        raise BalanceFlowError("flow_type_value_name_mismatch")
+
+    code = (
+        numeric_code
+        if numeric_code is not None
+        else name_code
+    )
+
+    if code is None:
+        category = "UNKNOWN"
+    else:
+        category = FLOW_TYPES.get(code, "UNKNOWN")
+
+    if raw_name is None and raw_value is None:
+        raise BalanceFlowError("flow_type_missing")
+
+    return code, category, (
+        str(raw_name) if raw_name is not None
+        else str(raw_value)
+    )
 
 
 def normalize_flow_row(row):
-    """Validate and normalize one futures balance-flow row."""
+    """Validate and normalize one Toobit futures balance-flow row."""
 
     flow_id = _flow_id(row)
 
     coin = row.get("coin")
+
     if not isinstance(coin, str) or not coin.strip():
         raise BalanceFlowError("flow_coin_missing")
-
-    flow_type = row.get("flowType")
-    if flow_type is None:
-        raise BalanceFlowError("flow_type_missing")
 
     change = _decimal(
         row.get("change"),
@@ -106,30 +156,36 @@ def normalize_flow_row(row):
     )
 
     created = row.get("created")
+
     if isinstance(created, bool) or created is None:
         raise BalanceFlowError("flow_created_missing")
 
     created_text = str(created)
+
     if not created_text.isdigit():
         raise BalanceFlowError("flow_created_not_integer")
 
     created_ms = int(created_text)
+
     if created_ms <= 0:
         raise BalanceFlowError("flow_created_not_positive")
 
-    code = _flow_type_code(flow_type)
+    code, category, raw_type = _parse_flow_type(row)
+
+    symbol = row.get("symbol")
+
+    if symbol is not None and (
+        not isinstance(symbol, str) or not symbol.strip()
+    ):
+        raise BalanceFlowError("flow_symbol_invalid")
 
     return {
         "id": str(flow_id),
         "coin": coin.strip(),
-        "symbol": (
-            row.get("symbol")
-            if isinstance(row.get("symbol"), str)
-            else None
-        ),
-        "flow_type_raw": str(flow_type),
-        "flow_type_code": code,
-        "category": FLOW_TYPES.get(code, "UNKNOWN"),
+        "symbol": symbol.strip() if symbol else None,
+        "flow_type_raw": raw_type,
+        "flow_type_value": code,
+        "category": category,
         "change": str(change),
         "total": str(total),
         "created_ms": created_ms,
@@ -139,7 +195,7 @@ def normalize_flow_row(row):
 def _scan_once(
     client,
     *,
-    coin=None,
+    symbol=None,
     start_time=None,
     end_time=None,
     page_size=1000,
@@ -152,10 +208,10 @@ def _scan_once(
 
     params = {"limit": page_size}
 
-    if coin is not None:
-        if not isinstance(coin, str) or not coin.strip():
-            raise ValueError("coin must be non-empty text")
-        params["coin"] = coin.strip()
+    if symbol is not None:
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError("symbol must be non-empty text")
+        params["symbol"] = symbol.strip()
 
     for name, value in (
         ("startTime", start_time),
@@ -243,11 +299,11 @@ def _scan_once(
             page_ids.append(flow_id)
             result.append(normalized)
 
-        # The documented cursor returns records with IDs below fromId.
-        # A short page proves the end of this query direction.
         if len(page) < page_size:
             return result
 
+        # For descending pagination, the minimum ID of this page
+        # is passed as fromId to retrieve earlier records.
         next_cursor = min(page_ids)
 
         if cursor is not None and next_cursor >= cursor:
@@ -269,7 +325,7 @@ def _scan_once(
 def fetch_all_futures_balance_flow(
     client,
     *,
-    coin=None,
+    symbol=None,
     start_time=None,
     end_time=None,
     page_size=1000,
@@ -278,7 +334,7 @@ def fetch_all_futures_balance_flow(
 ):
     """Fetch a complete query-window snapshot.
 
-    When verify_stable=True, two complete scans must match.
+    Two matching scans are required by default.
     This proves repeatability between scans, not permanent immutability.
     """
 
@@ -298,7 +354,7 @@ def fetch_all_futures_balance_flow(
 
     first = _scan_once(
         client,
-        coin=coin,
+        symbol=symbol,
         start_time=start_time,
         end_time=end_time,
         page_size=page_size,
@@ -310,7 +366,7 @@ def fetch_all_futures_balance_flow(
 
     second = _scan_once(
         client,
-        coin=coin,
+        symbol=symbol,
         start_time=start_time,
         end_time=end_time,
         page_size=page_size,
@@ -338,25 +394,30 @@ def summarize_balance_flow(rows):
     counts = defaultdict(int)
     unknown_types = defaultdict(int)
     coin_totals = defaultdict(Decimal)
-
     seen_ids = set()
 
     for row in rows:
+        if not isinstance(row, dict):
+            raise BalanceFlowError("summary_row_not_object")
+
         normalized = normalize_flow_row({
             "id": row.get("id"),
             "coin": row.get("coin"),
             "symbol": row.get("symbol"),
             "flowType": row.get("flow_type_raw"),
+            "flowTypeValue": row.get("flow_type_value"),
             "change": row.get("change"),
             "total": row.get("total"),
             "created": row.get("created_ms"),
         })
 
         flow_id = normalized["id"]
+
         if flow_id in seen_ids:
             raise BalanceFlowError(
                 "balance_flow_duplicate_id_in_summary"
             )
+
         seen_ids.add(flow_id)
 
         coin = normalized["coin"]
@@ -389,6 +450,7 @@ def summarize_balance_flow(rows):
                 "ADL",
             )
         }
+
         by_coin[coin]["all_flow_changes"] = str(
             coin_totals[coin]
         )
