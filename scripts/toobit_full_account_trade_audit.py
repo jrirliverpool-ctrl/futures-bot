@@ -1,11 +1,9 @@
 
-"""Read-only Toobit USDT-M full-account trade audit.
+"""Read-only Toobit USDT-M full-account trade and balance-flow audit.
 
-Fetches complete V2 trade history for every configured symbol.
-Creates a per-run fill ledger artifact and captures stable account
-positions and open orders.
-
-This module never submits, amends, or cancels orders.
+Fetches complete V2 trade history for configured symbols, stable account
+positions/open orders, and the exchange's queryable futures balance-flow
+history. This module never submits, amends, or cancels orders.
 It never enables live execution.
 """
 from __future__ import annotations
@@ -33,8 +31,14 @@ from toobit_open_orders import (
     OpenOrdersReadError,
     fetch_all_open_orders,
 )
+from toobit_balance_flow import (
+    BalanceFlowError,
+    fetch_all_futures_balance_flow,
+    summarize_balance_flow,
+)
 
 POSITIONS_ENDPOINT = "/api/v1/futures/positions"
+BALANCE_FLOW_SCOPE = "exchange_queryable_recent_90_days"
 
 
 class AuditError(RuntimeError):
@@ -80,15 +84,14 @@ def _decimal(value, field):
 
 def _read_positions(client) -> list[dict]:
     try:
-        rows = client._request(
-            "GET",
-            POSITIONS_ENDPOINT,
-            {},
-        )
+        rows = client._request("GET", POSITIONS_ENDPOINT, {})
     except Exception as exc:
         raise AuditError(
             f"positions_request_failed:{type(exc).__name__}"
         ) from None
+
+    if isinstance(rows, dict) and rows.get("_transport"):
+        raise AuditError("positions_transport_unknown")
 
     if not isinstance(rows, list):
         raise AuditError("positions_snapshot_not_list")
@@ -96,11 +99,18 @@ def _read_positions(client) -> list[dict]:
     if not all(isinstance(row, dict) for row in rows):
         raise AuditError("positions_snapshot_contains_invalid_rows")
 
+    seen = set()
+
     for index, row in enumerate(rows):
         symbol = row.get("symbol")
 
         if not isinstance(symbol, str) or not symbol.strip():
             raise AuditError(f"position_symbol_missing:{index}")
+
+        if symbol in seen:
+            raise AuditError(f"duplicate_position_symbol:{symbol}")
+
+        seen.add(symbol)
 
         if row.get("side") not in ("LONG", "SHORT"):
             raise AuditError(f"position_side_invalid:{index}")
@@ -137,18 +147,9 @@ def _summarize_fills(rows, missing_realized_pnl=0):
 
     for row in rows:
         asset = row["commission_asset"]
-
-        commission_by_asset[asset] += Decimal(
-            row["commission"]
-        )
-
-        rebate_by_asset[asset] += Decimal(
-            row["maker_rebate"]
-        )
-
-        realized_pnl_usdt += Decimal(
-            row["realized_pnl"]
-        )
+        commission_by_asset[asset] += Decimal(row["commission"])
+        rebate_by_asset[asset] += Decimal(row["maker_rebate"])
+        realized_pnl_usdt += Decimal(row["realized_pnl"])
 
         if row.get("is_maker") is True:
             maker_count += 1
@@ -161,26 +162,39 @@ def _summarize_fills(rows, missing_realized_pnl=0):
         "taker_fill_count": taker_count,
         "commission_by_asset": {
             key: str(value)
-            for key, value in sorted(
-                commission_by_asset.items()
-            )
+            for key, value in sorted(commission_by_asset.items())
         },
         "maker_rebate_by_asset": {
             key: str(value)
-            for key, value in sorted(
-                rebate_by_asset.items()
-            )
+            for key, value in sorted(rebate_by_asset.items())
         },
-        "reported_realized_pnl_usdt": str(
-            realized_pnl_usdt
-        ),
-        "realized_pnl_missing_fill_count": (
-            missing_realized_pnl
-        ),
-        "realized_pnl_complete": (
-            missing_realized_pnl == 0
-        ),
+        "reported_realized_pnl_usdt": str(realized_pnl_usdt),
+        "realized_pnl_missing_fill_count": missing_realized_pnl,
+        "realized_pnl_complete": missing_realized_pnl == 0,
     }
+
+
+def _read_stable_balance_flow(
+    client,
+    *,
+    page_size=1000,
+    max_pages=100,
+):
+    """Read and verify the exchange's available futures flow history."""
+    try:
+        rows = fetch_all_futures_balance_flow(
+            client,
+            page_size=page_size,
+            max_pages=max_pages,
+            verify_stable=True,
+        )
+        summary = summarize_balance_flow(rows)
+    except (BalanceFlowError, ValueError) as exc:
+        raise AuditError(
+            f"balance_flow_audit_failed:{str(exc)[:160]}"
+        ) from None
+
+    return rows, summary
 
 
 def build_report(
@@ -190,11 +204,16 @@ def build_report(
     page_size=1000,
     max_pages=100,
 ):
+    if not isinstance(symbols, list) or not symbols:
+        raise AuditError("symbols_must_be_nonempty_list")
+
+    if len(symbols) != len(set(symbols)):
+        raise AuditError("duplicate_symbols")
+
     raw_by_symbol = {}
     pagination = {}
 
-    # First: obtain complete history for every symbol.
-    # A failure aborts before the ledger is written.
+    # 1. Complete trade history for every configured symbol.
     for symbol in symbols:
         rows = fetch_complete_user_trades_v2(
             client,
@@ -204,19 +223,14 @@ def build_report(
         )
 
         raw_by_symbol[symbol] = rows
-
         pagination[symbol] = {
             "complete": True,
             "trade_count": len(rows),
-            "first_trade_id": (
-                rows[0].get("id") if rows else None
-            ),
-            "last_trade_id": (
-                rows[-1].get("id") if rows else None
-            ),
+            "first_trade_id": rows[0].get("id") if rows else None,
+            "last_trade_id": rows[-1].get("id") if rows else None,
         }
 
-    # Second: obtain account snapshots.
+    # 2. Account snapshots and stable balance-flow history.
     positions = _read_positions(client)
 
     try:
@@ -231,6 +245,12 @@ def build_report(
             "stable_open_orders_snapshot_not_proven"
         ) from None
 
+    flow_rows, flow_summary = _read_stable_balance_flow(
+        client,
+        page_size=page_size,
+        max_pages=max_pages,
+    )
+
     all_raw = [
         row
         for symbol in symbols
@@ -242,15 +262,13 @@ def build_report(
         if row.get("realizedPnl") is None
     )
 
-    # Third: append validated fills to the per-run ledger.
+    # 3. Append validated fills only after all remote reads succeeded.
     added, skipped = append_user_trades(
         str(ledger_path),
         all_raw,
     )
 
-    ledger_rows = load_fill_ledger(
-        str(ledger_path)
-    )
+    ledger_rows = load_fill_ledger(str(ledger_path))
 
     accounting = _summarize_fills(
         ledger_rows,
@@ -268,9 +286,7 @@ def build_report(
                 "side": row["side"],
                 "position": str(quantity),
                 "avgPrice": str(row["avgPrice"]),
-                "markPrice": str(
-                    row.get("markPrice", "")
-                ),
+                "markPrice": str(row.get("markPrice", "")),
                 "unRealizedProfit": str(
                     row.get("unRealizedProfit", "")
                 ),
@@ -283,58 +299,78 @@ def build_report(
             "realized_pnl_missing_on_one_or_more_fills"
         )
 
-    # The persistent intent journal has not yet been connected.
-    blockers.append(
-        "durable_order_intent_journal_not_connected"
-    )
+    if not flow_summary["known_flow_categories_complete"]:
+        blockers.append(
+            "unknown_balance_flow_types_present"
+        )
 
-    # The V2 simulated state must not be assumed to equal
-    # the actual Toobit account.
+    # These blockers remain until the relevant architecture is implemented.
+    blockers.append("durable_order_intent_journal_not_connected")
     blockers.append(
         "internal_v2_position_state_not_automatically_compared"
     )
 
+    normalized_flow_rows = [
+        {
+            "id": row["id"],
+            "coin": row["coin"],
+            "symbol": row["symbol"],
+            "flow_type": row["flow_type_raw"],
+            "flow_type_value": row["flow_type_value"],
+            "category": row["category"],
+            "change": row["change"],
+            "total": row["total"],
+            "created_ms": row["created_ms"],
+        }
+        for row in flow_rows
+    ]
+
     return {
-        "schema": (
-            "apexquant_toobit_full_account_trade_audit_v1"
-        ),
-        "generated_at_utc": (
-            datetime.now(timezone.utc).isoformat()
-        ),
+        "schema": "apexquant_toobit_full_account_trade_audit_v2",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "read_only": True,
         "symbols": symbols,
         "symbols_checked": len(symbols),
         "pagination": pagination,
-
         "fill_ledger": {
             "path": str(ledger_path),
             "scope": "per_run_artifact",
-            "rows_before_this_run": (
-                len(ledger_rows) - added
-            ),
+            "rows_before_this_run": len(ledger_rows) - added,
             "new_rows": added,
             "exact_duplicates_skipped": skipped,
             "rows_after_this_run": len(ledger_rows),
             "durable_across_workflow_runs": False,
         },
-
         "accounting": accounting,
-
+        "balance_flow": {
+            "endpoint": "/api/v1/futures/balanceFlow",
+            "scope": BALANCE_FLOW_SCOPE,
+            "stable_snapshot_verified": True,
+            "row_count": len(normalized_flow_rows),
+            "summary": flow_summary,
+            "rows": normalized_flow_rows,
+            "all_time_history_claimed": False,
+            "note": (
+                "Balance-flow totals are reported separately from "
+                "fill-ledger totals. Do not add them together without "
+                "matching time windows, assets, and accounting semantics."
+            ),
+        },
         "account_snapshot": {
             "positions_snapshot_complete": True,
             "active_positions": active_positions,
-            "active_position_count": len(
-                active_positions
-            ),
+            "active_position_count": len(active_positions),
             "open_orders_snapshot_complete_and_stable": True,
             "open_orders": open_orders,
             "open_order_count": len(open_orders),
         },
-
         "order_intent_journal_present": False,
-
         "reconciliation": {
             "fill_history_complete_for_configured_symbols": True,
+            "balance_flow_snapshot_stable": True,
+            "balance_flow_known_categories_complete": (
+                flow_summary["known_flow_categories_complete"]
+            ),
             "positions_snapshot_received": True,
             "open_orders_snapshot_stable": True,
             "internal_position_comparison": False,
@@ -343,7 +379,6 @@ def build_report(
             "halt_trading": True,
             "blockers": blockers,
         },
-
         "orders_submitted": 0,
         "orders_amended": 0,
         "orders_canceled": 0,
@@ -357,41 +392,22 @@ def main(argv=None):
 
     parser.add_argument(
         "--whitelist",
-        default=str(
-            ROOT / "config/crypto_whitelist.json"
-        ),
+        default=str(ROOT / "config/crypto_whitelist.json"),
     )
-
     parser.add_argument(
         "--ledger",
         default="reports/toobit_fill_ledger.jsonl",
     )
-
     parser.add_argument(
         "--out",
-        default=(
-            "reports/toobit_full_account_trade_audit.json"
-        ),
+        default="reports/toobit_full_account_trade_audit.json",
     )
-
-    parser.add_argument(
-        "--page-size",
-        type=int,
-        default=1000,
-    )
-
-    parser.add_argument(
-        "--max-pages",
-        type=int,
-        default=100,
-    )
+    parser.add_argument("--page-size", type=int, default=1000)
+    parser.add_argument("--max-pages", type=int, default=100)
 
     args = parser.parse_args(argv)
 
-    if (
-        not 1 <= args.page_size <= 1000
-        or args.max_pages < 1
-    ):
+    if not 1 <= args.page_size <= 1000 or args.max_pages < 1:
         print(json.dumps({
             "ok": False,
             "error": "invalid_pagination_limits",
@@ -411,10 +427,7 @@ def main(argv=None):
         return 2
 
     try:
-        symbols = load_symbols(
-            Path(args.whitelist)
-        )
-
+        symbols = load_symbols(Path(args.whitelist))
         client = ToobitClient()
 
         report = build_report(
@@ -426,17 +439,9 @@ def main(argv=None):
         )
 
         output = Path(args.out)
-        output.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
-            json.dumps(
-                report,
-                indent=2,
-                ensure_ascii=False,
-            ),
+            json.dumps(report, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -445,15 +450,18 @@ def main(argv=None):
             "read_only": True,
             "symbols_checked": report["symbols_checked"],
             "fills": report["accounting"]["fill_count"],
-            "active_positions": (
-                report["account_snapshot"][
-                    "active_position_count"
+            "balance_flow_rows": report["balance_flow"]["row_count"],
+            "balance_flow_scope": report["balance_flow"]["scope"],
+            "unknown_flow_type_count": (
+                report["balance_flow"]["summary"][
+                    "unknown_flow_type_count"
                 ]
             ),
+            "active_positions": (
+                report["account_snapshot"]["active_position_count"]
+            ),
             "open_orders": (
-                report["account_snapshot"][
-                    "open_order_count"
-                ]
+                report["account_snapshot"]["open_order_count"]
             ),
             "reconciliation_ok": False,
             "halt_trading": True,
@@ -461,6 +469,7 @@ def main(argv=None):
             "orders_amended": 0,
             "orders_canceled": 0,
             "live_execution_enabled": False,
+            "live_authorized": False,
             "report_path": str(output),
         }, indent=2))
 
@@ -469,6 +478,7 @@ def main(argv=None):
     except (
         AuditError,
         TradePaginationError,
+        BalanceFlowError,
         ValueError,
         RuntimeError,
     ) as exc:
@@ -481,8 +491,8 @@ def main(argv=None):
             "orders_amended": 0,
             "orders_canceled": 0,
             "live_execution_enabled": False,
+            "live_authorized": False,
         }, indent=2))
-
         return 1
 
 
