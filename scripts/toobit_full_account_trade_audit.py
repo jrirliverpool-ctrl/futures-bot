@@ -82,6 +82,19 @@ def _decimal(value, field):
     return number
 
 
+def _position_unrealized_pnl(row):
+    """Prefer Toobit's documented V1 field, with legacy fallback."""
+    value = row.get("unrealizedPnL")
+
+    if value is None:
+        value = row.get("unRealizedProfit", "")
+
+    if value is None:
+        return ""
+
+    return str(value)
+
+
 def _read_positions(client) -> list[dict]:
     try:
         rows = client._request("GET", POSITIONS_ENDPOINT, {})
@@ -99,7 +112,9 @@ def _read_positions(client) -> list[dict]:
     if not all(isinstance(row, dict) for row in rows):
         raise AuditError("positions_snapshot_contains_invalid_rows")
 
-    seen = set()
+    # Hedge mode may legitimately contain LONG and SHORT for one symbol.
+    # Only an exact duplicate (symbol, side) pair is rejected.
+    seen_position_keys = set()
 
     for index, row in enumerate(rows):
         symbol = row.get("symbol")
@@ -107,13 +122,19 @@ def _read_positions(client) -> list[dict]:
         if not isinstance(symbol, str) or not symbol.strip():
             raise AuditError(f"position_symbol_missing:{index}")
 
-        if symbol in seen:
-            raise AuditError(f"duplicate_position_symbol:{symbol}")
+        side = row.get("side")
 
-        seen.add(symbol)
-
-        if row.get("side") not in ("LONG", "SHORT"):
+        if side not in ("LONG", "SHORT"):
             raise AuditError(f"position_side_invalid:{index}")
+
+        position_key = (symbol, side)
+
+        if position_key in seen_position_keys:
+            raise AuditError(
+                f"duplicate_position_symbol_side:{symbol}:{side}"
+            )
+
+        seen_position_keys.add(position_key)
 
         quantity = _decimal(
             row.get("position"),
@@ -287,9 +308,7 @@ def build_report(
                 "position": str(quantity),
                 "avgPrice": str(row["avgPrice"]),
                 "markPrice": str(row.get("markPrice", "")),
-                "unRealizedProfit": str(
-                    row.get("unRealizedProfit", "")
-                ),
+                "unrealizedPnL": _position_unrealized_pnl(row),
             })
 
     blockers = []
