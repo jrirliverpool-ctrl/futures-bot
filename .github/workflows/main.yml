@@ -56,6 +56,17 @@ jobs:
       - name: Test independent live execution state
         run: pytest -q tests/test_live_execution_state.py
 
+  toobit-balance-flow-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pytest
+      - name: Test Toobit balance flow pagination and accounting
+        run: pytest -q tests/test_toobit_balance_flow.py
+
   backtest-and-chain:
     runs-on: ubuntu-latest
     steps:
@@ -120,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.11'
       - run: pip install requests pytest
