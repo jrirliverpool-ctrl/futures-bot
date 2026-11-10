@@ -11,7 +11,7 @@ current, reproducible evidence before the first live order.
 
 | Gate | Current status | Evidence required to pass |
 | --- | --- | --- |
-| 1. Hedge-mode State and Reconciliation | Local implementation; repeated core position snapshots now fail closed on changes; focused tests pass | Linux CI on the committed change; dual-side account snapshots and recovery validated against the documented Toobit response schema |
+| 1. Hedge-mode State and Reconciliation | Local state, reconciliation, and order-preflight helpers are side-aware; repeated core position snapshots fail closed on changes; focused tests pass | Linux CI on the committed change; dual-side account snapshots and recovery validated against the documented Toobit response schema |
 | 2. Order and Fill Recovery | Local V2 read-only normalization fix; covered by tests | Linux CI; complete order/trade pagination and unresolved-order scenarios proven without journal mutation |
 | 3. Fill, Fee, Funding, and Equity Ledger | Partial implementation; net fill commissions now report commission minus maker rebate by asset | Reconcile fills, fee and funding flows, realized PnL, and equity against a real account export with duplicate-flow protection |
 | 4. Durable State and Restart Recovery | Local file state is atomic; no durable live backend verified | Demonstrate restart and partial-fill recovery on persistent storage; prove no duplicate submission after UNKNOWN outcomes |
@@ -25,7 +25,7 @@ current, reproducible evidence before the first live order.
 ## Current local verification
 
 - Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` was not found in this repository history.
-- Local full test suite: **1199 passed** on Python 3.12 / Windows with standard root discovery (`pytest -q`). The read-only account utility is import-safe and never prints raw account payloads; position reconciliation also requires two matching GET snapshots for the position-defining fields.
+- Local full test suite: **1204 passed** on Python 3.12 / Windows with standard root discovery (`pytest -q`). The read-only account utility is import-safe and never prints raw account payloads; position reconciliation also requires two matching GET snapshots for the position-defining fields.
 - Focused hedge/recovery/OOS-cost suite: **169 passed**, including importer validation.
 - `git diff --check`: clean at last run.
 - Candidate branch is local and unpushed; GitHub write access denied branch creation (403), so no remote CI result exists.

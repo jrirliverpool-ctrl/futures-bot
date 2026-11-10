@@ -229,13 +229,15 @@ def _validate_exit_qty_and_side(
     if req.intent not in ("EXIT", "TP1_HIT"):
         return None
 
-    pos = state.get("position")
+    positions = _positions_by_side(state)
+
+    if positions is None:
+        return _reject("exit_qty", "malformed position state")
+
+    pos = positions.get(req.side)
 
     if pos is None:
         return _reject("exit_qty", "no position")
-
-    if pos.get("side") != req.side:
-        return _reject("exit_qty", "side mismatch")
 
     remaining = pos.get("remaining_size", 0.0)
 
@@ -256,11 +258,17 @@ def _validate_no_duplicate(
     if req.intent != "ENTRY":
         return None
 
-    if state.get("position") is not None:
-        return _reject("duplicate", "position open")
+    positions = _positions_by_side(state)
+    if positions is None:
+        return _reject("duplicate", "malformed position state")
+    if req.side in positions:
+        return _reject("duplicate", "position open on requested side")
 
-    if state.get("pending_entry") is not None:
-        return _reject("duplicate", "pending entry")
+    pending = _pending_entries_by_side(state)
+    if pending is None:
+        return _reject("duplicate", "malformed pending-entry state")
+    if req.side in pending:
+        return _reject("duplicate", "pending entry on requested side")
 
     if state.get("pending_order_id") is not None:
         return _reject("duplicate", "pending order")
@@ -277,13 +285,75 @@ def _validate_position_limit(
     if req.intent != "ENTRY":
         return None
 
-    if (
-        state.get("position") is not None
-        and config.get("max_concurrent_positions", 1) <= 1
-    ):
+    maximum = config.get("max_concurrent_positions", 1)
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        return _reject("position_limit", "invalid maximum")
+
+    positions = _positions_by_side(state)
+    pending = _pending_entries_by_side(state)
+    if positions is None or pending is None:
+        return _reject("position_limit", "malformed position or pending state")
+    if set(positions) & set(pending):
+        return _reject("position_limit", "position and pending entry share a side")
+    active_sides = set(positions) | set(pending)
+    if len(active_sides) >= maximum:
         return _reject("position_limit", "limit reached")
 
     return None
+
+
+def _positions_by_side(state):
+    """Read hedge-mode positions with legacy single-position compatibility."""
+    if "positions" in state:
+        positions = state.get("positions")
+        if not isinstance(positions, dict):
+            return None
+        if state.get("position") is not None:
+            return None
+        result = {}
+        for side, position in positions.items():
+            if position is None:
+                continue
+            if side not in VALID_SIDES or not isinstance(position, dict):
+                return None
+            if position.get("side", side) != side:
+                return None
+            result[side] = position
+        return result
+
+    legacy = state.get("position")
+    if legacy is None:
+        return {}
+    if not isinstance(legacy, dict) or legacy.get("side") not in VALID_SIDES:
+        return None
+    return {legacy["side"]: legacy}
+
+
+def _pending_entries_by_side(state):
+    """Read side-keyed reservations, accepting the legacy one-entry field."""
+    if "pending_entries" in state:
+        pending = state.get("pending_entries")
+        if not isinstance(pending, dict):
+            return None
+        if state.get("pending_entry") is not None:
+            return None
+        result = {}
+        for side, entry in pending.items():
+            if entry is None:
+                continue
+            if side not in VALID_SIDES or not isinstance(entry, dict):
+                return None
+            if entry.get("side", side) != side:
+                return None
+            result[side] = entry
+        return result
+
+    legacy = state.get("pending_entry")
+    if legacy is None:
+        return {}
+    if not isinstance(legacy, dict) or legacy.get("side") not in VALID_SIDES:
+        return None
+    return {legacy["side"]: legacy}
 
 
 DEFAULT_CONFIG = {
@@ -302,6 +372,12 @@ def evaluate(
 
     if config is None:
         config = DEFAULT_CONFIG
+
+    if not isinstance(config, dict):
+        return _reject("config", "config not dict")
+
+    if not isinstance(state, dict):
+        return _reject("state", "state not dict")
 
     if ref_price is None:
         ref_price = 0.0

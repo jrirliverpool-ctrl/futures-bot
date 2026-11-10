@@ -38,3 +38,36 @@ def test_pending_order_id_blocks_entry():
 def test_tp1_hit_valid():
     state = {"position": {"side": "LONG", "remaining_size": 1.0}}
     assert evaluate(_req(intent="TP1_HIT", side="LONG", qty=0.5), BASE_SPECS, state, DEFAULT_CONFIG, ref_price=100.0).accepted is True
+
+def test_hedge_mode_allows_opposite_side_when_portfolio_limit_allows():
+    state = {"positions": {"LONG": {"side": "LONG", "remaining_size": 1.0}}}
+    config = {**DEFAULT_CONFIG, "max_concurrent_positions": 2}
+    assert evaluate(_req(side="SHORT"), BASE_SPECS, state, config, ref_price=100.0).accepted is True
+
+def test_hedge_mode_still_blocks_same_side_duplicate():
+    state = {"positions": {"LONG": {"side": "LONG", "remaining_size": 1.0}}}
+    config = {**DEFAULT_CONFIG, "max_concurrent_positions": 2}
+    decision = evaluate(_req(side="LONG"), BASE_SPECS, state, config, ref_price=100.0)
+    assert decision.accepted is False
+    assert decision.gate == "duplicate"
+
+def test_hedge_mode_exit_selects_only_requested_side():
+    state = {"positions": {
+        "LONG": {"side": "LONG", "remaining_size": 1.0},
+        "SHORT": {"side": "SHORT", "remaining_size": 2.0},
+    }}
+    long_exit = evaluate(_req(intent="EXIT", side="LONG"), BASE_SPECS, state, ref_price=100.0)
+    short_exit = evaluate(_req(intent="EXIT", side="SHORT", qty=2.1), BASE_SPECS, state, ref_price=100.0)
+    assert long_exit.accepted is True
+    assert short_exit.accepted is False
+    assert short_exit.gate == "exit_qty"
+
+def test_hedge_mode_pending_entry_reserves_only_its_side():
+    state = {"pending_entries": {"LONG": {"side": "LONG"}}}
+    config = {**DEFAULT_CONFIG, "max_concurrent_positions": 2}
+    assert evaluate(_req(side="SHORT"), BASE_SPECS, state, config, ref_price=100.0).accepted is True
+
+def test_malformed_hedge_state_fails_closed():
+    state = {"positions": {"LONG": {"side": "SHORT", "remaining_size": 1.0}}}
+    decision = evaluate(_req(side="SHORT"), BASE_SPECS, state, {**DEFAULT_CONFIG, "max_concurrent_positions": 2}, ref_price=100.0)
+    assert decision.accepted is False
