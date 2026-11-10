@@ -196,20 +196,7 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         events.append({"type": "ENTRY_REJECTED", "reason": "invalid_size", "timestamp": ts})
         state["pending_entry"] = None
         return state, events
-    if execution_callback is not None:
-        allowed = execution_callback({
-            "intent": "ENTRY", "side": side, "qty": qty, "price": entry_price,
-            "sl": sl, "tp1": tp1, "leverage": lev if lev is not None else 1, "timestamp": ts,
-            "signal_candle_ts": pending.get("signal_candle_ts"),
-        }, state)
-        if not allowed:
-            events.append({"type": "ENTRY_REJECTED", "reason": "callback_rejected", "timestamp": ts})
-            state["pending_entry"] = None
-            return state, events
     multiplier = specs["contract_multiplier"]
-    entry_notional = qty * entry_price * multiplier
-    entry_commission = entry_notional * config.get("open_taker_fee", 0.0)
-    state["equity"] -= entry_commission
     loss_per_contract = _estimated_stop_loss_per_contract(
         entry_price,
         sl,
@@ -219,6 +206,20 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
         exit_slippage_rate,
     )
     risk_usd = qty * loss_per_contract
+    if execution_callback is not None:
+        allowed = execution_callback({
+            "intent": "ENTRY", "side": side, "qty": qty, "price": entry_price,
+            "sl": sl, "tp1": tp1, "leverage": lev if lev is not None else 1, "timestamp": ts,
+            "signal_candle_ts": pending.get("signal_candle_ts"),
+            "risk_usd": risk_usd,
+        }, state)
+        if not allowed:
+            events.append({"type": "ENTRY_REJECTED", "reason": "callback_rejected", "timestamp": ts})
+            state["pending_entry"] = None
+            return state, events
+    entry_notional = qty * entry_price * multiplier
+    entry_commission = entry_notional * config.get("open_taker_fee", 0.0)
+    state["equity"] -= entry_commission
     state["position"] = {
         "side": side, "entry_price": entry_price, "entry_candle_ts": ts,
         "size": qty, "remaining_size": qty, "tp1_size": 0.0,

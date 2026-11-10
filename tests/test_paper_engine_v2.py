@@ -158,27 +158,41 @@ def test_count_reservations_excludes_current_symbol(state_v2):
 # ============================================================
 
 def test_has_room_when_empty(state_v2):
-    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT") is True
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is True
 
 
 def test_no_room_when_cb_active(state_v2):
     state_v2["circuit_breaker_active"] = True
-    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT") is False
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is False
 
 
 def test_no_room_when_current_symbol_has_pending(state_v2):
     state_v2["symbols"]["BTC-SWAP-USDT"]["pending_entry"] = {"side": "LONG"}
-    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT") is False
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is False
 
 
 def test_no_room_when_other_has_position(state_v2):
     state_v2["symbols"]["ETH-SWAP-USDT"]["position"] = {"side": "LONG"}
-    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT") is False
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is False
 
 
 def test_no_room_when_other_has_pending(state_v2):
     state_v2["symbols"]["ETH-SWAP-USDT"]["pending_entry"] = {"side": "LONG"}
-    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT") is False
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is False
+
+
+def test_pending_reserves_portfolio_risk_even_when_position_slots_remain(state_v2):
+    state_v2["max_concurrent_positions"] = 3
+    state_v2["symbols"]["ETH-SWAP-USDT"]["pending_entry"] = {"side": "LONG"}
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is False
+
+
+def test_open_risk_is_aggregated_and_legacy_unknown_risk_fails_closed(state_v2):
+    state_v2["max_concurrent_positions"] = 3
+    state_v2["symbols"]["ETH-SWAP-USDT"]["position"] = {"side": "LONG", "risk_usd": 5.0}
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is False
+    state_v2["symbols"]["ETH-SWAP-USDT"]["position"] = {"side": "LONG"}
+    assert bridge._portfolio_has_room_for_pending(state_v2, "BTC-SWAP-USDT", _config()) is False
 
 
 # ============================================================
@@ -186,27 +200,36 @@ def test_no_room_when_other_has_pending(state_v2):
 # ============================================================
 
 def test_allows_entry_when_empty(state_v2):
-    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT") is True
+    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT", _config(), 9.0) is True
 
 
 def test_blocks_entry_when_cb_active(state_v2):
     state_v2["circuit_breaker_active"] = True
-    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT") is False
+    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT", _config(), 9.0) is False
 
 
 def test_blocks_entry_when_current_has_position(state_v2):
     state_v2["symbols"]["BTC-SWAP-USDT"]["position"] = {"side": "LONG"}
-    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT") is False
+    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT", _config(), 9.0) is False
 
 
 def test_blocks_entry_when_other_has_position(state_v2):
     state_v2["symbols"]["BTC-SWAP-USDT"]["position"] = {"side": "LONG"}
-    assert bridge._portfolio_allows_entry(state_v2, "ETH-SWAP-USDT") is False
+    assert bridge._portfolio_allows_entry(state_v2, "ETH-SWAP-USDT", _config(), 9.0) is False
 
 
 def test_blocks_entry_when_other_has_pending(state_v2):
     state_v2["symbols"]["BTC-SWAP-USDT"]["pending_entry"] = {"side": "LONG"}
-    assert bridge._portfolio_allows_entry(state_v2, "ETH-SWAP-USDT") is False
+    assert bridge._portfolio_allows_entry(state_v2, "ETH-SWAP-USDT", _config(), 9.0) is False
+
+
+def test_execution_gate_checks_exact_proposed_risk(state_v2):
+    state_v2["max_concurrent_positions"] = 3
+    state_v2["symbols"]["BTC-SWAP-USDT"]["pending_entry"] = {"side": "LONG"}
+    state_v2["symbols"]["ETH-SWAP-USDT"]["position"] = {"side": "SHORT", "risk_usd": 4.0}
+    # The current symbol's reservation is replaced by its exact risk at execution.
+    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT", _config(), 5.0) is True
+    assert bridge._portfolio_allows_entry(state_v2, "BTC-SWAP-USDT", _config(), 6.0) is False
 
 
 # ============================================================

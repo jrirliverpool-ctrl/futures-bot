@@ -2,6 +2,7 @@
 import copy
 import json
 import logging
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,9 +131,50 @@ def _count_portfolio_reservations(
     return count
 
 
+def _portfolio_risk_within_limit(
+    state_v2: dict,
+    config: dict,
+    symbol: str,
+    proposed_risk_usd: float = None,
+) -> bool:
+    """Fail closed unless open, pending, and proposed risk fit the portfolio cap."""
+    equity = state_v2.get("equity")
+    risk_fraction = state_v2.get("max_portfolio_risk")
+    per_trade = config.get("risk_per_trade") if isinstance(config, dict) else None
+    if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
+           for x in (equity, risk_fraction, per_trade)):
+        return False
+    if equity <= 0 or not (0 < risk_fraction <= 1) or not (0 < per_trade <= 1):
+        return False
+
+    total = 0.0
+    symbols = state_v2.get("symbols")
+    if not isinstance(symbols, dict):
+        return False
+    for name, sym in symbols.items():
+        if name == symbol:
+            continue
+        if not isinstance(sym, dict):
+            return False
+        position = sym.get("position")
+        if position is not None:
+            risk = position.get("risk_usd") if isinstance(position, dict) else None
+            if isinstance(risk, bool) or not isinstance(risk, (int, float)) or not math.isfinite(risk) or risk < 0:
+                return False
+            total += risk
+        if sym.get("pending_entry") is not None:
+            total += equity * per_trade
+
+    proposed = equity * per_trade if proposed_risk_usd is None else proposed_risk_usd
+    if isinstance(proposed, bool) or not isinstance(proposed, (int, float)) or not math.isfinite(proposed) or proposed < 0:
+        return False
+    return total + proposed <= equity * risk_fraction + 1e-9
+
+
 def _portfolio_has_room_for_pending(
     state_v2: dict,
     symbol: str,
+    config: dict,
 ) -> bool:
     """Pre-signal gate. Current symbol must have no position or pending."""
     symbols = state_v2.get("symbols", {})
@@ -162,7 +204,7 @@ def _portfolio_has_room_for_pending(
     if maximum < 1:
         return False
 
-    return (
+    return _portfolio_risk_within_limit(state_v2, config, symbol) and (
         _count_portfolio_reservations(
             state_v2,
             exclude_symbol=symbol,
@@ -174,6 +216,8 @@ def _portfolio_has_room_for_pending(
 def _portfolio_allows_entry(
     state_v2: dict,
     symbol: str,
+    config: dict,
+    proposed_risk_usd: float,
 ) -> bool:
     """Execution-time gate.
 
@@ -204,7 +248,7 @@ def _portfolio_allows_entry(
     if maximum < 1:
         return False
 
-    return (
+    return _portfolio_risk_within_limit(state_v2, config, symbol, proposed_risk_usd) and (
         _count_portfolio_reservations(
             state_v2,
             exclude_symbol=symbol,
@@ -361,6 +405,7 @@ def process_symbol_candle(
         and not _portfolio_has_room_for_pending(
             state_v2,
             symbol,
+            config,
         )
     ):
         blocked_events.append({
@@ -388,6 +433,8 @@ def process_symbol_candle(
             if not _portfolio_allows_entry(
                 state_v2,
                 symbol,
+                config,
+                info.get("risk_usd"),
             ):
                 logger.warning(
                     "V2 portfolio gate blocked ENTRY for %s",
