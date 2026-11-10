@@ -114,14 +114,10 @@ def _raw_order(response):
             "order snapshot missing: " + ", ".join(missing)
         )
 
-    normalized = dict(data)
-
-    normalized["side"] = _canonical_side(
-        data.get("side"),
-        data.get("positionSide"),
-    )
-
-    return normalized
+    # Keep the exchange's V2 side + positionSide pair intact. The fill
+    # ledger validates and canonicalizes this pair itself.
+    _canonical_side(data.get("side"), data.get("positionSide"))
+    return dict(data)
 
 
 def _normalize_trade(raw):
@@ -134,14 +130,9 @@ def _normalize_trade(raw):
     side = normalized.get("side")
     position_side = normalized.get("positionSide")
 
-    if side in LEGACY_TRADE_SIDES:
-        return normalized
-
-    normalized["side"] = _canonical_side(
-        side,
-        position_side,
-    )
-
+    # Preserve V2 fields for the fill ledger; converting only `side` while
+    # retaining positionSide makes a valid V2 row look like malformed V1.
+    _canonical_side(side, position_side)
     return normalized
 
 
@@ -434,7 +425,9 @@ class OrderRecoveryProbe:
 
             if (
                 expected_side is None
-                or order["side"] != expected_side
+                or _canonical_side(
+                    order.get("side"), order.get("positionSide")
+                ) != expected_side
             ):
                 return self._failure(
                     client_order_id,
@@ -526,6 +519,16 @@ class OrderRecoveryProbe:
                 "client_order_id": client_order_id,
                 "ok": True,
                 "can_be_marked_reconciled": True,
+                "order_api_version": (
+                    "V2"
+                    if callable(getattr(self.client, "get_order_status_v2", None))
+                    else "V1"
+                ),
+                "trades_api_version": (
+                    "V2"
+                    if callable(getattr(self.client, "get_user_trades_v2", None))
+                    else "V1"
+                ),
                 "reason": (
                     "read_only_exchange_and_fill_checks_passed"
                 ),

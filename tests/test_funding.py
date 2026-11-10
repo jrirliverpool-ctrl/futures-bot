@@ -64,6 +64,7 @@ def _cfg(funding_rates=None):
     cfg = dict(DEFAULT_CONFIG)
     cfg["contract_multiplier_for_pnl"] = SPECS["contract_multiplier"]
     cfg["funding_rates"] = funding_rates or {}
+    cfg["require_funding"] = True
     return cfg
 
 def test_funding_positive_long():
@@ -75,6 +76,16 @@ def test_funding_positive_long():
     assert abs(new_state["equity"] - (1000.0 - 0.01)) < 1e-9, f"Expected equity 999.99, got {new_state['equity']}"
     f_events = [e for e in events if e["type"] == "FUNDING"]
     assert len(f_events) == 1
+
+def test_funding_uses_observed_non_epoch_settlement_phase():
+    settlement_ts = TS_08 + 1234
+    state = _make_state("LONG", size=10.0)
+    cfg = _cfg({settlement_ts: 0.01})
+    klines = [_candle(settlement_ts)]
+    indicators = {"atr": [1.0]}
+    new_state, events = process_candle(state, klines, indicators, 0, SPECS, cfg)
+    assert abs(new_state["equity"] - 999.99) < 1e-9
+    assert [event["timestamp"] for event in events if event["type"] == "FUNDING"] == [settlement_ts]
 
 def test_funding_positive_short():
     state = _make_state("SHORT", size=10.0)
@@ -152,11 +163,13 @@ def test_funding_missing_rate_fails_loud():
     cfg = _cfg({})
     klines = [_candle(TS_08)]
     indicators = {"atr": [1.0]}
+    raised = False
     try:
         process_candle(state, klines, indicators, 0, SPECS, cfg)
-        assert False, "Expected exception due to missing funding rate"
     except Exception as e:
+        raised = True
         assert "funding" in str(e).lower() or "rate" in str(e).lower()
+    assert raised, "expected a hard error for missing funding history"
 
 if __name__ == "__main__":
     tests = [

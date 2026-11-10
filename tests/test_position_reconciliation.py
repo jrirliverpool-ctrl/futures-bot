@@ -47,7 +47,7 @@ def test_flat_internal_rejects_unexpected_exchange_position():
 def test_matching_long_position_passes():
     result = reconcile_position_snapshot(SYMBOL, expected(), [pos()])
     assert result["ok"] is True
-    assert result["exchange_position"]["quantity"] == "2.5"
+    assert result["exchange_position"]["LONG"]["quantity"] == "2.5"
 
 
 def test_matching_short_position_passes():
@@ -82,7 +82,32 @@ def test_duplicate_active_rows_block():
     result = reconcile_position_snapshot(
         SYMBOL, expected(), [pos(), pos()]
     )
-    assert "multiple_active_positions_for_symbol" in result["reasons"]
+    assert "duplicate_active_position_side" in result["reasons"]
+
+
+def test_simultaneous_long_and_short_positions_pass():
+    long_row = pos(side="LONG", position="2.5", avgPrice="60000")
+    short_row = pos(side="SHORT", position="1.25", avgPrice="61000")
+    expected_both = {
+        "LONG": {"quantity": "2.5", "avg_price": "60000"},
+        "SHORT": {"quantity": "1.25", "avg_price": "61000"},
+    }
+    result = reconcile_position_snapshot(
+        SYMBOL, expected_both, [long_row, short_row]
+    )
+    assert result["ok"] is True
+    assert set(result["exchange_position"]) == {"LONG", "SHORT"}
+
+
+def test_missing_hedge_side_fails_closed():
+    expected_both = {
+        "LONG": {"quantity": "2.5", "avg_price": "60000"},
+        "SHORT": {"quantity": "1.25", "avg_price": "61000"},
+    }
+    result = reconcile_position_snapshot(SYMBOL, expected_both, [pos()])
+    assert result["ok"] is False
+    assert result["halt_trading"] is True
+    assert "position_side_mismatch" in result["reasons"]
 
 
 def test_other_symbols_are_ignored():

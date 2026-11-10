@@ -9,13 +9,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from paper_state_manager import append_events, save_state, load_state, load_events
+from state_manager import default_state
 
 @pytest.fixture
 def tmp_state_dir(tmp_path):
     return str(tmp_path)
 
 def test_recovery_after_save_state_crash(tmp_state_dir):
-    state = {"equity": 1000.0, "initial_equity": 1000.0, "position": None, "version": "1.0.0", "peak_equity": 1000.0, "daily_loss": 0, "weekly_loss": 0}
+    # Use a schema-valid state so this recovery test exercises event
+    # idempotency rather than bypassing strict strategy-hash validation.
+    state = default_state(1000.0)
     save_state(tmp_state_dir, state)
     
     events = [{"event_id": "ev1", "event_type": "ENTRY", "pnl_usd": 10.0}]
@@ -32,10 +35,12 @@ def test_recovery_after_save_state_crash(tmp_state_dir):
     
     disk_events = load_events(tmp_state_dir)
     assert len(disk_events) == 1
-    assert disk_events[0]["event_id"] == "ev1"
+    persisted_event_id = disk_events[0]["event_id"]
+    assert persisted_event_id != "ev1"  # IDs are content fingerprints.
     
     appended, skipped = append_events(tmp_state_dir, events, strategy_hash="hash123")
     assert appended == 0 
+    assert load_events(tmp_state_dir)[0]["event_id"] == persisted_event_id
     
     save_state(tmp_state_dir, state)
     assert load_state(tmp_state_dir)["equity"] == 1000.0

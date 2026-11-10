@@ -9,6 +9,7 @@ v2.3 fixes:
 """
 
 import json
+import math
 from indicators import compute_all
 from strategy import evaluate_signal
 from paper_engine import process_candle, close_position
@@ -54,18 +55,70 @@ def generate_signals(klines):
     return indicators, signals
 
 
-def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_index=0):
+def run_backtest(
+    klines,
+    specs,
+    initial_equity=1000.0,
+    symbol="UNKNOWN",
+    start_index=0,
+    funding_rates=None,
+    funding_period_ms=28_800_000,
+    require_funding=False,
+):
     if not klines:
         raise ValueError("klines is empty")
     if initial_equity <= 0:
         raise ValueError("initial_equity must be > 0")
+
+    if isinstance(funding_period_ms, bool) or not isinstance(funding_period_ms, int) or funding_period_ms <= 0:
+        raise ValueError("funding_period_ms must be a positive integer")
+    if funding_rates is None:
+        funding_rates = {}
+    if not isinstance(funding_rates, dict):
+        raise ValueError("funding_rates must map settlement timestamps to rates")
+    normalized_funding = {}
+    for timestamp, rate in funding_rates.items():
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+            raise ValueError("funding settlement timestamps must be non-negative integers")
+        if isinstance(rate, bool):
+            raise ValueError("funding rates must be finite numbers")
+        try:
+            numeric_rate = float(rate)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("funding rates must be finite numbers") from None
+        if not math.isfinite(numeric_rate):
+            raise ValueError("funding rates must be finite numbers")
+        normalized_funding[timestamp] = numeric_rate
+
+    if require_funding:
+        if not normalized_funding:
+            raise ValueError(
+                "historical funding coverage incomplete; no settlement rates supplied"
+            )
+        first_ts = int(klines[start_index][0])
+        last_ts = int(klines[-1][0])
+        funding_phase = min(normalized_funding) % funding_period_ms
+        first_settlement = first_ts + (
+            (funding_phase - first_ts) % funding_period_ms
+        )
+        expected = range(first_settlement, last_ts + 1, funding_period_ms)
+        missing = [ts for ts in expected if ts not in normalized_funding]
+        if missing:
+            raise ValueError(
+                "historical funding coverage incomplete; missing settlement "
+                f"timestamps: {missing[:5]}"
+            )
 
     indicators, signals = generate_signals(klines)
     state = default_state(initial_equity)
 
     engine_config = get_engine_config()
     engine_config["contract_multiplier_for_pnl"] = specs["contract_multiplier"]
-    engine_config["funding_rates"] = {}
+    engine_config["funding_rates"] = normalized_funding
+    engine_config["funding_period_ms"] = funding_period_ms
+    if normalized_funding:
+        engine_config["funding_phase_ms"] = min(normalized_funding) % funding_period_ms
+    engine_config["require_funding"] = require_funding
 
     fee_cfg = get_fee_config()
     engine_config["open_taker_fee"] = fee_cfg["open_taker_fee"]
@@ -120,6 +173,12 @@ def run_backtest(klines, specs, initial_equity=1000.0, symbol="UNKNOWN", start_i
         mtm_curve, all_events, initial_equity,
         realized_final=state["equity"],
     )
+    metrics["funding_modelled"] = bool(normalized_funding)
+    metrics["funding_cashflow_usd"] = float(sum(
+        e.get("cashflow_usd", 0.0)
+        for e in all_events
+        if e.get("type") == "FUNDING"
+    ))
 
     return {
         "symbol": symbol,

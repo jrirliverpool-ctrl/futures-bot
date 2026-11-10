@@ -2,6 +2,10 @@
 name: Run All Project Tests
 
 on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -157,3 +161,25 @@ jobs:
           python-version: '3.11'
       - run: pip install requests pytest
       - run: pytest -q tests/test_circuit_breaker.py
+
+  hedge-mode-recovery-and-cost-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests pytest
+      - name: Test hedge-mode state, reconciliation and read-only recovery
+        run: >-
+          pytest -q
+          tests/test_live_execution_state.py
+          tests/test_position_reconciliation.py
+          tests/test_toobit_readonly_reconciliation.py
+          tests/test_toobit_v2_readonly.py
+          tests/test_order_recovery_probe.py
+          tests/test_fill_ledger.py
+          tests/test_funding.py
+          tests/test_funding_history.py
+          tests/test_backtest.py
+          tests/test_backtest_accounting.py

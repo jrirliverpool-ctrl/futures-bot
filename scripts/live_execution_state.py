@@ -10,13 +10,18 @@ runners. Persistent private storage is mandatory before live execution.
 """
 
 import copy
-import fcntl
 import hashlib
 import json
 import os
 import tempfile
 import time
 from decimal import Decimal, InvalidOperation
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    fcntl = None
+    import msvcrt
 
 
 SCHEMA_VERSION = 1
@@ -35,6 +40,18 @@ POSITION_SOURCE = "TOOBIT_V2_POSITION_RISK"
 
 class LiveStateError(RuntimeError):
     """Raised when live state or exchange evidence is unsafe."""
+
+
+def _lock_exclusive(handle):
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
 
 
 def _decimal(value, field, allow_zero=True):
@@ -186,7 +203,7 @@ def _ordered_fills(fills):
 
 
 def derive_positions_from_fills(fills):
-    """Rebuild one-way positions from complete ordered fill history."""
+    """Rebuild independent LONG and SHORT positions from complete fills."""
 
     normalized = _ordered_fills(fills)
     positions = {}
@@ -197,23 +214,18 @@ def derive_positions_from_fills(fills):
         qty = fill["qty"]
         price = fill["price"]
 
-        current = positions.get(symbol)
+        symbol_positions = positions.setdefault(symbol, {})
 
         if side in OPEN_SIDES:
             new_side = "LONG" if side == "BUY_OPEN" else "SHORT"
 
+            current = symbol_positions.get(new_side)
             if current is None:
-                positions[symbol] = {
-                    "side": new_side,
+                symbol_positions[new_side] = {
                     "quantity": str(qty),
                     "avg_price": str(price),
                 }
                 continue
-
-            if current["side"] != new_side:
-                raise LiveStateError(
-                    f"opposite-side open without closing fill: {symbol}"
-                )
 
             old_qty = Decimal(current["quantity"])
             old_price = Decimal(current["avg_price"])
@@ -223,27 +235,17 @@ def derive_positions_from_fills(fills):
                 old_qty * old_price + qty * price
             ) / total_qty
 
-            positions[symbol] = {
-                "side": new_side,
+            symbol_positions[new_side] = {
                 "quantity": str(total_qty),
                 "avg_price": str(average),
             }
             continue
 
+        position_side = "LONG" if side == "SELL_CLOSE" else "SHORT"
+        current = symbol_positions.get(position_side)
         if current is None:
             raise LiveStateError(
-                f"closing fill has no matching open position: {symbol}"
-            )
-
-        expected = (
-            "SELL_CLOSE"
-            if current["side"] == "LONG"
-            else "BUY_CLOSE"
-        )
-
-        if side != expected:
-            raise LiveStateError(
-                f"closing side mismatch for {symbol}"
+                f"closing fill has no matching {position_side} position: {symbol}"
             )
 
         old_qty = Decimal(current["quantity"])
@@ -256,10 +258,11 @@ def derive_positions_from_fills(fills):
         remaining = old_qty - qty
 
         if remaining == 0:
-            del positions[symbol]
+            del symbol_positions[position_side]
+            if not symbol_positions:
+                del positions[symbol]
         else:
-            positions[symbol] = {
-                "side": current["side"],
+            symbol_positions[position_side] = {
                 "quantity": str(remaining),
                 "avg_price": current["avg_price"],
             }
@@ -278,31 +281,26 @@ def _normalize_position_map(value, field):
 
         if not isinstance(position, dict):
             raise LiveStateError(f"{field} position must be an object")
+        # Accept legacy {side, quantity, avg_price} records and normalize
+        # them to the hedge-capable side map used by current state.
+        if "side" in position:
+            side = _required_text(position.get("side"), f"{field}.side", 16)
+            if side not in ("LONG", "SHORT"):
+                raise LiveStateError(f"{field} invalid position side")
+            side_records = {side: position}
+        else:
+            side_records = position
 
-        side = _required_text(
-            position.get("side"), f"{field}.side", 16
-        )
-
-        if side not in ("LONG", "SHORT"):
-            raise LiveStateError(f"{field} invalid position side")
-
-        quantity = _decimal(
-            position.get("quantity"),
-            f"{field}.quantity",
-            False,
-        )
-
-        avg_price = _decimal(
-            position.get("avg_price"),
-            f"{field}.avg_price",
-            False,
-        )
-
-        result[symbol] = {
-            "side": side,
-            "quantity": quantity,
-            "avg_price": avg_price,
-        }
+        normalized = {}
+        for side, record in side_records.items():
+            if side not in ("LONG", "SHORT") or not isinstance(record, dict):
+                raise LiveStateError(f"{field} invalid side position")
+            quantity = _decimal(record.get("quantity"), f"{field}.quantity", False)
+            avg_price = _decimal(record.get("avg_price"), f"{field}.avg_price", False)
+            normalized[side] = {"quantity": quantity, "avg_price": avg_price}
+        if not normalized:
+            raise LiveStateError(f"{field} position has no active sides")
+        result[symbol] = normalized
 
     return result
 
@@ -314,15 +312,13 @@ def _positions_equal(left, right):
     for symbol in left:
         a = left[symbol]
         b = right[symbol]
-
-        if a["side"] != b["side"]:
+        if set(a) != set(b):
             return False
-
-        if a["quantity"] != b["quantity"]:
-            return False
-
-        if a["avg_price"] != b["avg_price"]:
-            return False
+        for side in a:
+            if a[side]["quantity"] != b[side]["quantity"]:
+                return False
+            if a[side]["avg_price"] != b[side]["avg_price"]:
+                return False
 
     return True
 
@@ -484,7 +480,7 @@ class LiveExecutionStateStore:
     def _locked(self):
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
-        return open(self.lock_path, "a+", encoding="utf-8")
+        return open(self.lock_path, "a+b")
 
     def load(self):
         if not os.path.exists(self.path):
@@ -505,7 +501,7 @@ class LiveExecutionStateStore:
 
     def initialize(self, environment, strategy_hash, now_ms=None):
         with self._locked() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _lock_exclusive(lock)
 
             if os.path.exists(self.path):
                 raise LiveStateError(
@@ -547,12 +543,12 @@ class LiveExecutionStateStore:
 
             os.replace(temp_path, self.path)
 
-            dir_fd = os.open(directory, os.O_RDONLY)
-
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            if os.name != "nt":
+                dir_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
 
         finally:
             if os.path.exists(temp_path):
@@ -568,7 +564,7 @@ class LiveExecutionStateStore:
             raise ValueError("now_ms must be positive")
 
         with self._locked() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _lock_exclusive(lock)
 
             state = self.load()
 

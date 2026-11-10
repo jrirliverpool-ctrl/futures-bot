@@ -51,25 +51,25 @@ def reconcile_position_snapshot(
     if expected_position is not None:
         if not isinstance(expected_position, dict):
             return _failure("expected_position_not_dict")
-        side = expected_position.get("side")
-        if side not in ("LONG", "SHORT"):
+        # Legacy single-side snapshots remain accepted during migration.
+        if "side" in expected_position:
+            expected_sides = {expected_position.get("side"): expected_position}
+        else:
+            expected_sides = expected_position
+        expected = {}
+        for side, record in expected_sides.items():
+            if side not in ("LONG", "SHORT") or not isinstance(record, dict):
+                return _failure("expected_position_side_invalid")
+            try:
+                quantity = _decimal(record.get("quantity"), "expected.quantity")
+                avg_price = _decimal(record.get("avg_price"), "expected.avg_price")
+            except ValueError as exc:
+                return _failure(str(exc))
+            if quantity <= 0 or avg_price <= 0:
+                return _failure("expected_position_values_must_be_positive")
+            expected[side] = {"quantity": quantity, "avg_price": avg_price}
+        if not expected:
             return _failure("expected_position_side_invalid")
-        try:
-            quantity = _decimal(
-                expected_position.get("quantity"), "expected.quantity"
-            )
-            avg_price = _decimal(
-                expected_position.get("avg_price"), "expected.avg_price"
-            )
-        except ValueError as exc:
-            return _failure(str(exc))
-        if quantity <= 0 or avg_price <= 0:
-            return _failure("expected_position_values_must_be_positive")
-        expected = {
-            "side": side,
-            "quantity": quantity,
-            "avg_price": avg_price,
-        }
 
     active = []
     for index, row in enumerate(exchange_positions):
@@ -120,11 +120,18 @@ def reconcile_position_snapshot(
     if reasons:
         return _failure(*reasons)
 
-    if len(active) > 1:
-        return _failure("multiple_active_positions_for_symbol")
+    actual = {}
+    for position in active:
+        side = position["side"]
+        if side in actual:
+            return _failure("duplicate_active_position_side")
+        actual[side] = {
+            "quantity": position["quantity"],
+            "avg_price": position["avg_price"],
+        }
 
     if expected is None:
-        if active:
+        if actual:
             return _failure("unexpected_exchange_position")
 
         return {
@@ -137,34 +144,29 @@ def reconcile_position_snapshot(
             "read_only": True,
         }
 
-    if not active:
+    if not actual:
         return _failure("expected_position_missing_on_exchange")
-
-    actual = active[0]
-
-    if actual["side"] != expected["side"]:
+    if set(actual) != set(expected):
         return _failure("position_side_mismatch")
-
-    if abs(actual["quantity"] - expected["quantity"]) > qty_tol:
-        return _failure("position_quantity_mismatch")
-
-    price_scale = max(abs(expected["avg_price"]), Decimal("1"))
-    if abs(actual["avg_price"] - expected["avg_price"]) > price_tol * price_scale:
-        return _failure("position_average_price_mismatch")
+    for side, expected_position in expected.items():
+        actual_position = actual[side]
+        if abs(actual_position["quantity"] - expected_position["quantity"]) > qty_tol:
+            return _failure("position_quantity_mismatch")
+        price_scale = max(abs(expected_position["avg_price"]), Decimal("1"))
+        if abs(actual_position["avg_price"] - expected_position["avg_price"]) > price_tol * price_scale:
+            return _failure("position_average_price_mismatch")
 
     return {
         "ok": True,
         "halt_trading": False,
         "symbol": symbol,
         "expected_position": {
-            "side": expected["side"],
-            "quantity": str(expected["quantity"]),
-            "avg_price": str(expected["avg_price"]),
+            side: {"quantity": str(position["quantity"]), "avg_price": str(position["avg_price"])}
+            for side, position in expected.items()
         },
         "exchange_position": {
-            "side": actual["side"],
-            "quantity": str(actual["quantity"]),
-            "avg_price": str(actual["avg_price"]),
+            side: {"quantity": str(position["quantity"]), "avg_price": str(position["avg_price"])}
+            for side, position in actual.items()
         },
         "reasons": [],
         "read_only": True,

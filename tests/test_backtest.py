@@ -159,6 +159,51 @@ def test_backtest_short_data():
     assert result["metrics"]["final_equity_realized"] == 1000.0
 
 
+def test_oos_backtest_requires_complete_historical_funding():
+    klines = _synthetic_uptrend(10)
+    try:
+        run_backtest(
+            klines,
+            SPECS,
+            funding_rates={0: 0.0001},
+            require_funding=True,
+        )
+    except ValueError as exc:
+        assert "funding coverage incomplete" in str(exc)
+    else:
+        raise AssertionError("incomplete funding history must block OOS")
+
+
+def test_oos_backtest_accepts_covered_funding_and_marks_cost_modelled():
+    klines = _synthetic_uptrend(10)
+    result = run_backtest(
+        klines,
+        SPECS,
+        funding_rates={0: 0.0001, 28_800_000: -0.0002},
+        require_funding=True,
+    )
+    assert result["metrics"]["funding_modelled"] is True
+    assert result["metrics"]["funding_cashflow_usd"] == 0.0
+
+
+def test_oos_funding_coverage_uses_observed_settlement_phase():
+    klines = _synthetic_uptrend(10)
+    phase = 1234
+    klines = [[row[0] + phase, *row[1:]] for row in klines]
+    result = run_backtest(
+        klines,
+        SPECS,
+        funding_rates={phase: 0.0001, phase + 28_800_000: -0.0001},
+        require_funding=True,
+    )
+    assert result["metrics"]["funding_modelled"] is True
+
+
+def test_backtest_reports_funding_omitted_when_not_supplied():
+    result = run_backtest(_synthetic_uptrend(10), SPECS)
+    assert result["metrics"]["funding_modelled"] is False
+
+
 # ============================================================
 # Determinism
 # ============================================================

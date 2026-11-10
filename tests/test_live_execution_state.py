@@ -152,9 +152,8 @@ def test_long_weighted_average_and_partial_close():
 
     result = derive_positions_from_fills(fills)
 
-    assert result[SYMBOL]["side"] == "LONG"
-    assert result[SYMBOL]["quantity"] == "1.5"
-    assert float(result[SYMBOL]["avg_price"]) == pytest.approx(110)
+    assert result[SYMBOL]["LONG"]["quantity"] == "1.5"
+    assert float(result[SYMBOL]["LONG"]["avg_price"]) == pytest.approx(110)
 
 
 def test_long_full_close():
@@ -174,9 +173,8 @@ def test_short_partial_close():
 
     result = derive_positions_from_fills(fills)
 
-    assert result[SYMBOL]["side"] == "SHORT"
-    assert result[SYMBOL]["quantity"] == "2"
-    assert result[SYMBOL]["avg_price"] == "100"
+    assert result[SYMBOL]["SHORT"]["quantity"] == "2"
+    assert result[SYMBOL]["SHORT"]["avg_price"] == "100"
 
 
 def test_multiple_symbols_are_independent():
@@ -187,8 +185,8 @@ def test_multiple_symbols_are_independent():
 
     result = derive_positions_from_fills(fills)
 
-    assert result["BTC-SWAP-USDT"]["side"] == "LONG"
-    assert result["ETH-SWAP-USDT"]["side"] == "SHORT"
+    assert result["BTC-SWAP-USDT"]["LONG"]["quantity"] == "1"
+    assert result["ETH-SWAP-USDT"]["SHORT"]["quantity"] == "2"
 
 
 def test_duplicate_trade_id_rejected():
@@ -248,7 +246,7 @@ def test_same_timestamp_different_symbols_is_allowed():
 
 
 def test_closing_without_open_rejected():
-    with pytest.raises(LiveStateError, match="no matching open"):
+    with pytest.raises(LiveStateError, match="no matching LONG position"):
         derive_positions_from_fills([
             fill("1", "SELL_CLOSE", "1", "100", NOW - 100)
         ])
@@ -264,14 +262,38 @@ def test_close_quantity_exceeding_open_rejected():
         derive_positions_from_fills(fills)
 
 
-def test_opposite_open_without_close_rejected():
+def test_opposite_open_creates_independent_hedge_position():
     fills = [
         fill("1", "BUY_OPEN", "1", "100", NOW - 200),
         fill("2", "SELL_OPEN", "1", "105", NOW - 100),
     ]
 
-    with pytest.raises(LiveStateError, match="opposite-side"):
-        derive_positions_from_fills(fills)
+    result = derive_positions_from_fills(fills)
+    assert set(result[SYMBOL]) == {"LONG", "SHORT"}
+    assert result[SYMBOL]["LONG"]["quantity"] == "1"
+    assert result[SYMBOL]["SHORT"]["quantity"] == "1"
+
+
+def test_closing_long_preserves_short_position():
+    fills = [
+        fill("1", "BUY_OPEN", "1", "100", NOW - 300),
+        fill("2", "SELL_OPEN", "2", "105", NOW - 200),
+        fill("3", "SELL_CLOSE", "1", "110", NOW - 100),
+    ]
+    result = derive_positions_from_fills(fills)
+    assert set(result[SYMBOL]) == {"SHORT"}
+    assert result[SYMBOL]["SHORT"]["quantity"] == "2"
+
+
+def test_closing_short_preserves_long_position():
+    fills = [
+        fill("1", "BUY_OPEN", "2", "100", NOW - 300),
+        fill("2", "SELL_OPEN", "1", "105", NOW - 200),
+        fill("3", "BUY_CLOSE", "1", "110", NOW - 100),
+    ]
+    result = derive_positions_from_fills(fills)
+    assert set(result[SYMBOL]) == {"LONG"}
+    assert result[SYMBOL]["LONG"]["quantity"] == "2"
 
 
 @pytest.mark.parametrize(
@@ -366,8 +388,22 @@ def test_fill_history_persisted(tmp_path):
     updated = store.record_fills(fills, now_ms=NOW)
 
     assert updated["sequence"] == 1
-    assert updated["positions"][SYMBOL]["quantity"] == "1.5"
+    assert updated["positions"][SYMBOL]["LONG"]["quantity"] == "1.5"
     assert updated["processed_trade_ids"] == ["1", "2"]
+
+
+def test_hedge_positions_survive_store_reload(tmp_path):
+    store = initialized_store(tmp_path)
+    fills = [
+        fill("long", "BUY_OPEN", "2", "100", NOW - 300),
+        fill("short", "SELL_OPEN", "1", "110", NOW - 200),
+        fill("close-long", "SELL_CLOSE", "0.5", "105", NOW - 100),
+    ]
+    updated = store.record_fills(fills, now_ms=NOW)
+    reloaded = make_store(tmp_path).load()
+    assert updated["positions"] == reloaded["positions"]
+    assert reloaded["positions"][SYMBOL]["LONG"]["quantity"] == "1.5"
+    assert reloaded["positions"][SYMBOL]["SHORT"]["quantity"] == "1"
 
 
 def test_fill_history_regression_rejected(tmp_path):
@@ -541,6 +577,44 @@ def test_reconciliation_accepts_matching_position(tmp_path):
         now_ms=NOW,
     )
 
+    assert result["halted"] is False
+
+
+def test_reconciliation_accepts_independent_hedge_sides(tmp_path):
+    fills = [
+        fill("1", "BUY_OPEN", "2", "100", NOW - 300),
+        fill("2", "SELL_OPEN", "1", "110", NOW - 200),
+    ]
+    store = ready_store(tmp_path, fills)
+    exchange = {
+        SYMBOL: {
+            "LONG": {"quantity": "2", "avg_price": "100"},
+            "SHORT": {"quantity": "1", "avg_price": "110"},
+        }
+    }
+    result = store.record_reconciliation(
+        position_snapshot(positions=exchange),
+        now_ms=NOW,
+    )
+    assert result["halted"] is False
+    assert set(result["positions"][SYMBOL]) == {"LONG", "SHORT"}
+
+
+def test_legacy_single_side_position_is_accepted_during_reconciliation(tmp_path):
+    store = ready_store(tmp_path, [
+        fill("1", "BUY_OPEN", "2", "100", NOW - 200),
+    ])
+    legacy_exchange = {
+        SYMBOL: {
+            "side": "LONG",
+            "quantity": "2",
+            "avg_price": "100",
+        }
+    }
+    result = store.record_reconciliation(
+        position_snapshot(positions=legacy_exchange),
+        now_ms=NOW,
+    )
     assert result["halted"] is False
 
 

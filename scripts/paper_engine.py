@@ -267,9 +267,26 @@ def apply_funding_if_due(state, candle, specs, config, events):
     global _funding_warned_global
     current_ts = int(candle[0]); pos = state.get("position")
     if not pos or pos.get("remaining_size", 0) <= 0: return
-    if current_ts % 28_800_000 != 0: return
+    funding_period_ms = config.get("funding_period_ms", 28_800_000)
+    if (
+        isinstance(funding_period_ms, bool)
+        or not isinstance(funding_period_ms, int)
+        or funding_period_ms <= 0
+    ):
+        raise ValueError("funding_period_ms must be a positive integer")
     funding_rates = config.get("funding_rates") or {}
+    funding_phase = config.get("funding_phase_ms")
+    if funding_phase is None and funding_rates:
+        funding_phase = min(funding_rates) % funding_period_ms
+    if funding_phase is None:
+        funding_phase = 0
+    if current_ts % funding_period_ms != funding_phase:
+        return
     if not funding_rates:
+        if config.get("require_funding", False):
+            raise ValueError(
+                f"Missing funding rates at required settlement {current_ts}"
+            )
         if not _funding_warned_global:
             logger.warning("FUNDING NOT CONFIGURED — PnL will NOT include funding.")
             _funding_warned_global = True

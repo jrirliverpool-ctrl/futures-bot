@@ -123,6 +123,45 @@ def test_matching_account_snapshot_passes_read_only():
     assert result["trading_state_mutated"] is False
 
 
+def test_matching_hedge_mode_snapshot_passes_for_both_sides():
+    long_position = position(side="LONG", position="2.5")
+    short_position = position(side="SHORT", position="1.25", avgPrice="61000")
+    expected_both = {
+        SYMBOL: {
+            "LONG": {"quantity": "2.5", "avg_price": "60000"},
+            "SHORT": {"quantity": "1.25", "avg_price": "61000"},
+        }
+    }
+    client = FakeClient([long_position, short_position])
+    result = coordinator(
+        client=client,
+        store=FakeStore(),
+        expected_state=expected_both,
+    ).run(now_ms=1790000005000)
+    assert result["positions_ok"] is True
+    assert result["halt_trading"] is False
+    assert set(result["position_reports"][SYMBOL]["exchange_position"]) == {
+        "LONG", "SHORT"
+    }
+
+
+def test_duplicate_same_side_snapshot_halts_in_hedge_mode():
+    client = FakeClient([position(), position(position="1")])
+    expected_both = {
+        SYMBOL: {
+            "LONG": {"quantity": "2.5", "avg_price": "60000"},
+            "SHORT": {"quantity": "1", "avg_price": "61000"},
+        }
+    }
+    result = coordinator(
+        client=client,
+        store=FakeStore(),
+        expected_state=expected_both,
+    ).run(now_ms=1790000005000)
+    assert result["halt_trading"] is True
+    assert result["positions_ok"] is False
+
+
 def test_empty_exchange_snapshot_matches_flat_internal_state():
     client = FakeClient([])
 
