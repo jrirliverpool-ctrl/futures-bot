@@ -36,8 +36,12 @@ from toobit_balance_flow import (
     fetch_all_futures_balance_flow,
     summarize_balance_flow,
 )
+from toobit_position_snapshot import (
+    POSITIONS_ENDPOINT,
+    PositionSnapshotError,
+    fetch_stable_position_snapshot,
+)
 
-POSITIONS_ENDPOINT = "/api/v1/futures/positions"
 BALANCE_FLOW_SCOPE = "exchange_queryable_recent_90_days"
 
 
@@ -95,13 +99,14 @@ def _position_unrealized_pnl(row):
     return str(value)
 
 
-def _read_positions(client) -> list[dict]:
-    try:
-        rows = client._request("GET", POSITIONS_ENDPOINT, {})
-    except Exception as exc:
-        raise AuditError(
-            f"positions_request_failed:{type(exc).__name__}"
-        ) from None
+def _read_positions(client, rows=None) -> list[dict]:
+    if rows is None:
+        try:
+            rows = fetch_stable_position_snapshot(client)
+        except PositionSnapshotError as exc:
+            raise AuditError(
+                f"positions_snapshot_not_stable:{str(exc)[:120]}"
+            ) from None
 
     if isinstance(rows, dict) and rows.get("_transport"):
         raise AuditError("positions_transport_unknown")
@@ -111,6 +116,9 @@ def _read_positions(client) -> list[dict]:
 
     if not all(isinstance(row, dict) for row in rows):
         raise AuditError("positions_snapshot_contains_invalid_rows")
+
+    # The two reads above prove repeatability of the position-defining fields.
+    # The checks below validate row details used by accounting/reconciliation.
 
     # Hedge mode may legitimately contain LONG and SHORT for one symbol.
     # Only an exact duplicate (symbol, side) pair is rejected.
@@ -381,6 +389,7 @@ def build_report(
         },
         "account_snapshot": {
             "positions_snapshot_complete": True,
+            "positions_snapshot_stable": True,
             "active_positions": active_positions,
             "active_position_count": len(active_positions),
             "open_orders_snapshot_complete_and_stable": True,

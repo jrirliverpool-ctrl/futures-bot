@@ -59,8 +59,9 @@ class FakeStore:
 
 
 class FakeClient:
-    def __init__(self, positions):
+    def __init__(self, positions, position_responses=None):
         self.positions = positions
+        self.position_responses = position_responses
         self.calls = []
 
     def _request(self, method, path, params):
@@ -72,6 +73,9 @@ class FakeClient:
         if path != "/api/v1/futures/positions":
             raise AssertionError("Unexpected endpoint")
 
+        if self.position_responses is not None:
+            index = min(len(self.calls) - 1, len(self.position_responses) - 1)
+            return self.position_responses[index]
         return self.positions
 
     def place_order(self, **kwargs):
@@ -111,7 +115,8 @@ def test_matching_account_snapshot_passes_read_only():
     assert result["read_only"] is True
 
     assert client.calls == [
-        ("GET", "/api/v1/futures/positions", {})
+        ("GET", "/api/v1/futures/positions", {}),
+        ("GET", "/api/v1/futures/positions", {}),
     ]
 
     assert store.calls == ["recovery_required"]
@@ -274,7 +279,46 @@ def test_positions_transport_exception_halts():
 
     assert result["ok"] is False
     assert result["halt_trading"] is True
-    assert result["reason"] == "positions_request_failed"
+    assert result["reason"] == "positions_snapshot_not_stable"
+    assert result["detail"] == "positions_request_failed:TimeoutError"
+
+
+def test_position_changes_between_reads_halt_before_order_recovery():
+    client = FakeClient(
+        position(),
+        position_responses=[
+            [position()],
+            [position(position="2.4")],
+        ],
+    )
+    store = FakeStore()
+
+    result = coordinator(client, store).run(now_ms=1790000005000)
+
+    assert result["halt_trading"] is True
+    assert result["reason"] == "positions_snapshot_not_stable"
+    assert result["detail"] == "positions_snapshot_changed_between_reads"
+    assert store.calls == []
+    assert len(client.calls) == 2
+
+
+def test_leverage_or_margin_mode_change_between_reads_halts():
+    first = position(leverage="2", marginType="ISOLATED")
+    second = position(leverage="3", marginType="CROSSED")
+    client = FakeClient(first, position_responses=[[first], [second]])
+    result = coordinator(client).run(now_ms=1790000005000)
+    assert result["halt_trading"] is True
+    assert result["reason"] == "positions_snapshot_not_stable"
+    assert result["detail"] == "positions_snapshot_changed_between_reads"
+
+
+def test_mark_price_and_unrealized_pnl_can_change_between_reads():
+    first = position(markPrice="60000", unrealizedPnL="0")
+    second = position(markPrice="60001", unrealizedPnL="0.0025")
+    client = FakeClient(first, position_responses=[[first], [second]])
+    result = coordinator(client).run(now_ms=1790000005000)
+    assert result["ok"] is True
+    assert result["exchange_positions_snapshot_stable"] is True
 
 
 def test_corrupt_intent_store_halts():

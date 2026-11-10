@@ -16,9 +16,12 @@ from decimal import Decimal, InvalidOperation
 
 from order_recovery_probe import OrderRecoveryProbe
 from position_reconciliation import reconcile_position_snapshot
+from toobit_position_snapshot import (
+    PositionSnapshotError,
+    fetch_stable_position_snapshot,
+)
 
 
-POSITIONS_ENDPOINT = "/api/v1/futures/positions"
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+-SWAP-USDT$")
 
 
@@ -98,15 +101,11 @@ class ToobitReadOnlyReconciliation:
         """Run a read-only account reconciliation report."""
 
         try:
-            positions = self.client._request(
-                "GET",
-                POSITIONS_ENDPOINT,
-                {},
-            )
-        except Exception as exc:
+            positions = fetch_stable_position_snapshot(self.client)
+        except PositionSnapshotError as exc:
             return self._failure(
-                "positions_request_failed",
-                detail=type(exc).__name__,
+                "positions_snapshot_not_stable",
+                detail=str(exc),
             )
 
         if not isinstance(positions, list):
@@ -205,6 +204,7 @@ class ToobitReadOnlyReconciliation:
             "position_reports": position_reports,
             "order_recovery_report": order_report,
             "exchange_positions_snapshot_received": True,
+            "exchange_positions_snapshot_stable": True,
             "read_only": True,
             "network_methods_used": ["GET"],
             "orders_submitted": 0,
