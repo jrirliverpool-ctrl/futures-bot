@@ -273,3 +273,81 @@ def test_live_execution_is_never_authorized():
         audit.POSITIONS_ENDPOINT
         == "/api/v1/futures/positions"
     )
+
+
+def test_build_report_fails_closed_if_conditional_orders_are_incomplete(
+    tmp_path, monkeypatch
+):
+    from toobit_open_algo_orders import OpenAlgoOrdersReadError
+
+    monkeypatch.setattr(
+        audit, "fetch_complete_user_trades_v2", lambda *a, **k: []
+    )
+    monkeypatch.setattr(audit, "_read_positions", lambda *a, **k: [])
+    monkeypatch.setattr(audit, "fetch_all_open_orders", lambda *a, **k: [])
+    monkeypatch.setattr(
+        audit,
+        "fetch_all_open_algo_orders",
+        lambda *a, **k: (_ for _ in ()).throw(
+            OpenAlgoOrdersReadError("unstable")
+        ),
+    )
+    appended = []
+    monkeypatch.setattr(
+        audit,
+        "append_user_trades",
+        lambda *a, **k: appended.append(True),
+    )
+
+    try:
+        audit.build_report(
+            object(), ["BTC-SWAP-USDT"], tmp_path / "ledger.jsonl"
+        )
+    except audit.AuditError as exc:
+        assert "stable_open_algo_orders_snapshot_not_proven" in str(exc)
+    else:
+        assert False, "incomplete protective orders must fail closed"
+
+    assert appended == []
+
+
+def test_build_report_includes_stable_conditional_protection_orders(
+    tmp_path, monkeypatch
+):
+    protective_orders = [{
+        "orderId": "9001",
+        "symbol": "BTC-SWAP-USDT",
+        "side": "SELL",
+        "positionSide": "LONG",
+        "type": "STOP_PROFIT_LOSS_MARKET",
+        "stopOrderType": "STOP_LOSS",
+        "stopPrice": "59000",
+    }]
+    monkeypatch.setattr(
+        audit, "fetch_complete_user_trades_v2", lambda *a, **k: []
+    )
+    monkeypatch.setattr(audit, "_read_positions", lambda *a, **k: [])
+    monkeypatch.setattr(audit, "fetch_all_open_orders", lambda *a, **k: [])
+    monkeypatch.setattr(
+        audit,
+        "fetch_all_open_algo_orders",
+        lambda *a, **k: protective_orders,
+    )
+    monkeypatch.setattr(
+        audit,
+        "_read_stable_balance_flow",
+        lambda *a, **k: ([], {"known_flow_categories_complete": True}),
+    )
+    monkeypatch.setattr(audit, "append_user_trades", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(audit, "load_fill_ledger", lambda *a, **k: [])
+
+    report = audit.build_report(
+        object(), ["BTC-SWAP-USDT"], tmp_path / "ledger.jsonl"
+    )
+
+    snapshot = report["account_snapshot"]
+    assert snapshot["open_algo_orders_snapshot_complete_and_stable"] is True
+    assert snapshot["open_algo_orders"] == protective_orders
+    assert snapshot["open_algo_order_count"] == 1
+    assert report["orders_submitted"] == 0
+    assert report["live_authorized"] is False

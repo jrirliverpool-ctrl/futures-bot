@@ -26,9 +26,9 @@ current, reproducible evidence before the first live order.
 
 - Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` is not present in this repository history.
 - Candidate branch is `codex/apexquant-hedge-funding-readiness`, tracking GitHub. Commit `c508100` passed all 17 GitHub Actions jobs, including the integrated account-audit and conditional-order pagination tests.
-- Current full suite: **1221 passed** on Python 3.12 / Windows; `git diff --check` is clean. These results cover mocked V2 hedge-side order mapping and stable scans of both conditional-order categories; they do not validate a live account or exchange execution semantics.
+- Previous full suite: **1221 passed** on Python 3.12 / Windows. The new integration checks prove an incomplete conditional-order snapshot prevents ledger mutation, and a stable protective-order snapshot appears in the report. Run the full suite again before treating this exact working tree as verified.
 - No live Toobit credentials or account read have been used in this task. No exchange order has been sent.
-- Account audit now scans both `STOP` and `STOP_PROFIT_LOSS`; Toobit's default conditional-order query omits TP/SL. The new dual-category implementation is not yet CI-verified.
+- Account audit scans both `STOP` and `STOP_PROFIT_LOSS`; Toobit's default conditional-order query omits TP/SL. CI for this scan passed on `c508100`; the new integration-failure tests are pending a CI run.
 
 ## Explicit stop conditions
 
