@@ -80,7 +80,7 @@ jobs:
           python-version: '3.11'
       - run: pip install requests pytest
       - name: Test integrated Toobit account audit
-        run: pytest -q tests/test_toobit_full_account_trade_audit.py
+        run: pytest -q tests/test_toobit_full_account_trade_audit.py tests/test_toobit_open_algo_orders.py
 
   backtest-and-chain:
     runs-on: ubuntu-latest

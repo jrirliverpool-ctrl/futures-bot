@@ -11,8 +11,8 @@ current, reproducible evidence before the first live order.
 
 | Gate | Current status | Evidence required to pass |
 | --- | --- | --- |
-| 1. Hedge-mode State and Reconciliation | Local state, reconciliation, and order-preflight helpers are side-aware; repeated core position snapshots fail closed on changes; unit tests cover both sides | Green Linux CI for the prior pushed commit; this working change must be pushed and pass CI; dual-side live-account snapshots and recovery remain unverified |
-| 2. Order and Fill Recovery | V2 order-side mapping and single-attempt UNKNOWN handling are unit-tested; normal and conditional open orders have stable-pagination helpers | Pass CI for the current candidate; unresolved-order recovery with a durable intent journal is not implemented end-to-end |
+| 1. Hedge-mode State and Reconciliation | Local state, reconciliation, and order-preflight helpers are side-aware; repeated core position snapshots fail closed on changes; unit tests cover both sides | CI passed for commit `0eae541`; dual-side live-account snapshots and recovery remain unverified |
+| 2. Order and Fill Recovery | V2 order-side mapping and single-attempt UNKNOWN handling are unit-tested; normal and conditional open orders have stable-pagination helpers | CI passed for commit `0eae541`; CI workflow now includes the conditional-order helper tests; unresolved-order recovery with a durable intent journal is not implemented end-to-end |
 | 3. Fill, Fee, Funding, and Equity Ledger | Partial implementation; net fill commissions now report commission minus maker rebate by asset | Reconcile fills, fee and funding flows, realized PnL, and equity against a real account export with duplicate-flow protection |
 | 4. Durable State and Restart Recovery | Local file state is atomic; no durable live backend verified | Demonstrate restart and partial-fill recovery on persistent storage; prove no duplicate submission after UNKNOWN outcomes |
 | 5. Portfolio Risk, Margin, and Circuit Breakers | Local V2 paper engine now enforces aggregate open, pending, and proposed stop-risk against `max_portfolio_risk`; unknown legacy position risk fails closed. Sizing includes round-trip fees and adverse stop slippage. Exchange margin and stress exposure remain unverified | Validate portfolio-wide and stress exposure, forward funding, exchange margin/liquidation distance, and all breaker triggers against current account/contract inputs |
@@ -25,7 +25,7 @@ current, reproducible evidence before the first live order.
 ## Current local verification
 
 - Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` is not present in this repository history.
-- Candidate branch is `codex/apexquant-hedge-funding-readiness`, tracking GitHub. Commit `17a93f4` has a green 17/17 workflow baseline; additional local changes are pending a new CI run.
+- Candidate branch is `codex/apexquant-hedge-funding-readiness`, tracking GitHub. Commit `0eae541` passed all 17 GitHub Actions jobs; the subsequent workflow edit adds the new conditional-order helper tests and is pending its own CI run.
 - Current full suite: **1221 passed** on Python 3.12 / Windows; `git diff --check` is clean. These results cover mocked V2 hedge-side order mapping and stable scans of both conditional-order categories; they do not validate a live account or exchange execution semantics.
 - No live Toobit credentials or account read have been used in this task. No exchange order has been sent.
 - Account audit now scans both `STOP` and `STOP_PROFIT_LOSS`; Toobit's default conditional-order query omits TP/SL. The new dual-category implementation is not yet CI-verified.
