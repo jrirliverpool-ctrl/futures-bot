@@ -32,17 +32,23 @@ select or retune parameters.
    the locally ignored `data/oos/funding/` directory. The data must be reviewed
    for contract-history changes and committed or otherwise pinned for CI before
    a reproducible OOS run. Funding alone does not validate candles or costs.
-2. **Costs are not yet account-calibrated.** Backtest uses configured taker
+2. **Toobit candle history does not cover the OOS window through the public
+   endpoint.** The new range downloader fails closed on missing/irregular bars.
+   A live query for 2025-05-10 returned an empty response, while a recent
+   24-hour request returned 24 hourly bars. Do not use the returned recent
+   window as the 18-month OOS dataset. Obtain a complete, provenance-backed
+   futures candle archive before evaluating the frozen Test split.
+3. **Costs are not yet account-calibrated.** Backtest uses configured taker
    fees and a fixed slippage percentage. Neither is a measured fee tier for the
    intended Toobit account; bid/ask spread, market impact, and execution delay
    are not represented as observed historical data.
-3. **Protocol statistic is not frozen.** The prior proposal says the bootstrap
+4. **Protocol statistic is not frozen.** The prior proposal says the bootstrap
    confidence interval's lower bound must exceed 1 for a net profitability
    ratio, but it does not define that ratio, the resampling unit, block length,
    interval level, or treatment of multiple symbols. Freeze these before
    opening final Test results. Do not interpret a trade-level IID bootstrap as
    valid without checking serial dependence.
-4. **Dataset integrity is unproven.** There is no signed manifest here for
+5. **Dataset integrity is unproven.** There is no signed manifest here for
    source, retrieval time, gaps, duplicate candles, timezone, contract changes,
    symbol listing history, or exact split boundaries.
 

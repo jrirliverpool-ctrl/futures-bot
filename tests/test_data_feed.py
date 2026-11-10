@@ -17,6 +17,7 @@ sys.path.insert(
 import requests
 from data_feed import (
     fetch_klines,
+    fetch_klines_range,
     is_candle_closed,
     filter_closed_candles,
     candle_ts_to_iso,
@@ -181,6 +182,69 @@ def test_retry_exhaustion(mock_sleep):
     assert mock_sleep.call_count == 2
     assert mock_sleep.call_args_list[0].args[0] == 1
     assert mock_sleep.call_args_list[1].args[0] == 2
+
+
+def test_fetch_klines_range_paginates_and_verifies_complete_coverage():
+    session = Mock()
+    start = 1_704_067_200_000  # UTC hour boundary
+    interval_ms = INTERVAL_MS["1h"]
+    session.get.side_effect = [
+        _response(200, [_candle(start), _candle(start + interval_ms)]),
+        _response(200, [_candle(start + 2 * interval_ms)]),
+    ]
+    result = fetch_klines_range(
+        "BTC-SWAP-USDT",
+        "1h",
+        start,
+        start + 2 * interval_ms,
+        limit=2,
+        session=session,
+    )
+    assert [row[0] for row in result] == [
+        start,
+        start + interval_ms,
+        start + 2 * interval_ms,
+    ]
+    assert session.get.call_count == 2
+
+
+def test_fetch_klines_range_fails_closed_on_api_gap():
+    session = Mock()
+    start = 1_704_067_200_000
+    interval_ms = INTERVAL_MS["1h"]
+    session.get.return_value = _response(
+        200,
+        [_candle(start), _candle(start + 2 * interval_ms)],
+    )
+    try:
+        fetch_klines_range(
+            "BTC-SWAP-USDT",
+            "1h",
+            start,
+            start + 2 * interval_ms,
+            limit=10,
+            session=session,
+        )
+        assert False, "gap must not be accepted as a complete dataset"
+    except ValueError as exc:
+        assert "gap" in str(exc).lower()
+
+
+def test_fetch_klines_range_rejects_unavailable_history():
+    session = Mock()
+    start = 1_704_067_200_000
+    session.get.return_value = _response(200, [])
+    try:
+        fetch_klines_range(
+            "BTC-SWAP-USDT",
+            "1h",
+            start,
+            start + INTERVAL_MS["1h"],
+            session=session,
+        )
+        assert False, "empty historical response must be rejected"
+    except ValueError as exc:
+        assert "ended before" in str(exc).lower()
 
 
 @patch("data_feed.time.sleep")

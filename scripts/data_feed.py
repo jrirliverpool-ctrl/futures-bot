@@ -279,6 +279,122 @@ def fetch_klines(
     )
 
 
+def fetch_klines_range(
+    symbol: str,
+    interval: str,
+    start_time: int,
+    end_time: int,
+    limit: int = 1000,
+    max_retries: int = 3,
+    backoff_base: float = 1.0,
+    timeout: int = 15,
+    session=None,
+) -> list:
+    """Fetch a complete, gap-free inclusive Toobit candle range.
+
+    The API caps each response at 1,000 rows. This routine advances by the
+    last returned candle and refuses early termination, gaps, duplicates,
+    out-of-range candles, or malformed pages instead of returning a partial
+    history that could be mistaken for a valid OOS dataset.
+    """
+    _validate_fetch_args(interval, limit, max_retries)
+    if backoff_base < 0:
+        raise ValueError("backoff_base must be >= 0")
+    if timeout <= 0:
+        raise ValueError("timeout must be > 0")
+    for name, value in (("start_time", start_time), ("end_time", end_time)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer timestamp")
+    if start_time > end_time:
+        raise ValueError("start_time must not exceed end_time")
+    interval_ms = INTERVAL_MS[interval]
+    if start_time % interval_ms or end_time % interval_ms:
+        raise ValueError("range endpoints must align to candle boundaries")
+
+    client = session if session is not None else requests
+    url = f"{BASE_URL}{KLINES_PATH}"
+    cursor = start_time
+    candles = []
+
+    while cursor <= end_time:
+        page_end = min(
+            end_time,
+            cursor + (limit - 1) * interval_ms,
+        )
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "startTime": cursor,
+            "endTime": page_end,
+            "limit": limit,
+        }
+        last_error = None
+        page = None
+        for attempt in range(max_retries):
+            try:
+                response = client.get(url, params=params, timeout=timeout)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(backoff_base * (2 ** attempt))
+                    continue
+                break
+
+            if response.status_code >= 400:
+                if _should_retry_http(response.status_code):
+                    last_error = requests.HTTPError(
+                        f"HTTP {response.status_code}"
+                    )
+                    if attempt < max_retries - 1:
+                        time.sleep(backoff_base * (2 ** attempt))
+                        continue
+                    break
+                response.raise_for_status()
+
+            try:
+                page = response.json()
+            except ValueError:
+                raise ValueError("Response body is not valid JSON") from None
+            break
+
+        if page is None:
+            raise RuntimeError(
+                f"Failed to fetch kline range after {max_retries} attempts: "
+                f"{last_error}"
+            )
+        if not isinstance(page, list) or not page:
+            raise ValueError(f"kline range ended before requested timestamp {cursor}")
+        if len(page) > limit:
+            raise ValueError("kline page exceeds requested limit")
+
+        for index, candle in enumerate(page):
+            _validate_candle(candle, index=index)
+        _validate_klines_sequence(page)
+
+        page_times = [int(candle[0]) for candle in page]
+        if page_times[0] != cursor:
+            raise ValueError(
+                f"kline range gap or overlap at {cursor}; got {page_times[0]}"
+            )
+        if page_times[-1] > end_time:
+            raise ValueError("kline page contains candles beyond end_time")
+        if any(
+            right - left != interval_ms
+            for left, right in zip(page_times, page_times[1:])
+        ):
+            raise ValueError("kline page contains a timestamp gap")
+
+        candles.extend(page)
+        cursor = page_times[-1] + interval_ms
+        if cursor <= end_time and len(page) < limit:
+            raise ValueError(
+                f"kline range ended early at {page_times[-1]} before {end_time}"
+            )
+
+    _validate_klines_sequence(candles)
+    return candles
+
+
 # ============================================================
 # Closed candle filtering
 # ============================================================
