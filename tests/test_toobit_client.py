@@ -240,6 +240,185 @@ def test_post_is_not_retried_after_timeout(
     assert calls["count"] == 1
 
 
+@pytest.mark.parametrize(
+    ("side", "intent", "expected_side", "expected_position_side"),
+    [
+        ("LONG", "ENTRY", "BUY", "LONG"),
+        ("SHORT", "ENTRY", "SELL", "SHORT"),
+        ("LONG", "EXIT", "SELL", "LONG"),
+        ("SHORT", "EXIT", "BUY", "SHORT"),
+    ],
+)
+def test_v2_order_maps_side_and_position_side(
+    client, monkeypatch, side, intent, expected_side, expected_position_side
+):
+    calls = []
+
+    def fake_post(path, params):
+        calls.append((path, params))
+        return {
+            "orderId": "123",
+            "clientOrderId": "apex_v2_test",
+            "symbol": "BTC-SWAP-USDT",
+            "origQty": "0.01",
+            "executedQty": "0",
+            "avgPrice": "0",
+            "status": "NEW",
+            "side": expected_side,
+            "positionSide": expected_position_side,
+        }
+
+    monkeypatch.setattr(client, "_request_v2_post", fake_post)
+    result = client.place_order_v2(
+        symbol="BTC-SWAP-USDT",
+        side=side,
+        order_type="MARKET",
+        quantity="0.01",
+        price=None,
+        client_order_id="apex_v2_test",
+        intent=intent,
+    )
+
+    assert result.status == "NEW"
+    assert result.exchange_order_id == "123"
+    assert len(calls) == 1
+    path, params = calls[0]
+    assert path == "/api/v2/futures/order"
+    assert params["side"] == expected_side
+    assert params["positionSide"] == expected_position_side
+    assert params["category"] == "USDT"
+    assert "price" not in params
+
+
+def test_v2_limit_order_includes_price_and_time_in_force(client, monkeypatch):
+    captured = {}
+
+    def fake_post(path, params):
+        captured.update(path=path, params=params)
+        return {
+            "orderId": "124",
+            "clientOrderId": "apex_v2_limit",
+            "symbol": "BTC-SWAP-USDT",
+            "origQty": "0.01",
+            "executedQty": "0",
+            "avgPrice": "0",
+            "status": "NEW",
+            "side": "BUY",
+            "positionSide": "LONG",
+        }
+
+    monkeypatch.setattr(client, "_request_v2_post", fake_post)
+    result = client.place_order_v2(
+        "BTC-SWAP-USDT", "LONG", "LIMIT", "0.01", "60000",
+        "apex_v2_limit", "ENTRY", time_in_force="POST_ONLY"
+    )
+
+    assert result.status == "NEW"
+    assert captured["params"]["price"] == "60000"
+    assert captured["params"]["timeInForce"] == "POST_ONLY"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"quantity": 0},
+        {"quantity": float("nan")},
+        {"quantity": True},
+        {"order_type": "STOP"},
+        {"order_type": "LIMIT", "price": None},
+        {"order_type": "MARKET", "price": 1},
+        {"time_in_force": "INVALID"},
+    ],
+)
+def test_v2_invalid_order_does_not_send_request(client, monkeypatch, overrides):
+    calls = {"count": 0}
+
+    def fake_post(path, params):
+        calls["count"] += 1
+        raise AssertionError("invalid order must not be sent")
+
+    monkeypatch.setattr(client, "_request_v2_post", fake_post)
+    args = {
+        "symbol": "BTC-SWAP-USDT",
+        "side": "LONG",
+        "order_type": "MARKET",
+        "quantity": "0.01",
+        "price": None,
+        "client_order_id": "apex_v2_invalid",
+        "intent": "ENTRY",
+    }
+    args.update(overrides)
+    result = client.place_order_v2(**args)
+
+    assert result.status == "UNKNOWN"
+    assert calls["count"] == 0
+
+
+def test_v2_ambiguous_submission_is_not_retried(client, monkeypatch):
+    calls = {"count": 0}
+
+    def ambiguous_post(path, params):
+        calls["count"] += 1
+        raise RuntimeError("V2 POST outcome is unknown (Timeout)")
+
+    monkeypatch.setattr(client, "_request_v2_post", ambiguous_post)
+    result = client.place_order_v2(
+        "BTC-SWAP-USDT", "SHORT", "MARKET", "0.01", None,
+        "apex_v2_unknown", "ENTRY"
+    )
+
+    assert result.status == "UNKNOWN"
+    assert calls["count"] == 1
+
+
+def test_v2_real_post_serializes_order_and_signature_once(client, monkeypatch):
+    captured = {}
+
+    def fake_requests_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse(
+            200,
+            {
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "orderId": "125",
+                    "clientOrderId": "apex_signed_v2",
+                    "symbol": "BTC-SWAP-USDT",
+                    "origQty": "0.01",
+                    "executedQty": "0",
+                    "avgPrice": "0",
+                    "status": "NEW",
+                    "side": "SELL",
+                    "positionSide": "SHORT",
+                },
+            },
+        )
+
+    monkeypatch.setattr("toobit_client.requests.post", fake_requests_post)
+    result = client.place_order_v2(
+        "BTC-SWAP-USDT", "SHORT", "MARKET", "0.01", None,
+        "apex_signed_v2", "ENTRY"
+    )
+
+    assert result.status == "NEW"
+    assert captured["url"].endswith("/api/v2/futures/order")
+    assert captured["headers"] == {"X-BB-APIKEY": "TEST_KEY"}
+    assert captured["timeout"] == 15
+    sent = dict(captured["data"])
+    assert sent["symbol"] == "BTC-SWAP-USDT"
+    assert sent["side"] == "SELL"
+    assert sent["positionSide"] == "SHORT"
+    assert sent["type"] == "MARKET"
+    assert sent["newClientOrderId"] == "apex_signed_v2"
+    assert sent["category"] == "USDT"
+    assert sent["recvWindow"] == 5000
+    assert sent["signature"] == client._generate_signature(
+        {key: value for key, value in sent.items() if key != "signature"}
+    )
+
+
 def test_limit_order_requires_price(client):
     result = client.place_order(
         symbol="BTC-SWAP-USDT",

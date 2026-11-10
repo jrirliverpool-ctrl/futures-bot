@@ -31,6 +31,10 @@ from toobit_open_orders import (
     OpenOrdersReadError,
     fetch_all_open_orders,
 )
+from toobit_open_algo_orders import (
+    OpenAlgoOrdersReadError,
+    fetch_all_open_algo_orders,
+)
 from toobit_balance_flow import (
     BalanceFlowError,
     fetch_all_futures_balance_flow,
@@ -278,6 +282,18 @@ def build_report(
             "stable_open_orders_snapshot_not_proven"
         ) from None
 
+    try:
+        open_algo_orders = fetch_all_open_algo_orders(
+            client,
+            limit=1000,
+            max_pages=100,
+            verify_stable=True,
+        )
+    except (OpenAlgoOrdersReadError, ValueError):
+        raise AuditError(
+            "stable_open_algo_orders_snapshot_not_proven"
+        ) from None
+
     flow_rows, flow_summary = _read_stable_balance_flow(
         client,
         page_size=page_size,
@@ -395,6 +411,9 @@ def build_report(
             "open_orders_snapshot_complete_and_stable": True,
             "open_orders": open_orders,
             "open_order_count": len(open_orders),
+            "open_algo_orders_snapshot_complete_and_stable": True,
+            "open_algo_orders": open_algo_orders,
+            "open_algo_order_count": len(open_algo_orders),
         },
         "order_intent_journal_present": False,
         "reconciliation": {
@@ -405,6 +424,7 @@ def build_report(
             ),
             "positions_snapshot_received": True,
             "open_orders_snapshot_stable": True,
+            "open_algo_orders_snapshot_stable": True,
             "internal_position_comparison": False,
             "unresolved_intent_comparison": False,
             "ok": False,

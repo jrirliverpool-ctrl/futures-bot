@@ -1,7 +1,7 @@
 # ApexQuant LIVE Readiness Gate
 
 **Status:** BLOCKED — no live order authorization
-**Assessment base:** `main` at `ac8e18e` plus the local candidate branch `codex/apexquant-hedge-funding-readiness`
+**Assessment base:** `main` at `ac8e18e`; candidate branch `codex/apexquant-hedge-funding-readiness`
 **Last assessed:** 2026-11-10
 
 This gate distinguishes implementation evidence from strategy evidence. A
@@ -11,12 +11,12 @@ current, reproducible evidence before the first live order.
 
 | Gate | Current status | Evidence required to pass |
 | --- | --- | --- |
-| 1. Hedge-mode State and Reconciliation | Local state, reconciliation, and order-preflight helpers are side-aware; repeated core position snapshots fail closed on changes; focused tests pass | Linux CI on the committed change; dual-side account snapshots and recovery validated against the documented Toobit response schema |
-| 2. Order and Fill Recovery | Local V2 read-only normalization fix; covered by tests | Linux CI; complete order/trade pagination and unresolved-order scenarios proven without journal mutation |
+| 1. Hedge-mode State and Reconciliation | Local state, reconciliation, and order-preflight helpers are side-aware; repeated core position snapshots fail closed on changes; unit tests cover both sides | Green Linux CI for the prior pushed commit; this working change must be pushed and pass CI; dual-side live-account snapshots and recovery remain unverified |
+| 2. Order and Fill Recovery | V2 order-side mapping and single-attempt UNKNOWN handling are unit-tested; normal and conditional open orders have stable-pagination helpers | Pass CI for the current candidate; unresolved-order recovery with a durable intent journal is not implemented end-to-end |
 | 3. Fill, Fee, Funding, and Equity Ledger | Partial implementation; net fill commissions now report commission minus maker rebate by asset | Reconcile fills, fee and funding flows, realized PnL, and equity against a real account export with duplicate-flow protection |
 | 4. Durable State and Restart Recovery | Local file state is atomic; no durable live backend verified | Demonstrate restart and partial-fill recovery on persistent storage; prove no duplicate submission after UNKNOWN outcomes |
 | 5. Portfolio Risk, Margin, and Circuit Breakers | Local V2 paper engine now enforces aggregate open, pending, and proposed stop-risk against `max_portfolio_risk`; unknown legacy position risk fails closed. Sizing includes round-trip fees and adverse stop slippage. Exchange margin and stress exposure remain unverified | Validate portfolio-wide and stress exposure, forward funding, exchange margin/liquidation distance, and all breaker triggers against current account/contract inputs |
-| 6. Toobit Execution API and Protection | Not approved | Verify the exact order, close, conditional-protection, precision, and error semantics for the account's position mode; verify live SL/TP at exchange |
+| 6. Toobit Execution API and Protection | Not approved; official V2 field mapping is implemented and locally tested; account-side semantics have not been exercised | Verify exact open/close, protective-order, precision, and error semantics for the account's position mode; place and verify protection only in a controlled non-live environment first, then verify installed SL/TP with read-only account evidence |
 | 7. OOS Strategy Validation | NOT APPROVED; 18-month funding is local, Toobit candle history unavailable for the window | The Toobit kline endpoint returned no data for the required 2025-05-10 start; acquire a provenance-backed complete futures candle archive, pin data, calibrate costs, implement and verify the now-specified bootstrap statistic, then run untouched chronological Test data |
 | 8. Continuous Paper Trading | Not evidenced for the current candidate | At least 14 continuous days, preferably 30, with real market data, persistent state, costs, and no critical reconciliation or accounting gaps |
 | 9. Mock Live and Fault Recovery | Prior results apply to earlier revisions only | Run the complete required failure matrix on this exact candidate and preserve logs/artifacts |
@@ -24,11 +24,11 @@ current, reproducible evidence before the first live order.
 
 ## Current local verification
 
-- Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` was not found in this repository history.
-- Local full test suite: **1204 passed** on Python 3.12 / Windows with standard root discovery (`pytest -q`). The read-only account utility is import-safe and never prints raw account payloads; position reconciliation also requires two matching GET snapshots for the position-defining fields.
-- Focused hedge/recovery/OOS-cost suite: **169 passed**, including importer validation.
-- `git diff --check`: clean at last run.
-- Candidate branch is local and unpushed; GitHub write access denied branch creation (403), so no remote CI result exists.
+- Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` is not present in this repository history.
+- Candidate branch is `codex/apexquant-hedge-funding-readiness`, tracking GitHub. Commit `17a93f4` has a green 17/17 workflow baseline; additional local changes are pending a new CI run.
+- Current full suite: **1221 passed** on Python 3.12 / Windows; `git diff --check` is clean. These results cover mocked V2 hedge-side order mapping and stable scans of both conditional-order categories; they do not validate a live account or exchange execution semantics.
+- No live Toobit credentials or account read have been used in this task. No exchange order has been sent.
+- Account audit now scans both `STOP` and `STOP_PROFIT_LOSS`; Toobit's default conditional-order query omits TP/SL. The new dual-category implementation is not yet CI-verified.
 
 ## Explicit stop conditions
 
