@@ -505,6 +505,7 @@ def reconcile_order_fills(
 
     commissions = {}
     maker_rebates = {}
+    net_commissions = {}
     realized_pnl_total = Decimal("0")
 
     for index, raw in enumerate(fills):
@@ -593,6 +594,12 @@ def reconcile_order_fills(
         else Decimal("0")
     )
 
+    for asset in set(commissions) | set(maker_rebates):
+        net_commissions[asset] = (
+            commissions.get(asset, Decimal("0"))
+            - maker_rebates.get(asset, Decimal("0"))
+        )
+
     if reported_filled > 0 and abs(
         weighted_avg - avg_price
     ) > max(
@@ -655,6 +662,10 @@ def reconcile_order_fills(
         "maker_rebates": {
             asset: str(value)
             for asset, value in maker_rebates.items()
+        },
+        "net_commissions": {
+            asset: str(value)
+            for asset, value in net_commissions.items()
         },
         "realized_pnl": str(realized_pnl_total),
         "fill_count": len(seen_identity),

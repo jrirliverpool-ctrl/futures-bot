@@ -108,6 +108,16 @@ def test_partial_fill_reconciles_with_trade_ledger():
     assert result["ledger_filled_qty"] == pytest.approx(0.4)
     assert result["weighted_avg_price"] == pytest.approx(100.0)
     assert result["commissions"]["USDT"] == pytest.approx(0.01)
+    assert result["net_commissions"]["USDT"] == "0.01"
+
+
+def test_net_commission_subtracts_maker_rebate():
+    maker_fill = trade(makerRebate="0.003")
+    result = reconcile_order_fills(order(), [maker_fill])
+    assert result["ok"] is True
+    assert result["commissions"]["USDT"] == pytest.approx(0.01)
+    assert result["maker_rebates"]["USDT"] == "0.003"
+    assert result["net_commissions"]["USDT"] == "0.007"
 
 
 def test_multiple_fills_weight_average_and_commission():

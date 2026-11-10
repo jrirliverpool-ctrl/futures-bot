@@ -49,6 +49,12 @@ def test_summary_aggregates_fees_and_pnl():
         result["commission_by_asset"]["USDT"]
     ) == Decimal("0.07")
     assert Decimal(
+        result["maker_rebate_by_asset"]["USDT"]
+    ) == Decimal("0.001")
+    assert Decimal(
+        result["net_commission_by_asset"]["USDT"]
+    ) == Decimal("0.069")
+    assert Decimal(
         result["reported_realized_pnl_usdt"]
     ) == Decimal("1")
     assert result["maker_fill_count"] == 1

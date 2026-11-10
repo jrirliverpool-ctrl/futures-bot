@@ -13,7 +13,7 @@ current, reproducible evidence before the first live order.
 | --- | --- | --- |
 | 1. Hedge-mode State and Reconciliation | Local implementation; focused tests pass | Linux CI on the committed change; dual-side account snapshots and recovery validated against the documented Toobit response schema |
 | 2. Order and Fill Recovery | Local V2 read-only normalization fix; covered by tests | Linux CI; complete order/trade pagination and unresolved-order scenarios proven without journal mutation |
-| 3. Fill, Fee, Funding, and Equity Ledger | Partial implementation | Reconcile fills, fees, funding flows, realized PnL, and equity against a real account export with duplicate-flow protection |
+| 3. Fill, Fee, Funding, and Equity Ledger | Partial implementation; net fill commissions now report commission minus maker rebate by asset | Reconcile fills, fee and funding flows, realized PnL, and equity against a real account export with duplicate-flow protection |
 | 4. Durable State and Restart Recovery | Local file state is atomic; no durable live backend verified | Demonstrate restart and partial-fill recovery on persistent storage; prove no duplicate submission after UNKNOWN outcomes |
 | 5. Portfolio Risk, Margin, and Circuit Breakers | Not verified end-to-end for live multi-position Hedge Mode | Tests for aggregate/stress exposure, margin, liquidation distance, fees, slippage, and all breaker triggers |
 | 6. Toobit Execution API and Protection | Not approved | Verify the exact order, close, conditional-protection, precision, and error semantics for the account's position mode; verify live SL/TP at exchange |
@@ -25,7 +25,7 @@ current, reproducible evidence before the first live order.
 ## Current local verification
 
 - Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` was not found in this repository history.
-- Local full test suite: **1184 passed** on Python 3.12 / Windows.
+- Local full test suite: **1185 passed** on Python 3.12 / Windows.
 - Focused hedge/recovery/OOS-cost suite: **169 passed**, including importer validation.
 - `git diff --check`: clean at last run.
 - Candidate branch is local and unpushed; GitHub write access denied branch creation (403), so no remote CI result exists.

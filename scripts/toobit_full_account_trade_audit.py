@@ -189,6 +189,10 @@ def _summarize_fills(rows, missing_realized_pnl=0):
             key: str(value)
             for key, value in sorted(rebate_by_asset.items())
         },
+        "net_commission_by_asset": {
+            key: str(commission_by_asset[key] - rebate_by_asset[key])
+            for key in sorted(set(commission_by_asset) | set(rebate_by_asset))
+        },
         "reported_realized_pnl_usdt": str(realized_pnl_usdt),
         "realized_pnl_missing_fill_count": missing_realized_pnl,
         "realized_pnl_complete": missing_realized_pnl == 0,
