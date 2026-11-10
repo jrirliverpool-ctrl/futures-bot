@@ -17,7 +17,7 @@ current, reproducible evidence before the first live order.
 | 4. Durable State and Restart Recovery | Local file state is atomic; no durable live backend verified | Demonstrate restart and partial-fill recovery on persistent storage; prove no duplicate submission after UNKNOWN outcomes |
 | 5. Portfolio Risk, Margin, and Circuit Breakers | Local V2 paper engine now enforces aggregate open, pending, and proposed stop-risk against `max_portfolio_risk`; unknown legacy position risk fails closed. Sizing includes round-trip fees and adverse stop slippage. Exchange margin and stress exposure remain unverified | Validate portfolio-wide and stress exposure, forward funding, exchange margin/liquidation distance, and all breaker triggers against current account/contract inputs |
 | 6. Toobit Execution API and Protection | Not approved | Verify the exact order, close, conditional-protection, precision, and error semantics for the account's position mode; verify live SL/TP at exchange |
-| 7. OOS Strategy Validation | NOT APPROVED; 18-month funding is local, Toobit candle history unavailable for the window | The Toobit kline endpoint returned no data for the required 2025-05-10 start; acquire a provenance-backed complete futures candle archive, pin data, calibrate costs, freeze the bootstrap statistic, then run untouched chronological Test data |
+| 7. OOS Strategy Validation | NOT APPROVED; 18-month funding is local, Toobit candle history unavailable for the window | The Toobit kline endpoint returned no data for the required 2025-05-10 start; acquire a provenance-backed complete futures candle archive, pin data, calibrate costs, implement and verify the now-specified bootstrap statistic, then run untouched chronological Test data |
 | 8. Continuous Paper Trading | Not evidenced for the current candidate | At least 14 continuous days, preferably 30, with real market data, persistent state, costs, and no critical reconciliation or accounting gaps |
 | 9. Mock Live and Fault Recovery | Prior results apply to earlier revisions only | Run the complete required failure matrix on this exact candidate and preserve logs/artifacts |
 | 10. Real-account Read-only Preflight and Security | Not run | Repeated read-only balance, position, open-order, fee, and funding reconciliation; verify API permissions, secret handling, and independent kill switch |
@@ -25,7 +25,7 @@ current, reproducible evidence before the first live order.
 ## Current local verification
 
 - Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` was not found in this repository history.
-- Local full test suite: **1190 passed** on Python 3.12 / Windows (`pytest tests`; root discovery also imports an API-key-gated manual script under `scripts/`).
+- Local full test suite: **1194 passed** on Python 3.12 / Windows (`pytest tests`; root discovery also imports an API-key-gated manual script under `scripts/`).
 - Focused hedge/recovery/OOS-cost suite: **169 passed**, including importer validation.
 - `git diff --check`: clean at last run.
 - Candidate branch is local and unpushed; GitHub write access denied branch creation (403), so no remote CI result exists.

@@ -42,12 +42,20 @@ select or retune parameters.
    fees and a fixed slippage percentage. Neither is a measured fee tier for the
    intended Toobit account; bid/ask spread, market impact, and execution delay
    are not represented as observed historical data.
-4. **Protocol statistic is not frozen.** The prior proposal says the bootstrap
-   confidence interval's lower bound must exceed 1 for a net profitability
-   ratio, but it does not define that ratio, the resampling unit, block length,
-   interval level, or treatment of multiple symbols. Freeze these before
-   opening final Test results. Do not interpret a trade-level IID bootstrap as
-   valid without checking serial dependence.
+4. **Protocol statistic is now specified, but its implementation still needs
+   an independently reviewed reference test before the Test window is opened.**
+   The primary ratio is portfolio net profit factor: sum of positive daily
+   portfolio PnL divided by the absolute sum of negative daily portfolio PnL.
+   Build a complete UTC daily series from all three symbols jointly, including
+   zero-PnL days; aggregate symbol PnL before resampling so cross-symbol
+   dependence is retained. Use a circular moving-block bootstrap with fixed
+   seven-calendar-day blocks, 10,000 replicates, and a fixed recorded random
+   seed. The confidence interval is the two-sided 95% percentile interval; its
+   lower bound must be strictly greater than 1. A replicate with no negative
+   PnL has an undefined/infinite ratio and is not silently discarded: if over
+   1% of replicates are non-finite, mark the test inconclusive. The primary
+   result must also have positive cumulative net PnL. Do not bootstrap trades
+   as IID observations.
 5. **Dataset integrity is unproven.** There is no signed manifest here for
    source, retrieval time, gaps, duplicate candles, timezone, contract changes,
    symbol listing history, or exact split boundaries.
@@ -79,9 +87,11 @@ market regimes. Preserve the exact strategy hash, data manifest, split
 boundaries, cost inputs, software revision, raw result, and calculation
 version.
 
-Minimum statistical criteria remain provisional until the statistic in
-Blocker 3 is frozen. In particular, the proposed lower confidence bound > 1
-does not pass until its underlying ratio and bootstrap method are specified.
+The portfolio net-profit-factor definition and bootstrap settings above are
+predeclared. Before opening final Test results, add a deterministic reference
+implementation and hand-calculated fixtures for block boundaries, UTC daily
+aggregation, zero-PnL days, non-finite replicates, and confidence-bound
+selection. Do not change these settings after inspecting Test performance.
 
 ## 5. Decision rule
 
