@@ -1,0 +1,42 @@
+
+name: ApexQuant Toobit Public Contract Snapshot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apexquant-toobit-public-snapshot
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    name: Capture Public ExchangeInfo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Capture Raw ExchangeInfo
+        run: |
+          python scripts/capture_toobit_exchange_info.py \
+            --out-dir artifacts/toobit_exchange_info \
+            --timeout 30
+
+      - name: Upload Snapshot Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apexquant-toobit-exchange-info-snapshot
+          path: artifacts/toobit_exchange_info/
+          if-no-files-found: warn
+          retention-days: 14
