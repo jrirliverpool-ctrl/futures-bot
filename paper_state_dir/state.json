@@ -1,15 +1,15 @@
 {
-  "catchup_lag_candles": 0,
+  "catchup_lag_candles": 21,
   "circuit_breaker_active": false,
   "contract_multiplier": 0.001,
-  "cooldown_until_index": 1793772000000,
+  "cooldown_until_index": 1794182400000,
   "daily_loss": 0.0,
-  "equity": 984.1975754074879,
+  "equity": 983.0368230527768,
   "initial_equity": 971.8365982771752,
-  "last_close_price": 75825.5,
+  "last_close_price": 75046.4,
   "last_funding_ts": null,
-  "last_processed_candle_ts": 1793912400000,
-  "loss_day_key": 20762,
+  "last_processed_candle_ts": 1794272400000,
+  "loss_day_key": 20767,
   "loss_week_key": 2966,
   "peak_equity": 985.3530068842688,
   "pending_entry": null,
@@ -20,5 +20,5 @@
   "strategy_version": "1.1.0",
   "symbol": "BTC-SWAP-USDT",
   "version": "1.0.0",
-  "weekly_loss": 0.0
+  "weekly_loss": 1.1607523547112149
 }
