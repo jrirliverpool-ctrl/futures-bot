@@ -8,9 +8,6 @@ import requests
 API_KEY = os.environ.get("TOOBIT_API_KEY")
 API_SECRET = os.environ.get("TOOBIT_API_SECRET")
 
-if not API_KEY or not API_SECRET:
-    raise SystemExit("❌ API Keys not found in environment variables.")
-
 BASE_URL = "https://api.toobit.com"
 
 def sign(query_string: str) -> str:
@@ -21,6 +18,8 @@ def sign(query_string: str) -> str:
     ).hexdigest()
 
 def private_get(endpoint: str, params: dict = None):
+    if not API_KEY or not API_SECRET:
+        raise RuntimeError("Toobit read-only API keys are not configured")
     if params is None:
         params = {}
     
@@ -52,43 +51,31 @@ def private_get(endpoint: str, params: dict = None):
     except requests.exceptions.RequestException as e:
         return {"error": str(e)}
 
-# --- تست‌ها ---
-tests = []
+def main():
+    if not API_KEY or not API_SECRET:
+        raise SystemExit("Toobit read-only API keys are not configured")
 
-print("🔍 تست اتصال Private API (فقط خواندنی)...")
+    checks = (
+        ("Futures Balance", "/api/v1/futures/balance"),
+        ("Positions", "/api/v1/futures/positions"),
+    )
+    results = []
+    print("Running read-only Toobit account checks...")
+    for name, endpoint in checks:
+        try:
+            response = private_get(endpoint)
+            ok = not (isinstance(response, dict) and "error" in response)
+        except Exception:
+            # Never print raw account data, request URLs, or exception contents.
+            ok = False
+        results.append((name, ok))
+        print(f"{'PASS' if ok else 'FAIL'}: {name}")
 
-# 1. تست موجودی فیوچرز
-try:
-    bal = private_get("/api/v1/futures/balance")
-    if "error" in bal:
-        print(f"❌ Futures Balance Failed: {bal['error']}")
-        tests.append(("Futures Balance", False))
-    else:
-        print(f"✅ Futures Balance: {bal}")
-        tests.append(("Futures Balance", True))
-except Exception as e:
-    print(f"❌ Futures Balance Error: {e}")
-    tests.append(("Futures Balance", False))
+    passed = sum(ok for _, ok in results)
+    print(f"Result: {passed}/{len(results)} read-only checks passed")
+    if passed != len(results):
+        raise SystemExit(1)
 
-# 2. تست پوزیشن‌ها (مسیر صحیح)
-try:
-    pos = private_get("/api/v1/futures/positions")
-    if "error" in pos:
-        print(f"❌ Positions Failed: {pos['error']}")
-        tests.append(("Positions", False))
-    else:
-        print(f"✅ Positions: {pos}")
-        tests.append(("Positions", True))
-except Exception as e:
-    print(f"❌ Positions Error: {e}")
-    tests.append(("Positions", False))
 
-# --- نتیجه نهایی ---
-passed = sum(1 for _, ok in tests if ok)
-print(f"\n🏁 FINAL RESULT: {passed}/{len(tests)} PASSED")
-
-for name, ok in tests:
-    print(f"  {'✅' if ok else '❌'} {name}")
-
-if passed != len(tests):
-    raise SystemExit(1)
+if __name__ == "__main__":
+    main()

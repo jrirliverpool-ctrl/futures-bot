@@ -25,7 +25,7 @@ current, reproducible evidence before the first live order.
 ## Current local verification
 
 - Checkout base: `ac8e18e` (`main`); the earlier short identifier `e1002b6` was not found in this repository history.
-- Local full test suite: **1194 passed** on Python 3.12 / Windows (`pytest tests`; root discovery also imports an API-key-gated manual script under `scripts/`).
+- Local full test suite: **1196 passed** on Python 3.12 / Windows with standard root discovery (`pytest -q`). The read-only account utility is now import-safe and never prints raw account payloads.
 - Focused hedge/recovery/OOS-cost suite: **169 passed**, including importer validation.
 - `git diff --check`: clean at last run.
 - Candidate branch is local and unpushed; GitHub write access denied branch creation (403), so no remote CI result exists.
