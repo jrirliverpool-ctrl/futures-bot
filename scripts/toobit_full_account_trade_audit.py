@@ -45,6 +45,10 @@ from toobit_position_snapshot import (
     PositionSnapshotError,
     fetch_stable_position_snapshot,
 )
+from toobit_commission_rates import (
+    CommissionRateError,
+    fetch_stable_commission_rates,
+)
 
 BALANCE_FLOW_SCOPE = "exchange_queryable_recent_90_days"
 
@@ -300,6 +304,16 @@ def build_report(
         max_pages=max_pages,
     )
 
+    try:
+        commission_rates = {
+            symbol: fetch_stable_commission_rates(client, symbol)
+            for symbol in symbols
+        }
+    except (CommissionRateError, ValueError) as exc:
+        raise AuditError(
+            f"commission_rate_audit_failed:{str(exc)[:120]}"
+        ) from None
+
     all_raw = [
         row
         for symbol in symbols
@@ -389,6 +403,16 @@ def build_report(
             "durable_across_workflow_runs": False,
         },
         "accounting": accounting,
+        "commission_rates": {
+            "endpoint": "/api/v1/futures/commissionRate",
+            "stable_snapshots_verified": True,
+            "by_symbol": commission_rates,
+            "used_for_historical_fill_repricing": False,
+            "note": (
+                "Rates are current account rates for future cost estimates; "
+                "historical fills retain their exchange-reported commissions."
+            ),
+        },
         "balance_flow": {
             "endpoint": "/api/v1/futures/balanceFlow",
             "scope": BALANCE_FLOW_SCOPE,
@@ -502,6 +526,9 @@ def main(argv=None):
             "read_only": True,
             "symbols_checked": report["symbols_checked"],
             "fills": report["accounting"]["fill_count"],
+            "commission_rate_symbols_checked": len(
+                report["commission_rates"]["by_symbol"]
+            ),
             "balance_flow_rows": report["balance_flow"]["row_count"],
             "balance_flow_scope": report["balance_flow"]["scope"],
             "unknown_flow_type_count": (

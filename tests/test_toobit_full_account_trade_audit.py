@@ -338,6 +338,19 @@ def test_build_report_includes_stable_conditional_protection_orders(
         "_read_stable_balance_flow",
         lambda *a, **k: ([], {"known_flow_categories_complete": True}),
     )
+    monkeypatch.setattr(
+        audit,
+        "fetch_stable_commission_rates",
+        lambda client, symbol: {
+            "symbol": symbol,
+            "openMakerFee": "0.0001",
+            "openTakerFee": "0.0002",
+            "closeMakerFee": "0.0001",
+            "closeTakerFee": "0.0002",
+            "round_trip_taker_rate": "0.0004",
+            "stable_snapshot_verified": True,
+        },
+    )
     monkeypatch.setattr(audit, "append_user_trades", lambda *a, **k: (0, 0))
     monkeypatch.setattr(audit, "load_fill_ledger", lambda *a, **k: [])
 
@@ -349,5 +362,49 @@ def test_build_report_includes_stable_conditional_protection_orders(
     assert snapshot["open_algo_orders_snapshot_complete_and_stable"] is True
     assert snapshot["open_algo_orders"] == protective_orders
     assert snapshot["open_algo_order_count"] == 1
+    assert report["commission_rates"]["stable_snapshots_verified"] is True
+    assert report["commission_rates"]["by_symbol"]["BTC-SWAP-USDT"][
+        "round_trip_taker_rate"
+    ] == "0.0004"
     assert report["orders_submitted"] == 0
     assert report["live_authorized"] is False
+
+
+def test_build_report_fails_closed_if_current_fee_rates_are_unavailable(
+    tmp_path, monkeypatch
+):
+    from toobit_commission_rates import CommissionRateError
+
+    monkeypatch.setattr(
+        audit, "fetch_complete_user_trades_v2", lambda *a, **k: []
+    )
+    monkeypatch.setattr(audit, "_read_positions", lambda *a, **k: [])
+    monkeypatch.setattr(audit, "fetch_all_open_orders", lambda *a, **k: [])
+    monkeypatch.setattr(audit, "fetch_all_open_algo_orders", lambda *a, **k: [])
+    monkeypatch.setattr(
+        audit,
+        "_read_stable_balance_flow",
+        lambda *a, **k: ([], {"known_flow_categories_complete": True}),
+    )
+    monkeypatch.setattr(
+        audit,
+        "fetch_stable_commission_rates",
+        lambda *a, **k: (_ for _ in ()).throw(
+            CommissionRateError("fee data unavailable")
+        ),
+    )
+    appended = []
+    monkeypatch.setattr(
+        audit, "append_user_trades", lambda *a, **k: appended.append(True)
+    )
+
+    try:
+        audit.build_report(
+            object(), ["BTC-SWAP-USDT"], tmp_path / "ledger.jsonl"
+        )
+    except audit.AuditError as exc:
+        assert "commission_rate_audit_failed" in str(exc)
+    else:
+        assert False, "missing current fee rates must fail closed"
+
+    assert appended == []
