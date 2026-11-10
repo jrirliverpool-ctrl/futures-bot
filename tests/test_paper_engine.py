@@ -144,6 +144,36 @@ def test_position_size_valid():
     assert abs(qty - 13.3333) < 1e-6
 
 
+def test_position_size_accounts_for_round_trip_fees_and_stop_slippage():
+    gross_only_qty = calculate_position_size(
+        1000.0, 85000.0, 84250.0, SPECS, 0.01,
+    )
+    net_cost_qty = calculate_position_size(
+        1000.0,
+        85000.0,
+        84250.0,
+        SPECS,
+        0.01,
+        entry_fee_rate=0.0005,
+        exit_fee_rate=0.0005,
+        exit_slippage_rate=0.0005,
+    )
+    assert gross_only_qty is not None
+    assert net_cost_qty is not None
+    assert net_cost_qty < gross_only_qty
+
+
+def test_position_size_rejects_invalid_cost_assumptions():
+    assert calculate_position_size(
+        1000.0,
+        85000.0,
+        84250.0,
+        SPECS,
+        0.01,
+        exit_slippage_rate=1.0,
+    ) is None
+
+
 def test_position_size_below_min():
     qty = calculate_position_size(
         0.001,

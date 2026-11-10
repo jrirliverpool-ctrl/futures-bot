@@ -47,7 +47,46 @@ def compute_initial_levels(entry_price, atr_at_signal, side, config):
     if side == "SHORT": return entry_price + sl_dist, entry_price - tp_dist
     raise ValueError(f"Invalid side: {side}")
 
-def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trade, leverage=None, leverage_cap=None):
+def _estimated_stop_loss_per_contract(
+    entry_price,
+    stop_loss,
+    multiplier,
+    entry_fee_rate=0.0,
+    exit_fee_rate=0.0,
+    exit_slippage_rate=0.0,
+):
+    """Estimate stop loss including round-trip fees and adverse stop slippage."""
+    rates = (entry_fee_rate, exit_fee_rate, exit_slippage_rate)
+    if any(not _is_finite_number(rate) or rate < 0 for rate in rates):
+        return None
+    if exit_slippage_rate >= 1:
+        return None
+    if stop_loss < entry_price:
+        stop_execution = stop_loss * (1 - exit_slippage_rate)
+    else:
+        stop_execution = stop_loss * (1 + exit_slippage_rate)
+    entry_notional = entry_price * multiplier
+    exit_notional = stop_execution * multiplier
+    gross_loss = abs(entry_price - stop_execution) * multiplier
+    return (
+        gross_loss
+        + entry_notional * entry_fee_rate
+        + exit_notional * exit_fee_rate
+    )
+
+
+def calculate_position_size(
+    equity,
+    entry_price,
+    stop_loss,
+    specs,
+    risk_per_trade,
+    leverage=None,
+    leverage_cap=None,
+    entry_fee_rate=0.0,
+    exit_fee_rate=0.0,
+    exit_slippage_rate=0.0,
+):
     if not (_is_finite_number(equity) and _is_finite_number(entry_price) and _is_finite_number(stop_loss) and _is_finite_number(risk_per_trade)):
         return None
     if equity <= 0 or entry_price <= 0 or stop_loss <= 0 or risk_per_trade <= 0: return None
@@ -62,6 +101,15 @@ def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trad
     if stop_distance <= 0: return None
     multiplier = specs.get("contract_multiplier")
     if not _is_finite_number(multiplier) or multiplier <= 0: return None
+    loss_per_contract = _estimated_stop_loss_per_contract(
+        entry_price,
+        stop_loss,
+        multiplier,
+        entry_fee_rate,
+        exit_fee_rate,
+        exit_slippage_rate,
+    )
+    if loss_per_contract is None or loss_per_contract <= 0: return None
     qty_step = specs.get("qty_step")
     min_qty = specs.get("min_qty")
     max_qty = specs.get("max_qty")
@@ -69,7 +117,7 @@ def calculate_position_size(equity, entry_price, stop_loss, specs, risk_per_trad
     if not _is_finite_number(min_qty) or min_qty < 0: return None
     if not _is_finite_number(max_qty) or max_qty <= 0: return None
     risk_dollars = equity * risk_per_trade
-    qty_raw = risk_dollars / (stop_distance * multiplier)
+    qty_raw = risk_dollars / loss_per_contract
     qty = floor_to_step(qty_raw, qty_step)
     if leverage_cap is not None and leverage_cap > 0:
         max_notional = equity * leverage_cap
@@ -133,7 +181,17 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
             events.append({"type": "ENTRY_REJECTED", "reason": "leverage_exceeds_cap", "timestamp": ts})
             state["pending_entry"] = None
             return state, events
-    qty = calculate_position_size(state["equity"], entry_price, sl, specs, config["risk_per_trade"], leverage=lev, leverage_cap=lev_cap)
+    open_fee_rate = config.get("open_taker_fee", 0.0)
+    close_fee_rate = config.get("close_taker_fee", 0.0)
+    exit_slippage_rate = config.get("slippage_pct", 0.0)
+    qty = calculate_position_size(
+        state["equity"], entry_price, sl, specs,
+        config["risk_per_trade"], leverage=lev,
+        leverage_cap=lev_cap,
+        entry_fee_rate=open_fee_rate,
+        exit_fee_rate=close_fee_rate,
+        exit_slippage_rate=exit_slippage_rate,
+    )
     if qty is None:
         events.append({"type": "ENTRY_REJECTED", "reason": "invalid_size", "timestamp": ts})
         state["pending_entry"] = None
@@ -152,7 +210,15 @@ def execute_pending_entry(state, candle, specs, config, execution_callback=None)
     entry_notional = qty * entry_price * multiplier
     entry_commission = entry_notional * config.get("open_taker_fee", 0.0)
     state["equity"] -= entry_commission
-    risk_usd = qty * abs(entry_price - sl) * multiplier
+    loss_per_contract = _estimated_stop_loss_per_contract(
+        entry_price,
+        sl,
+        multiplier,
+        open_fee_rate,
+        close_fee_rate,
+        exit_slippage_rate,
+    )
+    risk_usd = qty * loss_per_contract
     state["position"] = {
         "side": side, "entry_price": entry_price, "entry_candle_ts": ts,
         "size": qty, "remaining_size": qty, "tp1_size": 0.0,
