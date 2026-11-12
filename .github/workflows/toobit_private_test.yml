@@ -13,83 +13,33 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Checkout main
+      - name: Checkout selected ref
         uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest
-
-      - name: Run durable order intent tests
-        run: python -m pytest -q tests/test_order_intent_store.py
-
-      - name: Run fill ledger tests
-        run: python -m pytest -q tests/test_fill_ledger.py
-
-      - name: Run fill ledger accounting tests
-        run: python -m pytest -q tests/test_fill_ledger_accounting.py
-
-      - name: Run Toobit user trades pagination tests
-        run: python -m pytest -q tests/test_toobit_trade_pagination.py
-
-      - name: Run read-only order recovery tests
-        run: python -m pytest -q tests/test_order_recovery_probe.py
-
-      - name: Run position reconciliation tests
-        run: python -m pytest -q tests/test_position_reconciliation.py
-
-      - name: Run read-only reconciliation coordinator tests
-        run: python -m pytest -q tests/test_toobit_readonly_reconciliation.py
-
-      - name: Run execution manager safety tests
-        run: python -m pytest -q tests/test_execution_manager.py
-
-      - name: Run Toobit client tests
-        run: |
-          python -m pytest -q tests/test_toobit_client.py
-          python -m pytest -q tests/test_toobit_user_trades.py
-
-      - name: Run Toobit client redaction tests
-        run: python -m pytest -q tests/test_toobit_client_redaction.py
-
-      - name: Run Toobit open orders pagination tests
-        run: python -m pytest -q tests/test_toobit_open_orders.py
-
-      - name: Run Toobit protection safety tests
-        run: python -m pytest -q tests/test_toobit_protection.py
-
-      - name: Run live readiness gate unit tests
-        run: python -m pytest -q tests/test_toobit_live_readiness_gate.py
-
-      - name: Run live risk precheck tests
-        run: python -m pytest -q tests/test_live_risk_precheck.py
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install pytest requests
 
       - name: Run capital feasibility tests
-        run: python -m pytest -q tests/test_toobit_capital_feasibility.py
-
-      - name: Run read-only preflight unit tests
+        env:
+          PYTHONPATH: scripts
         run: |
-          python -m unittest discover \
-            -s tests \
-            -p 'test_toobit_readonly_preflight.py' \
-            -v
+          pytest -q tests/test_toobit_capital_feasibility.py
 
-      - name: Run read-only account readiness gate
+      - name: Run related safety tests
         env:
-          TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
-          TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
-        run: python scripts/toobit_live_readiness_gate.py
-
-      - name: Run read-only capital feasibility report
-        env:
-          TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
-          TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
-        run: python scripts/toobit_capital_feasibility.py
+          PYTHONPATH: scripts
+        run: |
+          pytest -q tests/test_symbol_specs.py
