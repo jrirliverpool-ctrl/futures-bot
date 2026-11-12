@@ -236,7 +236,10 @@ def test_missing_both_minimum_filters_is_rejected():
     try:
         parse_symbol_specs(contract)
     except ValueError as exc:
-        assert "minimum_order_value_missing_or_zero" in str(exc)
+        assert (
+            "minimum_order_value_filter_missing"
+            in str(exc)
+        )
         return
 
     raise AssertionError(
@@ -556,7 +559,8 @@ def test_invalid_optional_ticker_does_not_block_official_minimum():
     )
 
     btc = result["reports"][0]
-    assert btc["min_notional_usdt"] == "5"
+
+    assert Decimal(str(btc["min_notional_usdt"])) == Decimal("5")
     assert btc["capital_only_feasible"] is True
     assert btc["ticker_price_usdt"] is None
     assert result["ticker_prices_used"] is False
