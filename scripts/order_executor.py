@@ -101,6 +101,15 @@ def _validate_specs(specs: dict) -> Decision | None:
         if not math.isfinite(mn) or mn < 0:
             return _reject("specs", "min_notional negative")
 
+    if (
+        specs.get("min_notional_verified") is True
+        and (mn is None or mn <= 0)
+    ):
+        return _reject(
+            "specs",
+            "verified_min_notional_must_be_positive",
+        )
+
     return None
 
 
@@ -179,6 +188,18 @@ def _validate_notional(
     specs: dict,
     ref_price: float,
 ) -> Decision | None:
+
+    # Exchange minimum notional is an ENTRY constraint.
+    # Never block EXIT or partial risk reduction because of it.
+    if req.intent != "ENTRY":
+        return None
+
+    # An estimate is not an exchange-confirmed trading rule.
+    if specs.get("min_notional_verified") is False:
+        return _reject(
+            "notional",
+            "minimum_order_value_unverified",
+        )
 
     min_notional = specs.get("min_notional", 0.0)
 
