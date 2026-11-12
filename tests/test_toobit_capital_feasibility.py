@@ -11,6 +11,7 @@ sys.path.insert(
 from symbol_specs import parse_symbol_specs
 from toobit_capital_feasibility import (
     evaluate_capital_feasibility,
+    resolve_specs,
 )
 
 
@@ -498,3 +499,65 @@ def test_missing_account_leverage_coverage_is_rejected():
     raise AssertionError(
         "missing leverage coverage should fail closed"
     )
+
+
+def test_missing_official_minimum_uses_rounded_lot_quantity_estimate():
+    contract = make_contract("BTC-SWAP-USDT")
+    contract["filters"] = [
+        item for item in contract["filters"]
+        if item["filterType"] != "MIN_NOTIONAL"
+    ]
+
+    specs = resolve_specs(contract, "BTC-SWAP-USDT", "100")
+
+    assert specs["min_notional_verified"] is False
+    assert specs["min_notional_is_estimate"] is True
+    assert Decimal(str(specs["min_notional"])) == Decimal("0.100")
+
+
+def test_estimate_rounds_minimum_token_quantity_up_to_step():
+    contract = make_contract("BTC-SWAP-USDT")
+    lot = next(
+        item for item in contract["filters"]
+        if item["filterType"] == "LOT_SIZE"
+    )
+    lot["minQty"] = "0.0015"
+    lot["stepSize"] = "0.001"
+
+    contract["filters"] = [
+        item for item in contract["filters"]
+        if item["filterType"] != "MIN_NOTIONAL"
+    ]
+
+    specs = resolve_specs(contract, "BTC-SWAP-USDT", "100")
+
+    assert Decimal(str(specs["min_qty_token"])) == Decimal("0.0015")
+    assert Decimal(str(specs["min_notional"])) == Decimal("0.200")
+
+
+def test_official_minimum_does_not_require_ticker_price():
+    specs = resolve_specs(
+        make_contract("BTC-SWAP-USDT", min_notional="5"),
+        "BTC-SWAP-USDT",
+        None,
+    )
+
+    assert specs["min_notional_verified"] is True
+    assert specs["min_notional_is_estimate"] is False
+    assert specs["min_notional"] == 5
+
+
+def test_invalid_optional_ticker_does_not_block_official_minimum():
+    result = evaluate_capital_feasibility(
+        make_snapshot(),
+        make_exchange_info(),
+        SYMBOLS,
+        prices={"BTC-SWAP-USDT": "not-a-price"},
+    )
+
+    btc = result["reports"][0]
+    assert btc["min_notional_usdt"] == "5"
+    assert btc["capital_only_feasible"] is True
+    assert btc["ticker_price_usdt"] is None
+    assert result["ticker_prices_used"] is False
+    assert result["ticker_prices_received"] is True
