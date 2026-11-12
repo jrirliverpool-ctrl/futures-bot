@@ -6,11 +6,11 @@
   "daily_loss": 0.0,
   "equity": 981.9244006224319,
   "initial_equity": 971.8365982771752,
-  "last_close_price": 74359.9,
+  "last_close_price": 73779.8,
   "last_funding_ts": null,
-  "last_processed_candle_ts": 1794430800000,
-  "loss_day_key": 20768,
-  "loss_week_key": 2966,
+  "last_processed_candle_ts": 1794448800000,
+  "loss_day_key": 20769,
+  "loss_week_key": 2967,
   "peak_equity": 985.3530068842688,
   "pending_entry": null,
   "pending_events": [],
@@ -20,5 +20,5 @@
   "strategy_version": "1.1.0",
   "symbol": "BTC-SWAP-USDT",
   "version": "1.0.0",
-  "weekly_loss": 2.27317478505615
+  "weekly_loss": 0.0
 }
