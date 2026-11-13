@@ -1,0 +1,56 @@
+
+name: ApexQuant Portfolio Risk Regression
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apexquant-portfolio-risk-tests
+  cancel-in-progress: false
+
+jobs:
+  portfolio-risk-tests:
+    name: Portfolio Risk and Callback Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          fi
+          python -m pip install pytest requests
+
+      - name: Test V2 state manager
+        run: |
+          python -m pytest -q tests/test_state_manager_v2.py
+
+      - name: Test V2 portfolio risk
+        run: |
+          python -m pytest -q tests/test_portfolio_risk.py
+
+      - name: Test callback decision propagation
+        run: |
+          python -m pytest -q tests/test_callback_decision_propagation.py
+
+      - name: Test V2 paper engine
+        run: |
+          python -m pytest -q tests/test_paper_engine_v2.py
+
+      - name: Test multi-symbol runner
+        run: |
+          python -m pytest -q tests/test_run_multi_symbol.py
