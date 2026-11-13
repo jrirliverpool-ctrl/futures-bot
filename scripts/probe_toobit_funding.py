@@ -1,6 +1,5 @@
 
-"""Read-only Toobit funding history probe with centralized quality analysis."""
-
+"""Read-only Toobit funding history probe with explicit backtest eligibility."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.funding_quality import analyze_funding_records
+from src.funding_quality import (
+    DEFAULT_MIN_INTERNAL_COVERAGE,
+    analyze_funding_records,
+    assess_backtest_eligibility,
+)
 
 BASE_URL = "https://api.toobit.com"
 FUNDING_PATH = "/api/v1/futures/historyFundingRate"
@@ -106,12 +109,19 @@ def fetch_page(
 
 
 def analyze_pagination(pages, ids, items):
-    counts = Counter(ids)
+    counts = Counter(
+        value for value in ids if value is not None
+    )
+
     duplicates = {
         str(key): count
         for key, count in counts.items()
         if count > 1
     }
+
+    missing_ids = sum(
+        value is None for value in ids
+    )
 
     timestamps = []
 
@@ -123,7 +133,9 @@ def analyze_pagination(pages, ids, items):
         records = result["backtest_records"]
 
         if records:
-            timestamps.append(records[0]["settle_time_ms"])
+            timestamps.append(
+                records[0]["settle_time_ms"]
+            )
 
     ascending = (
         timestamps == sorted(timestamps)
@@ -135,10 +147,10 @@ def analyze_pagination(pages, ids, items):
         if timestamps else None
     )
 
-    # A single page does not prove cursor semantics.
-    verified = (
+    verified = bool(
         len(pages) >= 2
         and not duplicates
+        and missing_ids == 0
         and (ascending or descending)
         and all(page.get("ok") for page in pages)
     )
@@ -146,6 +158,7 @@ def analyze_pagination(pages, ids, items):
     return {
         "pages_fetched": len(pages),
         "duplicate_ids": duplicates,
+        "missing_ids": missing_ids,
         "source_order_ascending": ascending,
         "source_order_descending": descending,
         "pagination_verified": verified,
@@ -163,6 +176,13 @@ def main(argv=None):
     parser.add_argument("--max-seconds", type=float, default=120)
     parser.add_argument("--sleep-between", type=float, default=0.5)
     parser.add_argument("--configured-period-hours", type=float)
+
+    parser.add_argument(
+        "--min-internal-coverage",
+        type=float,
+        default=DEFAULT_MIN_INTERNAL_COVERAGE,
+    )
+
     parser.add_argument("--out", required=True)
 
     args = parser.parse_args(argv)
@@ -173,6 +193,11 @@ def main(argv=None):
     if args.max_seconds <= 0 or args.sleep_between < 0:
         parser.error("invalid timing arguments")
 
+    if not 0 <= args.min_internal_coverage <= 100:
+        parser.error(
+            "min-internal-coverage must be between 0 and 100"
+        )
+
     url = BASE_URL + FUNDING_PATH
     deadline = time.monotonic() + args.max_seconds
 
@@ -180,6 +205,7 @@ def main(argv=None):
     ids = []
     pages = []
     errors = []
+
     cursor = None
     endpoint_ok = False
     pagination_stopped_safely = True
@@ -189,6 +215,7 @@ def main(argv=None):
 
     try:
         for page_number in range(1, args.max_pages + 1):
+
             if time.monotonic() >= deadline:
                 stop_reason = "max_seconds_reached"
                 pagination_stopped_safely = False
@@ -202,20 +229,19 @@ def main(argv=None):
                 limit=args.limit,
             )
 
-            page_info = {
+            pages.append({
                 "page": page_number,
                 "http_status": result["http_status"],
                 "request_url": result["request_url"],
                 "items_returned": (
                     len(result["items"])
-                    if result["items"] is not None else None
+                    if result["items"] is not None
+                    else None
                 ),
                 "error": result["error"],
                 "ok": result["ok"],
                 "response_json_raw": result["response_json_raw"],
-            }
-
-            pages.append(page_info)
+            })
 
             if not result["ok"]:
                 errors.append({
@@ -235,8 +261,7 @@ def main(argv=None):
 
             for item in items:
                 raw_items.append(item)
-                item_id = extract_item_id(item)
-                ids.append(item_id)
+                ids.append(extract_item_id(item))
 
             if len(items) < args.limit:
                 stop_reason = "last_page"
@@ -273,51 +298,30 @@ def main(argv=None):
         raw_items,
     )
 
-    inv = quality["record_counts"]
-
-    no_invalid_records = (
-        inv["invalid_timestamps"] == 0
-        and inv["invalid_rates"] == 0
-        and inv["invalid_records"] == 0
-    )
-
-    no_conflicting_duplicates = (
-        inv["conflicting_timestamps"] == 0
-    )
-
-    period_known = quality["period"]["hours"] is not None
-
-    no_irregular_intervals = (
-        quality["coverage"]["irregular_intervals"] == 0
-    )
-
-    # Aligned missing settlements are reported but do not invalidate
-    # all otherwise usable historical records.
-    data_quality_usable = bool(
-        endpoint_ok
-        and quality["record_counts"]["unique_settlements"] > 0
-        and period_known
-        and no_invalid_records
-        and no_conflicting_duplicates
-        and no_irregular_intervals
-    )
-
-    # Pagination completeness is separate from data usability.
-    collection_complete = (
+    collection_complete = bool(
         stop_reason in {"last_page", "empty_page"}
         and not errors
         and pagination_stopped_safely
     )
 
+    eligibility = assess_backtest_eligibility(
+        quality,
+        endpoint_ok=endpoint_ok,
+        collection_complete=collection_complete,
+        min_internal_coverage=args.min_internal_coverage,
+    )
+
     report = {
-        "probe_version": "2.0",
+        "probe_version": "3.0",
         "symbol": args.symbol,
         "target_url": url,
         "fetched_at_iso": datetime.now(
             timezone.utc
         ).isoformat(),
         "endpoint_ok": endpoint_ok,
-        "data_quality_usable": data_quality_usable,
+        "data_quality_usable": quality["data_quality_usable"],
+        "backtest_eligible": eligibility["backtest_eligible"],
+        "backtest_eligibility": eligibility,
         "collection_complete": collection_complete,
         "pagination": {
             **pagination,
@@ -346,9 +350,11 @@ def main(argv=None):
     print(json.dumps({
         "symbol": args.symbol,
         "endpoint_ok": endpoint_ok,
-        "data_quality_usable": data_quality_usable,
+        "data_quality_usable": quality["data_quality_usable"],
+        "backtest_eligible": eligibility["backtest_eligible"],
+        "eligibility_reasons": eligibility["reasons"],
         "collection_complete": collection_complete,
-        "records": inv["unique_settlements"],
+        "records": quality["record_counts"]["unique_settlements"],
         "period": quality["period"],
         "coverage": quality["coverage"],
         "status": quality["status"],
@@ -356,17 +362,9 @@ def main(argv=None):
         "report": str(output),
     }, ensure_ascii=False, indent=2))
 
-    if not endpoint_ok:
-        return 1
-
-    if not data_quality_usable:
-        return 2
-
-    # Incomplete pagination must not silently appear as full history.
-    if not collection_complete:
-        return 3
-
-    return 0
+    # Ineligibility is an audit result, not a probe execution failure.
+    # Only endpoint failure returns non-zero.
+    return 0 if endpoint_ok else 1
 
 
 if __name__ == "__main__":
