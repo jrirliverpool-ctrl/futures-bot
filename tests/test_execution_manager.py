@@ -17,12 +17,15 @@ from order_intent_store import (
 )
 
 
+# Test-only specifications.
+# These values are synthetic and must never be used for live exchange trading.
 SPECS = {
     "contract_multiplier": 0.001,
     "min_qty": 0.1,
     "max_qty": 100.0,
     "qty_step": 0.1,
-    "min_notional": 0.0,
+    "min_notional": 0.01,
+    "min_notional_verified": True,
     "tick_size": 0.1,
     "max_leverage": 10,
 }
