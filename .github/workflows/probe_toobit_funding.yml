@@ -1,31 +1,81 @@
+
 name: Probe Toobit Funding
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 35
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
-      - name: Run funding probe
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Probe all futures symbols
+        shell: bash
         run: |
           mkdir -p reports
-          python scripts/probe_toobit_funding.py \
-            --symbol BTC-SWAP-USDT \
-            --limit 100 \
-            --max-pages 5 \
-            --out reports/probe_toobit_funding.json
-      - name: Upload funding probe report
+
+          failures=0
+
+          symbols=(
+            ADA-SWAP-USDT
+            AVAX-SWAP-USDT
+            BNB-SWAP-USDT
+            BTC-SWAP-USDT
+            DOGE-SWAP-USDT
+            DOT-SWAP-USDT
+            ETH-SWAP-USDT
+            LINK-SWAP-USDT
+            SOL-SWAP-USDT
+            XRP-SWAP-USDT
+          )
+
+          for symbol in "${symbols[@]}"; do
+            echo "========================================"
+            echo "Funding probe: ${symbol}"
+            echo "========================================"
+
+            python scripts/probe_toobit_funding.py \
+              --symbol "$symbol" \
+              --limit 1000 \
+              --max-pages 5 \
+              --max-seconds 120 \
+              --sleep-between 0.5 \
+              --out "reports/funding_${symbol}.json"
+
+            result=$?
+
+            if [ "$result" -ne 0 ]; then
+              echo "Probe failed for ${symbol}"
+              failures=$((failures + 1))
+            fi
+          done
+
+          echo "Probe failures: ${failures}"
+
+          if [ "$failures" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload funding reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: probe-toobit-funding
-          path: reports/probe_toobit_funding.json
+          name: toobit-funding-all-symbols
+          path: reports/funding_*.json
           if-no-files-found: warn
           retention-days: 30
