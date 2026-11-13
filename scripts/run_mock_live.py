@@ -1,4 +1,3 @@
-
 import json
 import os
 import sys
@@ -366,7 +365,9 @@ def main() -> int:
             ),
         )
 
-        return decision.accepted
+        # Preserve the complete Decision object.
+        # paper_engine.py extracts accepted, reason and gate.
+        return decision
 
     try:
         print("=" * 70)
