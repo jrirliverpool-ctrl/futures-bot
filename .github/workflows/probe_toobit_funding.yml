@@ -9,10 +9,17 @@ on:
         required: true
         default: "10"
         type: string
+
       page_limit:
         description: "Records per API page"
         required: true
         default: "1000"
+        type: string
+
+      min_internal_coverage:
+        description: "Minimum internal funding coverage required for backtest eligibility (%)"
+        required: true
+        default: "99.5"
         type: string
 
 permissions:
@@ -48,12 +55,15 @@ jobs:
         env:
           MAX_PAGES: ${{ inputs.max_pages }}
           PAGE_LIMIT: ${{ inputs.page_limit }}
+          MIN_COVERAGE: ${{ inputs.min_internal_coverage }}
         run: |
           python - <<'PY'
+          import math
           import os
 
           max_pages = int(os.environ["MAX_PAGES"])
           page_limit = int(os.environ["PAGE_LIMIT"])
+          min_coverage = float(os.environ["MIN_COVERAGE"])
 
           if not 1 <= max_pages <= 100:
               raise SystemExit(
@@ -65,8 +75,17 @@ jobs:
                   "page_limit must be between 1 and 1000"
               )
 
+          if (
+              not math.isfinite(min_coverage)
+              or not 0 <= min_coverage <= 100
+          ):
+              raise SystemExit(
+                  "min_internal_coverage must be between 0 and 100"
+              )
+
           print(f"max_pages={max_pages}")
           print(f"page_limit={page_limit}")
+          print(f"min_internal_coverage={min_coverage}")
           PY
 
       - name: Run funding quality tests
@@ -82,6 +101,7 @@ jobs:
         env:
           MAX_PAGES: ${{ inputs.max_pages }}
           PAGE_LIMIT: ${{ inputs.page_limit }}
+          MIN_COVERAGE: ${{ inputs.min_internal_coverage }}
         run: |
           set +e
 
@@ -98,7 +118,8 @@ jobs:
             XRP-SWAP-USDT
           )
 
-          failures=0
+          endpoint_failures=0
+          ineligible_symbols=()
 
           for symbol in "${symbols[@]}"; do
             echo "::group::Funding probe: ${symbol}"
@@ -107,22 +128,34 @@ jobs:
               --symbol "${symbol}" \
               --limit "${PAGE_LIMIT}" \
               --max-pages "${MAX_PAGES}" \
+              --min-internal-coverage "${MIN_COVERAGE}" \
               --out "reports/funding/${symbol}.json"
 
             exit_code=$?
 
             if [ "${exit_code}" -ne 0 ]; then
-              echo "::error::Funding probe failed for ${symbol}; exit code ${exit_code}"
-              failures=$((failures + 1))
+              echo "::error::Funding endpoint probe failed for ${symbol}; exit code ${exit_code}"
+              endpoint_failures=$((endpoint_failures + 1))
+
+            elif ! python -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("backtest_eligible") else 1)' \
+              "reports/funding/${symbol}.json"; then
+
+              ineligible_symbols+=("${symbol}")
+
+              echo "::warning::${symbol} is not backtest-eligible; see its report reasons."
             fi
 
             echo "::endgroup::"
           done
 
-          echo "failures=${failures}" >> "${GITHUB_OUTPUT}"
+          echo "endpoint_failures=${endpoint_failures}" >> "${GITHUB_OUTPUT}"
+          echo "ineligible_count=${#ineligible_symbols[@]}" >> "${GITHUB_OUTPUT}"
 
-          if [ "${failures}" -ne 0 ]; then
-            echo "::error::${failures} funding probe(s) failed quality or collection checks."
+          printf 'ineligible_symbols=%s\n' \
+            "${ineligible_symbols[*]}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${endpoint_failures}" -ne 0 ]; then
+            echo "::error::${endpoint_failures} funding endpoint probe(s) failed."
             exit 1
           fi
 
@@ -150,6 +183,9 @@ jobs:
 
                   quality = data.get("quality") or {}
                   counts = quality.get("record_counts") or {}
+                  eligibility = (
+                      data.get("backtest_eligibility") or {}
+                  )
 
                   reports.append({
                       "file": path.name,
@@ -157,6 +193,18 @@ jobs:
                       "endpoint_ok": data.get("endpoint_ok"),
                       "data_quality_usable": data.get(
                           "data_quality_usable"
+                      ),
+                      "backtest_eligible": data.get(
+                          "backtest_eligible"
+                      ),
+                      "eligibility_reasons": eligibility.get(
+                          "reasons", []
+                      ),
+                      "eligibility_scope": eligibility.get(
+                          "eligibility_scope"
+                      ),
+                      "historical_boundary_known": eligibility.get(
+                          "historical_boundary_known"
                       ),
                       "collection_complete": data.get(
                           "collection_complete"
@@ -176,15 +224,35 @@ jobs:
                   reports.append({
                       "file": path.name,
                       "report_read_error": str(exc),
+                      "backtest_eligible": False,
                   })
 
+          eligible_count = sum(
+              item.get("backtest_eligible") is True
+              for item in reports
+          )
+
+          ineligible = [
+              item.get("symbol", item.get("file"))
+              for item in reports
+              if item.get("backtest_eligible") is not True
+          ]
+
           summary = {
-              "schema_version": "1.0",
+              "schema_version": "2.0",
               "report_count": len(reports),
+              "backtest_eligible_count": eligible_count,
+              "backtest_ineligible_count": len(ineligible),
+              "backtest_ineligible_symbols": ineligible,
               "status": (
                   "reports_available"
                   if reports
                   else "no_symbol_reports_generated"
+              ),
+              "important_note": (
+                  "Eligibility applies only to the observed internal "
+                  "history when historical_boundary_known is false; "
+                  "it does not prove full contract history."
               ),
               "reports": reports,
           }
