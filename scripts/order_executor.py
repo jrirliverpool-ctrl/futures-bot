@@ -189,22 +189,30 @@ def _validate_notional(
     ref_price: float,
 ) -> Decision | None:
 
-    # Exchange minimum notional is an ENTRY constraint.
+    # Exchange minimum notional is an ENTRY constraint only.
     # Never block EXIT or partial risk reduction because of it.
     if req.intent != "ENTRY":
         return None
 
-    # An estimate is not an exchange-confirmed trading rule.
-    if specs.get("min_notional_verified") is False:
+    # Missing, false, or malformed verification is NOT approval.
+    # Only an explicit True from the official contract-spec parser
+    # allows a new entry to proceed to the notional calculation.
+    if specs.get("min_notional_verified") is not True:
         return _reject(
             "notional",
             "minimum_order_value_unverified",
         )
 
-    min_notional = specs.get("min_notional", 0.0)
+    min_notional = specs.get("min_notional")
 
-    if min_notional <= 0:
-        return None
+    if (
+        not _is_finite_number(min_notional)
+        or min_notional <= 0
+    ):
+        return _reject(
+            "notional",
+            "verified_min_notional_must_be_positive",
+        )
 
     price = req.price if req.price is not None else ref_price
 
