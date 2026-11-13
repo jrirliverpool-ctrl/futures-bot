@@ -38,11 +38,13 @@ jobs:
         run: |
           pytest -q tests/test_toobit_capital_feasibility.py
 
-      - name: Run related read-only and risk safety tests
+      - name: Run read-only, risk, order and execution safety tests
         env:
           PYTHONPATH: scripts
         run: |
           pytest -q \
             tests/test_toobit_readonly_preflight.py \
             tests/test_live_risk_precheck.py \
-            tests/test_toobit_live_readiness_gate.py
+            tests/test_toobit_live_readiness_gate.py \
+            tests/test_order_executor.py \
+            tests/test_execution_manager.py
