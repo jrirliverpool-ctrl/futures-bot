@@ -88,9 +88,9 @@ def precheck_order(
         if contract_specs.get("status") != "TRADING":
             raise RiskInputError("contract_not_trading")
 
-        # Do not treat a locally estimated minimum as an official
-        # exchange-confirmed minimum for a new entry.
-        if contract_specs.get("min_notional_verified") is False:
+        # A new entry requires explicit exchange-confirmed minimum value.
+        # Missing verification is treated exactly like failed verification.
+        if contract_specs.get("min_notional_verified") is not True:
             raise RiskInputError("min_notional_unverified")
 
         entry = positive(entry_price, "entry_price")
