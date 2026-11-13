@@ -1,4 +1,3 @@
-
 import copy
 import json
 import logging
@@ -396,11 +395,11 @@ def process_symbol_candle(
                 return False
 
         if execution_callback is not None:
-            return bool(
-                execution_callback(
-                    info,
-                    state_ref,
-                )
+            # Do not coerce Decision-like objects to bool.
+            # V1 paper_engine needs accepted/reason/gate.
+            return execution_callback(
+                info,
+                state_ref,
             )
 
         return True
