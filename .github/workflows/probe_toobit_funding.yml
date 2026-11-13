@@ -10,7 +10,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
       - name: Checkout repository
@@ -19,10 +19,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest
+
+      - name: Run funding quality tests
+        run: |
+          python -m pytest -q tests/test_funding_quality.py
 
       - name: Probe all futures symbols
         shell: bash
@@ -60,12 +66,18 @@ jobs:
             result=$?
 
             if [ "$result" -ne 0 ]; then
-              echo "Probe failed for ${symbol}"
+              echo "FAILED: ${symbol}, exit=${result}"
               failures=$((failures + 1))
+            else
+              echo "SUCCESS: ${symbol}"
             fi
           done
 
-          echo "Probe failures: ${failures}"
+          echo "========================================"
+          echo "Funding probe failures: ${failures}"
+          echo "========================================"
+
+          echo "failures=${failures}" >> "$GITHUB_ENV"
 
           if [ "$failures" -gt 0 ]; then
             exit 1
@@ -75,7 +87,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: toobit-funding-all-symbols
+          name: toobit-funding-quality-v2
           path: reports/funding_*.json
           if-no-files-found: warn
           retention-days: 30
