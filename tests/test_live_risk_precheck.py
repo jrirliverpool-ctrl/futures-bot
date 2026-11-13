@@ -19,6 +19,7 @@ def specs(**overrides):
         "max_qty": "100",
         "qty_step": "0.001",
         "min_notional": "5",
+        "min_notional_verified": True,
         "max_leverage": "20",
     }
     result.update(overrides)
@@ -44,38 +45,67 @@ def run(**overrides):
 
 def test_valid_order_respects_risk_and_margin():
     result = run()
+
     assert result["eligible"] is True
     assert result["orders_submitted"] == 0
     assert float(result["estimated_stop_loss_and_cost_usdt"]) <= 1.0
     assert float(result["margin_utilization"]) <= 0.50
 
 
+def test_missing_minimum_verification_is_rejected():
+    contract_specs = specs()
+    contract_specs.pop("min_notional_verified")
+
+    result = run(contract_specs=contract_specs)
+
+    assert result["eligible"] is False
+    assert "min_notional_unverified" in result["blockers"]
+    assert result["orders_submitted"] == 0
+
+
+def test_false_minimum_verification_is_rejected():
+    result = run(
+        contract_specs=specs(min_notional_verified=False)
+    )
+
+    assert result["eligible"] is False
+    assert "min_notional_unverified" in result["blockers"]
+
+
 def test_small_wallet_cannot_force_minimum_quantity():
     result = run(available_usdt="1")
+
     assert result["eligible"] is False
     assert result["orders_submitted"] == 0
 
 
 def test_long_stop_must_be_below_entry():
     result = run(stop_price="61000")
+
     assert result["eligible"] is False
     assert "long_stop_must_be_below_entry" in result["blockers"]
 
 
 def test_short_stop_must_be_above_entry():
-    result = run(side="SHORT", stop_price="59000")
+    result = run(
+        side="SHORT",
+        stop_price="59000",
+    )
+
     assert result["eligible"] is False
     assert "short_stop_must_be_above_entry" in result["blockers"]
 
 
 def test_risk_fraction_hard_cap():
     result = run(risk_fraction="0.02")
+
     assert result["eligible"] is False
     assert "risk_fraction_exceeds_hard_cap" in result["blockers"]
 
 
 def test_margin_cap_hard_limit():
     result = run(margin_utilization_cap="0.75")
+
     assert result["eligible"] is False
 
 
@@ -83,6 +113,7 @@ def test_symbol_mismatch_is_rejected():
     result = run(
         contract_specs=specs(symbol="ETH-SWAP-USDT")
     )
+
     assert result["eligible"] is False
     assert "symbol_specs_mismatch" in result["blockers"]
 
@@ -91,17 +122,20 @@ def test_inactive_contract_is_rejected():
     result = run(
         contract_specs=specs(status="HALT")
     )
+
     assert result["eligible"] is False
     assert "contract_not_trading" in result["blockers"]
 
 
 def test_missing_fee_rate_is_rejected():
     result = run(fee_rate_per_side=None)
+
     assert result["eligible"] is False
     assert "fee_rate_invalid" in result["blockers"]
 
 
 def test_zero_quantity_step_is_rejected():
     result = run(contract_specs=specs(qty_step="0"))
+
     assert result["eligible"] is False
     assert "qty_step_must_be_positive" in result["blockers"]
