@@ -45,6 +45,9 @@ jobs:
 
       - name: Validate workflow inputs
         shell: bash
+        env:
+          MAX_PAGES: ${{ inputs.max_pages }}
+          PAGE_LIMIT: ${{ inputs.page_limit }}
         run: |
           python - <<'PY'
           import os
@@ -53,17 +56,18 @@ jobs:
           page_limit = int(os.environ["PAGE_LIMIT"])
 
           if not 1 <= max_pages <= 100:
-              raise SystemExit("max_pages must be between 1 and 100")
+              raise SystemExit(
+                  "max_pages must be between 1 and 100"
+              )
 
           if not 1 <= page_limit <= 1000:
-              raise SystemExit("page_limit must be between 1 and 1000")
+              raise SystemExit(
+                  "page_limit must be between 1 and 1000"
+              )
 
           print(f"max_pages={max_pages}")
           print(f"page_limit={page_limit}")
           PY
-        env:
-          MAX_PAGES: ${{ inputs.max_pages }}
-          PAGE_LIMIT: ${{ inputs.page_limit }}
 
       - name: Run funding quality tests
         run: |
@@ -103,7 +107,7 @@ jobs:
               --symbol "${symbol}" \
               --limit "${PAGE_LIMIT}" \
               --max-pages "${MAX_PAGES}" \
-              --output "reports/funding/${symbol}.json"
+              --out "reports/funding/${symbol}.json"
 
             exit_code=$?
 
@@ -131,21 +135,43 @@ jobs:
           from pathlib import Path
 
           report_dir = Path("reports/funding")
+          report_dir.mkdir(parents=True, exist_ok=True)
+
           reports = []
 
           for path in sorted(report_dir.glob("*.json")):
+              if path.name == "summary.json":
+                  continue
+
               try:
-                  data = json.loads(path.read_text(encoding="utf-8"))
+                  data = json.loads(
+                      path.read_text(encoding="utf-8")
+                  )
+
+                  quality = data.get("quality") or {}
+                  counts = quality.get("record_counts") or {}
+
                   reports.append({
                       "file": path.name,
                       "symbol": data.get("symbol", path.stem),
                       "endpoint_ok": data.get("endpoint_ok"),
-                      "data_quality_usable": data.get("data_quality_usable"),
-                      "collection_complete": data.get("collection_complete"),
-                      "stop_reason": data.get("stop_reason"),
-                      "record_count": data.get("record_count"),
-                      "quality": data.get("quality"),
+                      "data_quality_usable": data.get(
+                          "data_quality_usable"
+                      ),
+                      "collection_complete": data.get(
+                          "collection_complete"
+                      ),
+                      "stop_reason": (
+                          data.get("pagination") or {}
+                      ).get("stop_reason"),
+                      "unique_settlements": counts.get(
+                          "unique_settlements"
+                      ),
+                      "period": quality.get("period"),
+                      "coverage": quality.get("coverage"),
+                      "quality_status": quality.get("status"),
                   })
+
               except Exception as exc:
                   reports.append({
                       "file": path.name,
@@ -153,17 +179,30 @@ jobs:
                   })
 
           summary = {
+              "schema_version": "1.0",
               "report_count": len(reports),
+              "status": (
+                  "reports_available"
+                  if reports
+                  else "no_symbol_reports_generated"
+              ),
               "reports": reports,
           }
 
-          report_dir.mkdir(parents=True, exist_ok=True)
           (report_dir / "summary.json").write_text(
-              json.dumps(summary, indent=2, ensure_ascii=False),
+              json.dumps(
+                  summary,
+                  indent=2,
+                  ensure_ascii=False,
+              ),
               encoding="utf-8",
           )
 
-          print(json.dumps(summary, indent=2, ensure_ascii=False))
+          print(json.dumps(
+              summary,
+              indent=2,
+              ensure_ascii=False,
+          ))
           PY
 
       - name: Upload funding audit reports
