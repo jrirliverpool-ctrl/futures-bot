@@ -3,6 +3,7 @@ import pytest
 
 from src.funding_quality import (
     analyze_funding_records,
+    assess_backtest_eligibility,
     funding_cashflow_usdt,
 )
 
@@ -25,19 +26,16 @@ def make_records(period_hours=8, count=5, start=BASE):
 @pytest.mark.parametrize("period", [1, 4, 8])
 def test_supported_periods(period):
     result = analyze_funding_records(make_records(period))
-
     assert result["period"]["hours"] == period
-    assert result["period"]["source"] == "exchange_metadata"
     assert result["record_counts"]["unique_settlements"] == 5
     assert result["coverage"]["missing_expected_settlements"] == 0
+    assert result["data_quality_usable"] is True
 
 
 def test_16_hour_gap_means_one_missing_settlement():
     records = make_records(8, 5)
     records.pop(2)
-
     result = analyze_funding_records(records)
-
     assert result["coverage"]["missing_expected_settlements"] == 1
     assert result["status"] == "usable_with_gaps"
     assert len(result["backtest_records"]) == 4
@@ -45,50 +43,60 @@ def test_16_hour_gap_means_one_missing_settlement():
 
 def test_24_hour_gap_means_two_missing_settlements():
     records = make_records(8, 5)
-    # 0 -> 3 means 24 hours elapsed: two settlements are missing.
     records = records[:1] + records[3:]
-
     result = analyze_funding_records(records)
-
     assert result["coverage"]["missing_expected_settlements"] == 2
 
 
 def test_32_hour_gap_means_three_missing_settlements():
     records = make_records(8, 6)
     records = records[:2] + records[5:]
-
     result = analyze_funding_records(records)
-
     assert result["coverage"]["missing_expected_settlements"] == 3
 
 
-def test_12_hour_gap_is_irregular_not_three_missing():
+def test_12_hour_interval_is_quarantined_and_not_scored_as_100_percent():
     records = make_records(8, 4)
     records[2]["settleTime"] = (
         records[1]["settleTime"] + 12 * HOUR
     )
-
     result = analyze_funding_records(records)
 
     assert result["coverage"]["irregular_intervals"] >= 1
-    assert result["coverage"]["missing_expected_settlements"] == 0
-    assert result["status"] == "usable_with_irregular_intervals"
+    assert result["coverage"]["internal_percentage"] is None
+    assert result["status"] == "quarantined_irregular_intervals"
+
+    decision = assess_backtest_eligibility(
+        result,
+        endpoint_ok=True,
+        collection_complete=True,
+    )
+
+    assert decision["backtest_eligible"] is False
+    assert "irregular_intervals_quarantined" in decision["reasons"]
 
 
-def test_single_conflicting_metadata_value_is_detected():
+def test_mixed_metadata_is_rejected():
     records = make_records(8, 10)
     records[0]["period"] = "4H"
-
     result = analyze_funding_records(records)
 
     assert result["period"]["hours"] is None
     assert result["period"]["source"] == "mixed_exchange_metadata"
-    assert result["status"] == "period_metadata_conflict"
+    assert result["data_quality_usable"] is False
+
+
+def test_missing_period_metadata_is_rejected_even_if_other_rows_have_period():
+    records = make_records(8, 4)
+    records[0].pop("period")
+    result = analyze_funding_records(records)
+
+    assert result["period"]["source"] == "incomplete_exchange_metadata"
+    assert result["data_quality_usable"] is False
 
 
 def test_unknown_period_is_not_assumed_to_be_8h():
     records = make_records(8, 4)
-
     for record in records:
         record.pop("period")
 
@@ -96,12 +104,10 @@ def test_unknown_period_is_not_assumed_to_be_8h():
 
     assert result["period"]["hours"] is None
     assert result["period"]["source"] == "period_unknown"
-    assert result["status"] == "period_unknown"
 
 
-def test_configured_period_is_explicit_fallback():
+def test_configured_period_is_explicit_fallback_only_when_metadata_absent():
     records = make_records(8, 4)
-
     for record in records:
         record.pop("period")
 
@@ -114,7 +120,7 @@ def test_configured_period_is_explicit_fallback():
     assert result["period"]["source"] == "configured_fallback"
 
 
-def test_invalid_timestamp_does_not_delete_valid_records():
+def test_invalid_timestamp_does_not_delete_valid_records_but_fails_structural_gate():
     records = make_records(8, 5)
     records.append({
         "settleTime": "invalid",
@@ -126,6 +132,7 @@ def test_invalid_timestamp_does_not_delete_valid_records():
 
     assert result["record_counts"]["unique_settlements"] == 5
     assert result["record_counts"]["invalid_timestamps"] == 1
+    assert result["data_quality_usable"] is False
 
 
 def test_duplicate_same_rate_is_detected():
@@ -148,7 +155,7 @@ def test_duplicate_different_rate_is_conflict():
     result = analyze_funding_records(records)
 
     assert result["record_counts"]["conflicting_timestamps"] == 1
-    assert result["status"] == "conflicting_duplicate_rates"
+    assert result["data_quality_usable"] is False
 
 
 def test_explicit_expected_window_detects_boundary_missing():
@@ -166,13 +173,81 @@ def test_explicit_expected_window_detects_boundary_missing():
     assert boundary["missing_expected_settlements"] == 2
 
 
-def test_no_explicit_window_does_not_claim_boundary_coverage():
+def test_unknown_boundary_is_not_claimed_as_full_history():
     result = analyze_funding_records(make_records(8, 4))
 
-    assert (
-        result["coverage"]["boundary"]["boundary_coverage_known"]
-        is False
+    decision = assess_backtest_eligibility(
+        result,
+        endpoint_ok=True,
+        collection_complete=True,
     )
+
+    assert decision["backtest_eligible"] is True
+    assert decision["historical_boundary_known"] is False
+    assert decision["full_contract_history_confirmed"] is False
+    assert decision["eligibility_scope"] == "observed_internal_window_only"
+
+
+def test_coverage_threshold_blocks_bnb_like_history():
+    records = make_records(8, 200)
+    records.pop(100)
+
+    result = analyze_funding_records(records)
+
+    decision = assess_backtest_eligibility(
+        result,
+        endpoint_ok=True,
+        collection_complete=True,
+        min_internal_coverage=99.5,
+    )
+
+    assert result["coverage"]["internal_percentage"] >= 99.5
+    assert decision["backtest_eligible"] is True
+
+
+def test_coverage_below_threshold_is_rejected():
+    records = make_records(8, 200)
+
+    for index in sorted([10, 30, 50, 70, 90], reverse=True):
+        records.pop(index)
+
+    result = analyze_funding_records(records)
+
+    decision = assess_backtest_eligibility(
+        result,
+        endpoint_ok=True,
+        collection_complete=True,
+    )
+
+    assert decision["backtest_eligible"] is False
+    assert "internal_coverage_below_threshold" in decision["reasons"]
+
+
+def test_incomplete_pagination_blocks_backtest_eligibility():
+    result = analyze_funding_records(make_records(8, 5))
+
+    decision = assess_backtest_eligibility(
+        result,
+        endpoint_ok=True,
+        collection_complete=False,
+    )
+
+    assert decision["backtest_eligible"] is False
+    assert "funding_collection_incomplete" in decision["reasons"]
+
+
+def test_single_settlement_cannot_claim_internal_coverage():
+    result = analyze_funding_records(make_records(8, 1))
+
+    assert result["coverage"]["internal_percentage"] is None
+
+    decision = assess_backtest_eligibility(
+        result,
+        endpoint_ok=True,
+        collection_complete=True,
+    )
+
+    assert decision["backtest_eligible"] is False
 
 
 def test_real_zero_rate_is_preserved():
@@ -215,3 +290,15 @@ def test_invalid_side_is_rejected():
 def test_negative_notional_is_rejected():
     with pytest.raises(ValueError):
         funding_cashflow_usdt(-1000, "LONG", 0.001)
+
+
+def test_invalid_coverage_threshold_is_rejected():
+    result = analyze_funding_records(make_records(8, 4))
+
+    with pytest.raises(ValueError):
+        assess_backtest_eligibility(
+            result,
+            endpoint_ok=True,
+            collection_complete=True,
+            min_internal_coverage=101,
+        )
