@@ -45,7 +45,8 @@ def test_16_hour_gap_means_one_missing_settlement():
 
 def test_24_hour_gap_means_two_missing_settlements():
     records = make_records(8, 5)
-    records = records[:1] + records[4:]
+    # 0 -> 3 means 24 hours elapsed: two settlements are missing.
+    records = records[:1] + records[3:]
 
     result = analyze_funding_records(records)
 
@@ -168,7 +169,10 @@ def test_explicit_expected_window_detects_boundary_missing():
 def test_no_explicit_window_does_not_claim_boundary_coverage():
     result = analyze_funding_records(make_records(8, 4))
 
-    assert result["coverage"]["boundary"]["boundary_coverage_known"] is False
+    assert (
+        result["coverage"]["boundary"]["boundary_coverage_known"]
+        is False
+    )
 
 
 def test_real_zero_rate_is_preserved():
