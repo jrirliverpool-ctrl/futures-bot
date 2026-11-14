@@ -1,52 +1,186 @@
-name: Strategy Backtest V2 (Manual)
+
+name: ApexQuant Eight Symbol Research Backtest
 
 on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "Candles"
+        description: "Number of closed candles per symbol"
+        required: true
         default: "500"
-        required: true
+        type: string
+
       interval:
-        description: "Timeframe"
-        default: "1h"
+        description: "Candle timeframe"
         required: true
+        default: "1h"
+        type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: apexquant-eight-symbol-backtest
+  cancel-in-progress: false
+
 jobs:
+
+  # ==========================================================
+  # 1. Validate research universe
+  # ==========================================================
+
+  universe:
+    name: Validate Eight Symbol Universe
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      matrix: ${{ steps.validate.outputs.matrix }}
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate research universe
+        id: validate
+        shell: bash
+        env:
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("config/research_universe.json")
+
+          if not path.exists():
+              raise SystemExit("Research universe file missing")
+
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          expected_active = [
+              "ADA-SWAP-USDT",
+              "AVAX-SWAP-USDT",
+              "DOGE-SWAP-USDT",
+              "DOT-SWAP-USDT",
+              "ETH-SWAP-USDT",
+              "LINK-SWAP-USDT",
+              "SOL-SWAP-USDT",
+              "XRP-SWAP-USDT",
+          ]
+
+          expected_quarantine = {
+              "BNB-SWAP-USDT",
+              "BTC-SWAP-USDT",
+          }
+
+          active = data.get("active_symbols")
+          quarantine = data.get("quarantined_symbols")
+
+          if data.get("universe_id") != "apexquant_research_8_v1":
+              raise SystemExit("Unexpected universe identifier")
+
+          if active != expected_active:
+              raise SystemExit(
+                  f"Unexpected active universe: {active}"
+              )
+
+          if (
+              not isinstance(quarantine, list)
+              or len(quarantine) != 2
+              or set(quarantine) != expected_quarantine
+          ):
+              raise SystemExit(
+                  "Quarantine list does not match approved policy"
+              )
+
+          if set(active) & set(quarantine):
+              raise SystemExit("Active/quarantine overlap")
+
+          if len(set(active)) != 8:
+              raise SystemExit("Duplicate active symbols")
+
+          for symbol in active + quarantine:
+              if not re.fullmatch(
+                  r"[A-Z0-9]+-SWAP-USDT",
+                  symbol
+              ):
+                  raise SystemExit(
+                      f"Invalid symbol: {symbol}"
+                  )
+
+          limit = int(os.environ["LIMIT"])
+
+          if not 250 <= limit <= 1000:
+              raise SystemExit(
+                  "LIMIT must be between 250 and 1000"
+              )
+
+          matrix = {
+              "include": [
+                  {"symbol": symbol}
+                  for symbol in active
+              ]
+          }
+
+          print("Active symbols:", len(active))
+          print("Quarantined symbols:", len(quarantine))
+          print("Candle limit:", limit)
+          print("Universe validation: PASSED")
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+              encoding="utf-8"
+          ) as output:
+              output.write(
+                  "matrix="
+                  + json.dumps(matrix, separators=(",", ":"))
+                  + "\n"
+              )
+          PY
+
+  # ==========================================================
+  # 2. Eight independent smoke backtests
+  # ==========================================================
+
   backtest:
+    name: Backtest ${{ matrix.symbol }}
+    needs: universe
+
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     strategy:
       fail-fast: false
       max-parallel: 3
-      matrix:
-        symbol:
-          - BTC-SWAP-USDT
-          - ETH-SWAP-USDT
-          - SOL-SWAP-USDT
-          - BNB-SWAP-USDT
-          - XRP-SWAP-USDT
-          - ADA-SWAP-USDT
-          - DOGE-SWAP-USDT
-          - AVAX-SWAP-USDT
-          - LINK-SWAP-USDT
-          - DOT-SWAP-USDT
+      matrix: ${{ fromJSON(needs.universe.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pytest
+          python -m pip install requests pytest
 
-      - name: Run backtest for ${{ matrix.symbol }}
+      - name: Run offline unit tests
+        run: |
+          python -m pytest -q
+
+      - name: Run symbol smoke backtest
         id: run
+        shell: bash
         env:
           SYMBOL: ${{ matrix.symbol }}
           INTERVAL: ${{ inputs.interval }}
@@ -54,9 +188,17 @@ jobs:
           INITIAL_EQUITY: "1000"
         run: |
           mkdir -p backtest-out
+
           set +e
-          python scripts/run_real_backtest.py 2>&1 | tee "backtest-out/${SYMBOL}.log"
-          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+          python scripts/run_real_backtest.py 2>&1 \
+            | tee "backtest-out/${SYMBOL}.log"
+
+          exit_code=${PIPESTATUS[0]}
+
+          echo "exit_code=${exit_code}" >> "$GITHUB_OUTPUT"
+
+          exit "${exit_code}"
 
       - name: Collect outputs
         if: always()
@@ -64,49 +206,71 @@ jobs:
           SYMBOL: ${{ matrix.symbol }}
         run: |
           mkdir -p backtest-out
-          if [ -d reports ]; then cp -r reports "backtest-out/${SYMBOL}__reports" || true; fi
-          if [ -f backtest_state.json ]; then cp backtest_state.json "backtest-out/${SYMBOL}__state.json" || true; fi
 
-      - uses: actions/upload-artifact@v4
+          if [ -d reports ]; then
+            cp -r reports \
+              "backtest-out/${SYMBOL}__reports" || true
+          fi
+
+          if [ -f backtest_state.json ]; then
+            cp backtest_state.json \
+              "backtest-out/${SYMBOL}__state.json" || true
+          fi
+
+      - name: Upload symbol artifacts
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: backtest-${{ matrix.symbol }}
+          name: apexquant-backtest-${{ matrix.symbol }}
           path: backtest-out/
-          retention-days: 14
+          if-no-files-found: warn
+          retention-days: 30
 
-      - name: Summary
+      - name: Generate symbol summary
         if: always()
         env:
           SYMBOL: ${{ matrix.symbol }}
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        shell: bash
         run: |
           {
-            echo "## Backtest: ${SYMBOL}"
+            echo "## ${SYMBOL}"
             echo ""
-            echo "- Exit code: \`${{ steps.run.outputs.exit_code }}\`"
+            echo "- Exit code: ${EXIT_CODE:-unknown}"
             echo ""
+
             if [ -f "backtest-out/${SYMBOL}.log" ]; then
-              python3 <<'PYEOF'
-          import os, re
-          sym = os.environ["SYMBOL"]
-          text = open(f"backtest-out/{sym}.log", encoding="utf-8", errors="replace").read()
-          def grab(p, d="—"):
-              m = re.search(p, text)
-              return m.group(1).strip() if m else d
-          keys = {
-              "net_return": r"net return \(mtm\)\s+:\s+([\-+\d\.]+)%",
-              "max_dd": r"max drawdown \(mtm\)\s+:\s+([\d\.]+)%",
-              "trades": r"total\s+:\s+(\d+)",
-              "win": r"win rate\s+:\s+([\d\.]+)%",
-              "pf": r"profit factor\s+:\s+([\w\d\.\-]+)",
-              "expectancy": r"expectancy\s+:\s+([\-\d\.]+)",
-              "commission": r"commission cost\s+:\s+([\d\.]+)",
+              python - <<'PY'
+          import os
+          import re
+
+          symbol = os.environ["SYMBOL"]
+          path = f"backtest-out/{symbol}.log"
+
+          content = open(
+              path,
+              encoding="utf-8",
+              errors="replace"
+          ).read()
+
+          patterns = {
+              "Net return": r"net return \(mtm\)\s*:\s*([\-+\d.]+)%",
+              "Maximum drawdown": r"max drawdown \(mtm\)\s*:\s*([\d.]+)%",
+              "Trades": r"total\s*:\s*(\d+)",
+              "Win rate": r"win rate\s*:\s*([\d.]+)%",
+              "Profit factor": r"profit factor\s*:\s*([\w\d.\-]+)",
+              "Expectancy": r"expectancy\s*:\s*([\-+\d.]+)",
+              "Commission": r"commission cost\s*:\s*([\d.]+)"
           }
-          print("| Metric | Value |")
-          print("|---|---:|")
-          for k, p in keys.items():
-              print(f"| {k} | {grab(p)} |")
-          if "PASSED" not in text and "❌" in text:
-              print("\n⚠️ Log contains error markers")
-          PYEOF
+
+          for name, pattern in patterns.items():
+              match = re.search(pattern, content)
+              value = match.group(1) if match else "NOT_REPORTED"
+              print(f"| {name} | {value} |")
+          PY
             fi
+
+            echo ""
+            echo "This is a smoke backtest, not profitability approval."
+
           } >> "$GITHUB_STEP_SUMMARY"
