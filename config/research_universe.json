@@ -1,0 +1,38 @@
+
+{
+  "schema_version": 1,
+  "universe_id": "apexquant_research_8_v1",
+  "description": "Eight-symbol research universe for ApexQuant",
+  "purpose": "BACKTEST_AND_RESEARCH_ONLY",
+  "active_symbols": [
+    "ADA-SWAP-USDT",
+    "AVAX-SWAP-USDT",
+    "DOGE-SWAP-USDT",
+    "DOT-SWAP-USDT",
+    "ETH-SWAP-USDT",
+    "LINK-SWAP-USDT",
+    "SOL-SWAP-USDT",
+    "XRP-SWAP-USDT"
+  ],
+  "quarantined_symbols": [
+    "BNB-SWAP-USDT",
+    "BTC-SWAP-USDT"
+  ],
+  "quarantine_reasons": {
+    "BNB-SWAP-USDT": "245 missing expected funding settlements; pagination and historical coverage require investigation.",
+    "BTC-SWAP-USDT": "Irregular 12-hour funding interval; settlement schedule requires investigation."
+  },
+  "activation_policy": {
+    "require_funding_eligibility": true,
+    "require_fee_audit": true,
+    "require_valid_symbol_specs": true,
+    "require_out_of_sample_validation": true,
+    "require_positive_net_expectancy": true
+  },
+  "notes": [
+    "This file controls research membership only.",
+    "It does not authorize live trading.",
+    "The original crypto_whitelist.json remains unchanged.",
+    "Quarantined symbols must remain available for existing position management and reconciliation."
+  ]
+}
