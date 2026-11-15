@@ -6,17 +6,17 @@
   "daily_loss": 0.0,
   "equity": 981.9244006224319,
   "initial_equity": 971.8365982771752,
-  "last_close_price": 63515.7,
+  "last_close_price": 62592.3,
   "last_funding_ts": null,
-  "last_processed_candle_ts": 1794693600000,
-  "loss_day_key": 20771,
+  "last_processed_candle_ts": 1794704400000,
+  "loss_day_key": 20772,
   "loss_week_key": 2967,
   "peak_equity": 985.3530068842688,
   "pending_entry": {
-    "atr_at_signal": 743.0102386505113,
-    "close_at_signal": 63515.7,
+    "atr_at_signal": 832.5277676000586,
+    "close_at_signal": 62592.3,
     "side": "SHORT",
-    "signal_candle_ts": 1794693600000
+    "signal_candle_ts": 1794704400000
   },
   "pending_events": [],
   "period_start_utc": "2026-10-22T01:34:38.853086+00:00",
