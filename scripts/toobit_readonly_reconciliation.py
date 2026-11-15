@@ -2,9 +2,9 @@
 """Read-only account reconciliation coordinator for Toobit USDT-M futures.
 
 Combines:
-- durable unresolved order-intent recovery probe;
-- one account-wide Toobit positions snapshot;
-- per-symbol comparison against caller-supplied internal positions.
+- unresolved order-intent recovery probe;
+- two-read stable account-wide position snapshot;
+- per-symbol LONG/SHORT reconciliation.
 
 This module never submits, amends, or cancels orders.
 It never mutates the intent journal, fill ledger, or trading state.
@@ -16,9 +16,12 @@ from decimal import Decimal, InvalidOperation
 
 from order_recovery_probe import OrderRecoveryProbe
 from position_reconciliation import reconcile_position_snapshot
+from toobit_position_snapshot import (
+    PositionSnapshotError,
+    fetch_stable_position_snapshot,
+)
 
 
-POSITIONS_ENDPOINT = "/api/v1/futures/positions"
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+-SWAP-USDT$")
 
 
@@ -57,7 +60,9 @@ class ToobitReadOnlyReconciliation:
             raise ValueError("intent_store is required")
 
         if not isinstance(symbols, (list, tuple)) or not symbols:
-            raise ValueError("symbols must be a non-empty list")
+            raise ValueError(
+                "symbols must be a non-empty list"
+            )
 
         normalized_symbols = []
 
@@ -66,7 +71,9 @@ class ToobitReadOnlyReconciliation:
                 not isinstance(symbol, str)
                 or not SYMBOL_PATTERN.fullmatch(symbol)
             ):
-                raise ValueError("invalid USDT-M futures symbol")
+                raise ValueError(
+                    "invalid USDT-M futures symbol"
+                )
 
             if symbol in normalized_symbols:
                 raise ValueError("duplicate symbol")
@@ -74,11 +81,14 @@ class ToobitReadOnlyReconciliation:
             normalized_symbols.append(symbol)
 
         if not isinstance(expected_positions, dict):
-            raise ValueError("expected_positions must be a dictionary")
+            raise ValueError(
+                "expected_positions must be a dictionary"
+            )
 
         if set(expected_positions) != set(normalized_symbols):
             raise ValueError(
-                "expected_positions must contain exactly the configured symbols"
+                "expected_positions must contain exactly "
+                "the configured symbols"
             )
 
         self.client = client
@@ -87,7 +97,6 @@ class ToobitReadOnlyReconciliation:
         self.expected_positions = dict(expected_positions)
         self.trade_limit = trade_limit
 
-        # Validate the trade limit through the existing recovery probe.
         self.recovery_probe = OrderRecoveryProbe(
             client,
             intent_store,
@@ -98,21 +107,22 @@ class ToobitReadOnlyReconciliation:
         """Run a read-only account reconciliation report."""
 
         try:
-            positions = self.client._request(
-                "GET",
-                POSITIONS_ENDPOINT,
-                {},
+            positions = fetch_stable_position_snapshot(
+                self.client
             )
-        except Exception as exc:
+        except PositionSnapshotError as exc:
             return self._failure(
-                "positions_request_failed",
-                detail=type(exc).__name__,
+                "positions_snapshot_not_stable",
+                detail=str(exc),
             )
 
         if not isinstance(positions, list):
             return self._failure(
                 "positions_response_not_list",
-                detail="The exchange response was not a complete position list.",
+                detail=(
+                    "The exchange response was not "
+                    "a complete position list."
+                ),
             )
 
         if not all(isinstance(row, dict) for row in positions):
@@ -120,8 +130,6 @@ class ToobitReadOnlyReconciliation:
                 "positions_response_contains_invalid_rows"
             )
 
-        # Validate the complete account snapshot, including positions
-        # outside the configured strategy universe.
         unexpected_active = []
 
         for index, row in enumerate(positions):
@@ -159,7 +167,9 @@ class ToobitReadOnlyReconciliation:
         if unexpected_active:
             return self._failure(
                 "active_positions_outside_configured_universe",
-                detail=", ".join(sorted(set(unexpected_active))),
+                detail=", ".join(
+                    sorted(set(unexpected_active))
+                ),
             )
 
         position_reports = {}
@@ -174,7 +184,9 @@ class ToobitReadOnlyReconciliation:
             position_reports[symbol] = result
 
         try:
-            order_report = self.recovery_probe.run(now_ms=now_ms)
+            order_report = self.recovery_probe.run(
+                now_ms=now_ms
+            )
         except Exception as exc:
             return self._failure(
                 "order_recovery_probe_failed",
@@ -205,6 +217,7 @@ class ToobitReadOnlyReconciliation:
             "position_reports": position_reports,
             "order_recovery_report": order_report,
             "exchange_positions_snapshot_received": True,
+            "exchange_positions_snapshot_stable": True,
             "read_only": True,
             "network_methods_used": ["GET"],
             "orders_submitted": 0,
