@@ -1,3 +1,4 @@
+
 name: ApexQuant Toobit V2 Adapter and Safety Regression
 
 on:
@@ -6,6 +7,7 @@ on:
   push:
     paths:
       - 'scripts/toobit_v2_order_adapter.py'
+      - 'scripts/toobit_v2_algo_snapshot.py'
       - 'scripts/toobit_execution_bridge.py'
       - 'scripts/toobit_client.py'
       - 'scripts/toobit_open_orders.py'
@@ -13,6 +15,7 @@ on:
       - 'scripts/toobit_readonly_preflight.py'
       - 'scripts/toobit_live_readiness_gate.py'
       - 'scripts/toobit_readonly_reconciliation.py'
+      - 'scripts/toobit_position_snapshot.py'
       - 'scripts/toobit_capital_feasibility.py'
       - 'scripts/toobit_trade_pagination.py'
       - 'scripts/toobit_full_account_trade_audit.py'
@@ -37,6 +40,7 @@ on:
   pull_request:
     paths:
       - 'scripts/toobit_v2_order_adapter.py'
+      - 'scripts/toobit_v2_algo_snapshot.py'
       - 'scripts/toobit_execution_bridge.py'
       - 'scripts/toobit_client.py'
       - 'scripts/toobit_open_orders.py'
@@ -44,6 +48,7 @@ on:
       - 'scripts/toobit_readonly_preflight.py'
       - 'scripts/toobit_live_readiness_gate.py'
       - 'scripts/toobit_readonly_reconciliation.py'
+      - 'scripts/toobit_position_snapshot.py'
       - 'scripts/toobit_capital_feasibility.py'
       - 'scripts/toobit_trade_pagination.py'
       - 'scripts/toobit_full_account_trade_audit.py'
@@ -97,6 +102,7 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_toobit_v2_order_adapter.py \
+            tests/test_toobit_v2_algo_snapshot.py \
             tests/test_toobit_client.py \
             tests/test_toobit_v2_readonly.py \
             tests/test_toobit_open_orders.py \
