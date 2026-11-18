@@ -131,9 +131,6 @@ def _raw_order(response):
             position_side,
         )
 
-    # Preserve the exchange's original V2 side + positionSide pair.
-    # The fill ledger validates that pair itself. Store the canonical
-    # combined side separately for the intent-vs-order comparison.
     normalized["_canonical_side"] = canonical_side
 
     return normalized
@@ -156,11 +153,6 @@ def _normalize_trade(raw):
             )
         return normalized
 
-    # Validate the V2 side pair, but preserve the exchange fields.
-    # fill_ledger.normalize_user_trade() expects V2 rows to retain
-    # side=BUY/SELL together with positionSide=LONG/SHORT. Rewriting
-    # side to BUY_OPEN/SELL_CLOSE here would create an invalid hybrid
-    # payload and make fill reconciliation fail.
     _canonical_side(side, position_side)
 
     return normalized
@@ -188,7 +180,6 @@ class OrderRecoveryProbe:
 
     def run(self, now_ms=None):
         """Return a diagnostic report without changing persistent state."""
-
         timestamp = (
             int(time.time() * 1000)
             if now_ms is None
@@ -246,7 +237,6 @@ class OrderRecoveryProbe:
 
         return {
             "ok": checks_passed,
-            # Unresolved records always keep trading halted.
             "halt_trading": bool(unresolved),
             "unresolved_count": len(unresolved),
             "items": items,
@@ -397,6 +387,31 @@ class OrderRecoveryProbe:
             )
 
         try:
+            # Record which read-only API implementation is selected.
+            order_api_version = (
+                "V2"
+                if callable(
+                    getattr(
+                        self.client,
+                        "get_order_status_v2",
+                        None,
+                    )
+                )
+                else "V1"
+            )
+
+            trades_api_version = (
+                "V2"
+                if callable(
+                    getattr(
+                        self.client,
+                        "get_user_trades_v2",
+                        None,
+                    )
+                )
+                else "V1"
+            )
+
             response = self._get_order_status(
                 symbol,
                 client_order_id,
@@ -490,8 +505,6 @@ class OrderRecoveryProbe:
                 now_ms,
             )
 
-            # A full page may be truncated. Until complete pagination
-            # is implemented and verified, this must fail closed.
             if len(raw_trades) >= self.trade_limit:
                 return self._failure(
                     client_order_id,
@@ -552,6 +565,8 @@ class OrderRecoveryProbe:
                 ),
                 "exchange_order_id": order_id,
                 "exchange_status": order["status"],
+                "order_api_version": order_api_version,
+                "trades_api_version": trades_api_version,
                 "reconciliation": reconciliation,
                 "manual_journal_transition_required": True,
                 "automatic_journal_mutation": False,
