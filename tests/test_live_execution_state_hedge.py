@@ -114,7 +114,7 @@ def test_closing_short_preserves_long_position():
         fill("close-short", "BUY_CLOSE", "1", "105", NOW - 100),
     ])
 
-    # One remaining side must use the legacy-compatible representation.
+    # Exactly one remaining side uses the backward-compatible format.
     assert result[SYMBOL] == {
         "side": "LONG",
         "quantity": "2",
@@ -224,5 +224,4 @@ def test_windows_lock_fallback_uses_one_byte_lock(tmp_path, monkeypatch):
 
     assert calls
     assert calls[0][1:] == (FakeMsvcrt.LK_LOCK, 1)
-
     assert lock_path.read_bytes() == b"\0"
