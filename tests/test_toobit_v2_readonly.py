@@ -1,3 +1,4 @@
+
 import hashlib
 import hmac
 import os
@@ -27,7 +28,7 @@ class FakeResponse:
 def v2_trade(**overrides):
     row = {
         "time": "1790000000123",
-        "id": "trade-v2-1",
+        "id": "1001",
         "orderId": "order-v2-1",
         "symbol": "BTC-SWAP-USDT",
         "price": "100",
@@ -74,8 +75,14 @@ def test_v2_user_trades_reads_documented_data_array(client, monkeypatch):
         captured["url"] = url
         captured["params"] = list(params)
         captured["headers"] = headers
-        return FakeResponse(200, {"code": 200, "msg": "success",
-                                  "data": [v2_trade()]})
+        return FakeResponse(
+            200,
+            {
+                "code": 200,
+                "msg": "success",
+                "data": [v2_trade()],
+            },
+        )
 
     monkeypatch.setattr("toobit_client.requests.get", fake_get)
 
@@ -88,9 +95,12 @@ def test_v2_user_trades_reads_documented_data_array(client, monkeypatch):
     )
 
     assert rows == [v2_trade()]
-    assert captured["url"].endswith("/api/v2/futures/user-trades")
+    assert captured["url"].endswith(
+        "/api/v2/futures/user-trades"
+    )
 
     params = dict(captured["params"])
+
     assert params["symbol"] == "BTC-SWAP-USDT"
     assert params["category"] == "USDT"
     assert params["startTime"] == 100
@@ -106,28 +116,46 @@ def test_v2_signature_matches_sorted_query_parameters(client, monkeypatch):
 
     def fake_get(url, params, headers, timeout):
         captured["params"] = list(params)
-        return FakeResponse(200, {"code": 200, "data": []})
+        return FakeResponse(
+            200,
+            {"code": 200, "data": []},
+        )
 
     monkeypatch.setattr("toobit_client.requests.get", fake_get)
 
-    client.get_user_trades_v2("BTC-SWAP-USDT", limit=10)
+    client.get_user_trades_v2(
+        "BTC-SWAP-USDT",
+        limit=10,
+    )
 
     params = dict(captured["params"])
     signature = params.pop("signature")
     query = urlencode(sorted(params.items()))
+
     expected = hmac.new(
-        b"TEST_SECRET", query.encode(), hashlib.sha256
+        b"TEST_SECRET",
+        query.encode(),
+        hashlib.sha256,
     ).hexdigest()
 
     assert signature == expected
 
 
-def test_v2_empty_data_array_is_successful_empty_result(client, monkeypatch):
+def test_v2_empty_data_array_is_successful_empty_result(
+    client,
+    monkeypatch,
+):
     monkeypatch.setattr(
         "toobit_client.requests.get",
-        lambda *a, **k: FakeResponse(200, {"code": 200, "data": []}),
+        lambda *a, **k: FakeResponse(
+            200,
+            {"code": 200, "data": []},
+        ),
     )
-    assert client.get_user_trades_v2("BTC-SWAP-USDT") == []
+
+    assert client.get_user_trades_v2(
+        "BTC-SWAP-USDT"
+    ) == []
 
 
 @pytest.mark.parametrize(
@@ -139,11 +167,16 @@ def test_v2_empty_data_array_is_successful_empty_result(client, monkeypatch):
         {"code": 200, "data": ["not-a-dict"]},
     ],
 )
-def test_v2_invalid_or_error_response_fails_closed(client, monkeypatch, body):
+def test_v2_invalid_or_error_response_fails_closed(
+    client,
+    monkeypatch,
+    body,
+):
     monkeypatch.setattr(
         "toobit_client.requests.get",
         lambda *a, **k: FakeResponse(200, body),
     )
+
     with pytest.raises(RuntimeError):
         client.get_user_trades_v2("BTC-SWAP-USDT")
 
@@ -151,22 +184,31 @@ def test_v2_invalid_or_error_response_fails_closed(client, monkeypatch, body):
 def test_v2_http_error_fails_closed(client, monkeypatch):
     monkeypatch.setattr(
         "toobit_client.requests.get",
-        lambda *a, **k: FakeResponse(500, {"code": 500, "data": []}),
+        lambda *a, **k: FakeResponse(
+            500,
+            {"code": 500, "data": []},
+        ),
     )
+
     with pytest.raises(RuntimeError):
         client.get_user_trades_v2("BTC-SWAP-USDT")
 
 
-def test_v2_order_status_maps_documented_order_response(client, monkeypatch):
+def test_v2_order_status_maps_documented_order_response(
+    client,
+    monkeypatch,
+):
     monkeypatch.setattr(
         "toobit_client.requests.get",
         lambda *a, **k: FakeResponse(
-            200, {"code": 200, "data": v2_order()}
+            200,
+            {"code": 200, "data": v2_order()},
         ),
     )
 
     response = client.get_order_status_v2(
-        "BTC-SWAP-USDT", "client-v2-1"
+        "BTC-SWAP-USDT",
+        "client-v2-1",
     )
 
     assert response.status == "FILLED"
@@ -175,17 +217,28 @@ def test_v2_order_status_maps_documented_order_response(client, monkeypatch):
     assert response.filled_qty == 1.0
 
 
-def test_v2_order_status_wrong_symbol_becomes_unknown(client, monkeypatch):
+def test_v2_order_status_wrong_symbol_becomes_unknown(
+    client,
+    monkeypatch,
+):
     monkeypatch.setattr(
         "toobit_client.requests.get",
         lambda *a, **k: FakeResponse(
-            200, {"code": 200, "data": v2_order(symbol="ETH-SWAP-USDT")}
+            200,
+            {
+                "code": 200,
+                "data": v2_order(
+                    symbol="ETH-SWAP-USDT"
+                ),
+            },
         ),
     )
 
     response = client.get_order_status_v2(
-        "BTC-SWAP-USDT", "client-v2-1"
+        "BTC-SWAP-USDT",
+        "client-v2-1",
     )
+
     assert response.status == "UNKNOWN"
 
 
@@ -198,10 +251,16 @@ class FakeStore:
 
     def __getattr__(self, name):
         if name in {
-            "create_intent", "mark_submission_started",
-            "mark_submission_unknown", "acknowledge", "mark_reconciled",
+            "create_intent",
+            "mark_submission_started",
+            "mark_submission_unknown",
+            "acknowledge",
+            "mark_reconciled",
         }:
-            raise AssertionError("probe must not mutate intent journal")
+            raise AssertionError(
+                "probe must not mutate intent journal"
+            )
+
         raise AttributeError(name)
 
 
@@ -209,20 +268,50 @@ class FakeV2Client:
     def __init__(self):
         self.calls = []
 
-    def get_order_status_v2(self, symbol, client_order_id):
-        self.calls.append(("order_v2", symbol, client_order_id))
-        raw = {"code": 200, "data": v2_order()}
-        return SimpleNamespace(status="FILLED", raw_response=raw)
+    def get_order_status_v2(
+        self,
+        symbol,
+        client_order_id,
+    ):
+        self.calls.append(
+            ("order_v2", symbol, client_order_id)
+        )
+
+        raw = {
+            "code": 200,
+            "data": v2_order(),
+        }
+
+        return SimpleNamespace(
+            status="FILLED",
+            raw_response=raw,
+        )
 
     def get_user_trades_v2(
-        self, symbol, start_time=None, end_time=None, limit=1000
+        self,
+        symbol,
+        start_time=None,
+        end_time=None,
+        limit=1000,
+        from_id=None,
+        to_id=None,
     ):
-        self.calls.append(("trades_v2", symbol, start_time, end_time, limit))
+        self.calls.append(
+            (
+                "trades_v2",
+                symbol,
+                start_time,
+                end_time,
+                limit,
+                from_id,
+            )
+        )
+
         return [v2_trade()]
 
 
-def test_probe_uses_v2_read_only_methods_and_keeps_halt_true():
-    record = {
+def make_recovery_record():
+    return {
         "client_order_id": "client-v2-1",
         "status": "SUBMISSION_STARTED",
         "created_at_ms": 1790000000000,
@@ -240,9 +329,15 @@ def test_probe_uses_v2_read_only_methods_and_keeps_halt_true():
             "strategy_hash": "sha256:" + "a" * 64,
         },
     }
+
+
+def test_probe_uses_v2_read_only_methods_and_keeps_halt_true():
+    record = make_recovery_record()
     client = FakeV2Client()
+
     result = OrderRecoveryProbe(
-        client, FakeStore([record])
+        client,
+        FakeStore([record]),
     ).run(now_ms=1790000005000)
 
     assert result["ok"] is True
@@ -251,36 +346,73 @@ def test_probe_uses_v2_read_only_methods_and_keeps_halt_true():
     assert result["trading_state_mutated"] is False
     assert result["orders_submitted"] == 0
     assert result["orders_canceled"] == 0
+
     assert result["items"][0]["order_api_version"] == "V2"
     assert result["items"][0]["trades_api_version"] == "V2"
+
     assert [call[0] for call in client.calls] == [
-        "order_v2", "trades_v2"
+        "order_v2",
+        "trades_v2",
     ]
 
+    assert client.calls[1][5] is None
 
-def test_probe_v2_full_page_is_not_declared_complete():
-    record = {
-        "client_order_id": "client-v2-1",
-        "status": "SUBMISSION_STARTED",
-        "created_at_ms": 1790000000000,
-        "exchange_order_id": None,
-        "intent": {
-            "symbol": "BTC-SWAP-USDT",
-            "side": "LONG",
-            "intent": "ENTRY",
-            "qty": "1",
-        },
-    }
+
+def test_probe_v2_full_page_fetches_next_page_before_reconciliation():
+    record = make_recovery_record()
 
     class FullPageClient(FakeV2Client):
-        def get_user_trades_v2(self, *args, **kwargs):
-            return [v2_trade(id=f"trade-{i}") for i in range(10)]
+        def get_user_trades_v2(
+            self,
+            symbol,
+            start_time=None,
+            end_time=None,
+            limit=1000,
+            from_id=None,
+            to_id=None,
+        ):
+            self.calls.append(
+                (
+                    "trades_v2",
+                    symbol,
+                    start_time,
+                    end_time,
+                    limit,
+                    from_id,
+                )
+            )
+
+            if from_id is None:
+                return [
+                    v2_trade(
+                        id=str(trade_id),
+                        qty="0.1",
+                    )
+                    for trade_id in range(100, 90, -1)
+                ]
+
+            if from_id == 91:
+                return []
+
+            raise AssertionError(
+                f"unexpected pagination cursor: {from_id}"
+            )
+
+    client = FullPageClient()
 
     result = OrderRecoveryProbe(
-        FullPageClient(), FakeStore([record]), trade_limit=10
+        client,
+        FakeStore([record]),
+        trade_limit=10,
     ).run(now_ms=1790000005000)
 
-    assert result["ok"] is False
-    assert result["items"][0]["reason"] == (
-        "user_trades_result_may_be_truncated"
-    )
+    assert len(client.calls) == 3
+    assert client.calls[1][5] is None
+    assert client.calls[2][5] == 91
+
+    assert result["ok"] is True
+    assert result["halt_trading"] is True
+    assert result["items"][0]["can_be_marked_reconciled"] is True
+    assert result["items"][0]["trades_api_version"] == "V2"
+    assert result["journal_mutated"] is False
+    assert result["orders_submitted"] == 0
