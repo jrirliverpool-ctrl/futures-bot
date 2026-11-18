@@ -48,3 +48,17 @@ jobs:
             tests/test_toobit_live_readiness_gate.py \
             tests/test_order_executor.py \
             tests/test_execution_manager.py
+
+      - name: Run authenticated read-only Toobit readiness gate
+        env:
+          TOOBIT_API_KEY: ${{ secrets.TOOBIT_API_KEY }}
+          TOOBIT_API_SECRET: ${{ secrets.TOOBIT_API_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TOOBIT_API_KEY:-}" ] || [ -z "${TOOBIT_API_SECRET:-}" ]; then
+            echo "::error::TOOBIT_API_KEY and TOOBIT_API_SECRET must be configured as GitHub Actions secrets."
+            exit 2
+          fi
+
+          python scripts/toobit_live_readiness_gate.py
