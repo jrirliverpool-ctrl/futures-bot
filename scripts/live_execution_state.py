@@ -1,16 +1,12 @@
-
 """Independent fail-closed state for Toobit USDT-M execution.
 
 This module never sends exchange requests.
 Positions are derived exclusively from complete normalized fills.
-Balance and reconciliation evidence must be fresh and complete.
-
-A local atomic file is NOT durable across ephemeral GitHub Actions
-runners. Persistent private storage is mandatory before live execution.
+A local atomic file is not durable across ephemeral GitHub Actions runners.
+Persistent private storage is mandatory before any live execution.
 """
 
 import copy
-import fcntl
 import hashlib
 import json
 import os
@@ -18,11 +14,18 @@ import tempfile
 import time
 from decimal import Decimal, InvalidOperation
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
 
 SCHEMA_VERSION = 1
 VENUE = "TOOBIT"
 MARKET = "USDT-M"
 ENVIRONMENTS = {"DEMO", "LIVE"}
+
 OPEN_SIDES = {"BUY_OPEN", "SELL_OPEN"}
 CLOSE_SIDES = {"BUY_CLOSE", "SELL_CLOSE"}
 
@@ -35,6 +38,24 @@ POSITION_SOURCE = "TOOBIT_V2_POSITION_RISK"
 
 class LiveStateError(RuntimeError):
     """Raised when live state or exchange evidence is unsafe."""
+
+
+def _lock_exclusive(handle):
+    """Acquire an exclusive process lock on Linux or Windows."""
+
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+
+    # msvcrt.locking requires an existing byte to lock.
+    handle.seek(0, os.SEEK_END)
+
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
 
 
 def _decimal(value, field, allow_zero=True):
@@ -118,6 +139,7 @@ def _canonical_fill(fill):
     if sequence is not None:
         if isinstance(sequence, bool) or not isinstance(sequence, int):
             raise LiveStateError("invalid exchange_sequence")
+
         if sequence < 0:
             raise LiveStateError("invalid exchange_sequence")
 
@@ -141,14 +163,14 @@ def _ordered_fills(fills):
     seen_ids = set()
 
     for row in normalized:
-        if row["trade_id"] in seen_ids:
-            raise LiveStateError(
-                f"duplicate trade_id: {row['trade_id']}"
-            )
-        seen_ids.add(row["trade_id"])
+        trade_id = row["trade_id"]
 
-    # Equal timestamps on the same symbol are ambiguous unless
-    # every fill has an exchange-provided ordering sequence.
+        if trade_id in seen_ids:
+            raise LiveStateError(f"duplicate trade_id: {trade_id}")
+
+        seen_ids.add(trade_id)
+
+    # Same-symbol fills at the same timestamp need exchange ordering.
     groups = {}
 
     for row in normalized:
@@ -186,7 +208,18 @@ def _ordered_fills(fills):
 
 
 def derive_positions_from_fills(fills):
-    """Rebuild one-way positions from complete ordered fill history."""
+    """Rebuild independent LONG and SHORT positions from complete fills.
+
+    Backward compatibility:
+    A symbol with one active side is returned in the legacy format:
+        {"side": "LONG", "quantity": "...", "avg_price": "..."}
+
+    A symbol with both active sides is returned as:
+        {
+            "LONG": {"quantity": "...", "avg_price": "..."},
+            "SHORT": {"quantity": "...", "avg_price": "..."}
+        }
+    """
 
     normalized = _ordered_fills(fills)
     positions = {}
@@ -197,23 +230,18 @@ def derive_positions_from_fills(fills):
         qty = fill["qty"]
         price = fill["price"]
 
-        current = positions.get(symbol)
+        symbol_positions = positions.setdefault(symbol, {})
 
         if side in OPEN_SIDES:
             new_side = "LONG" if side == "BUY_OPEN" else "SHORT"
+            current = symbol_positions.get(new_side)
 
             if current is None:
-                positions[symbol] = {
-                    "side": new_side,
+                symbol_positions[new_side] = {
                     "quantity": str(qty),
                     "avg_price": str(price),
                 }
                 continue
-
-            if current["side"] != new_side:
-                raise LiveStateError(
-                    f"opposite-side open without closing fill: {symbol}"
-                )
 
             old_qty = Decimal(current["quantity"])
             old_price = Decimal(current["avg_price"])
@@ -223,27 +251,19 @@ def derive_positions_from_fills(fills):
                 old_qty * old_price + qty * price
             ) / total_qty
 
-            positions[symbol] = {
-                "side": new_side,
+            symbol_positions[new_side] = {
                 "quantity": str(total_qty),
                 "avg_price": str(average),
             }
             continue
 
+        position_side = "LONG" if side == "SELL_CLOSE" else "SHORT"
+        current = symbol_positions.get(position_side)
+
         if current is None:
             raise LiveStateError(
-                f"closing fill has no matching open position: {symbol}"
-            )
-
-        expected = (
-            "SELL_CLOSE"
-            if current["side"] == "LONG"
-            else "BUY_CLOSE"
-        )
-
-        if side != expected:
-            raise LiveStateError(
-                f"closing side mismatch for {symbol}"
+                f"closing fill has no matching {position_side} "
+                f"position: {symbol}"
             )
 
         old_qty = Decimal(current["quantity"])
@@ -256,18 +276,36 @@ def derive_positions_from_fills(fills):
         remaining = old_qty - qty
 
         if remaining == 0:
-            del positions[symbol]
+            del symbol_positions[position_side]
+
+            if not symbol_positions:
+                del positions[symbol]
         else:
-            positions[symbol] = {
-                "side": current["side"],
+            symbol_positions[position_side] = {
                 "quantity": str(remaining),
                 "avg_price": current["avg_price"],
             }
 
-    return positions
+    # Keep existing one-way consumers working.
+    result = {}
+
+    for symbol, sides in positions.items():
+        if len(sides) == 1:
+            side, record = next(iter(sides.items()))
+            result[symbol] = {
+                "side": side,
+                "quantity": record["quantity"],
+                "avg_price": record["avg_price"],
+            }
+        else:
+            result[symbol] = sides
+
+    return result
 
 
 def _normalize_position_map(value, field):
+    """Normalize legacy and hedge-mode position maps."""
+
     if not isinstance(value, dict):
         raise LiveStateError(f"{field} must be an object")
 
@@ -277,32 +315,63 @@ def _normalize_position_map(value, field):
         symbol = _required_text(symbol, f"{field}.symbol", 64)
 
         if not isinstance(position, dict):
-            raise LiveStateError(f"{field} position must be an object")
+            raise LiveStateError(
+                f"{field} position must be an object"
+            )
 
-        side = _required_text(
-            position.get("side"), f"{field}.side", 16
-        )
+        # Legacy single-side record.
+        if "side" in position:
+            side = _required_text(
+                position.get("side"),
+                f"{field}.side",
+                16,
+            )
 
-        if side not in ("LONG", "SHORT"):
-            raise LiveStateError(f"{field} invalid position side")
+            if side not in ("LONG", "SHORT"):
+                raise LiveStateError(
+                    f"{field} invalid position side"
+                )
 
-        quantity = _decimal(
-            position.get("quantity"),
-            f"{field}.quantity",
-            False,
-        )
+            side_records = {side: position}
+        else:
+            side_records = position
 
-        avg_price = _decimal(
-            position.get("avg_price"),
-            f"{field}.avg_price",
-            False,
-        )
+        normalized = {}
 
-        result[symbol] = {
-            "side": side,
-            "quantity": quantity,
-            "avg_price": avg_price,
-        }
+        for side, record in side_records.items():
+            if side not in ("LONG", "SHORT"):
+                raise LiveStateError(
+                    f"{field} invalid side position"
+                )
+
+            if not isinstance(record, dict):
+                raise LiveStateError(
+                    f"{field} invalid side position"
+                )
+
+            quantity = _decimal(
+                record.get("quantity"),
+                f"{field}.quantity",
+                False,
+            )
+
+            avg_price = _decimal(
+                record.get("avg_price"),
+                f"{field}.avg_price",
+                False,
+            )
+
+            normalized[side] = {
+                "quantity": quantity,
+                "avg_price": avg_price,
+            }
+
+        if not normalized:
+            raise LiveStateError(
+                f"{field} position has no active sides"
+            )
+
+        result[symbol] = normalized
 
     return result
 
@@ -312,17 +381,21 @@ def _positions_equal(left, right):
         return False
 
     for symbol in left:
-        a = left[symbol]
-        b = right[symbol]
+        left_sides = left[symbol]
+        right_sides = right[symbol]
 
-        if a["side"] != b["side"]:
+        if set(left_sides) != set(right_sides):
             return False
 
-        if a["quantity"] != b["quantity"]:
-            return False
+        for side in left_sides:
+            a = left_sides[side]
+            b = right_sides[side]
 
-        if a["avg_price"] != b["avg_price"]:
-            return False
+            if a["quantity"] != b["quantity"]:
+                return False
+
+            if a["avg_price"] != b["avg_price"]:
+                return False
 
     return True
 
@@ -371,16 +444,17 @@ def _validate_state(state, expected_identity=None):
     if expected_identity is not None and identity != expected_identity:
         raise LiveStateError("account identity mismatch")
 
-    if not isinstance(state.get("strategy_hash"), str):
-        raise LiveStateError("strategy_hash missing")
+    strategy_hash = state.get("strategy_hash")
 
-    if not state["strategy_hash"].strip():
+    if not isinstance(strategy_hash, str) or not strategy_hash.strip():
         raise LiveStateError("strategy_hash missing")
 
     for field in ("sequence", "created_at_ms", "updated_at_ms"):
         value = state.get(field)
+
         if isinstance(value, bool) or not isinstance(value, int):
             raise LiveStateError(f"invalid {field}")
+
         if value < 0:
             raise LiveStateError(f"invalid {field}")
 
@@ -393,18 +467,24 @@ def _validate_state(state, expected_identity=None):
     if not isinstance(state.get("positions"), dict):
         raise LiveStateError("positions must be an object")
 
+    # Validate both legacy and hedge-mode position structures.
+    _normalize_position_map(state["positions"], "positions")
+
     if not isinstance(state.get("processed_trade_ids"), list):
         raise LiveStateError("processed_trade_ids must be a list")
 
     ids = state["processed_trade_ids"]
 
-    if not all(isinstance(x, str) and x for x in ids):
+    if not all(isinstance(item, str) and item for item in ids):
         raise LiveStateError("invalid processed trade ID")
 
     if len(set(ids)) != len(ids):
         raise LiveStateError("duplicate processed trade IDs")
 
-    if not isinstance(state.get("balance_snapshot"), (dict, type(None))):
+    if not isinstance(
+        state.get("balance_snapshot"),
+        (dict, type(None)),
+    ):
         raise LiveStateError("invalid balance_snapshot")
 
     if not isinstance(
@@ -431,14 +511,23 @@ def create_initial_state(
     now_ms=None,
 ):
     account_identity = _required_text(
-        account_identity, "account_identity"
+        account_identity,
+        "account_identity",
     )
-    strategy_hash = _required_text(strategy_hash, "strategy_hash")
+
+    strategy_hash = _required_text(
+        strategy_hash,
+        "strategy_hash",
+    )
 
     if environment not in ENVIRONMENTS:
         raise ValueError("environment must be DEMO or LIVE")
 
-    timestamp = int(time.time() * 1000) if now_ms is None else now_ms
+    timestamp = (
+        int(time.time() * 1000)
+        if now_ms is None
+        else now_ms
+    )
 
     if isinstance(timestamp, bool) or not isinstance(timestamp, int):
         raise ValueError("now_ms must be an integer")
@@ -469,7 +558,7 @@ def create_initial_state(
 
 
 class LiveExecutionStateStore:
-    """Atomic local store. Persistent private storage is still required."""
+    """Atomic local store; persistent private storage is still required."""
 
     def __init__(self, path, account_identity):
         if not isinstance(path, str) or not os.path.isabs(path):
@@ -478,13 +567,14 @@ class LiveExecutionStateStore:
         self.path = path
         self.lock_path = path + ".lock"
         self.account_identity = _required_text(
-            account_identity, "account_identity"
+            account_identity,
+            "account_identity",
         )
 
     def _locked(self):
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
-        return open(self.lock_path, "a+", encoding="utf-8")
+        return open(self.lock_path, "a+b")
 
     def load(self):
         if not os.path.exists(self.path):
@@ -505,7 +595,7 @@ class LiveExecutionStateStore:
 
     def initialize(self, environment, strategy_hash, now_ms=None):
         with self._locked() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _lock_exclusive(lock)
 
             if os.path.exists(self.path):
                 raise LiveStateError(
@@ -547,19 +637,25 @@ class LiveExecutionStateStore:
 
             os.replace(temp_path, self.path)
 
-            dir_fd = os.open(directory, os.O_RDONLY)
+            # Directory fsync is supported on POSIX, not Windows.
+            if os.name != "nt":
+                dir_fd = os.open(directory, os.O_RDONLY)
 
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
 
         finally:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
 
     def _update(self, event_name, mutator, now_ms=None):
-        timestamp = int(time.time() * 1000) if now_ms is None else now_ms
+        timestamp = (
+            int(time.time() * 1000)
+            if now_ms is None
+            else now_ms
+        )
 
         if isinstance(timestamp, bool) or not isinstance(timestamp, int):
             raise ValueError("now_ms must be an integer")
@@ -568,12 +664,14 @@ class LiveExecutionStateStore:
             raise ValueError("now_ms must be positive")
 
         with self._locked() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _lock_exclusive(lock)
 
             state = self.load()
 
             if timestamp < state["updated_at_ms"]:
-                raise LiveStateError("state update timestamp regressed")
+                raise LiveStateError(
+                    "state update timestamp regressed"
+                )
 
             updated = copy.deepcopy(state)
             mutator(updated)
@@ -592,7 +690,8 @@ class LiveExecutionStateStore:
         positions = derive_positions_from_fills(fills)
 
         trade_ids = sorted(
-            row["trade_id"] for row in normalized
+            row["trade_id"]
+            for row in normalized
         )
 
         def mutate(state):
@@ -609,19 +708,30 @@ class LiveExecutionStateStore:
             state["positions"] = positions
 
         return self._update(
-            "FILL_HISTORY_REBUILT", mutate, now_ms
+            "FILL_HISTORY_REBUILT",
+            mutate,
+            now_ms,
         )
 
     def record_balance_snapshot(self, snapshot, now_ms=None):
         if not isinstance(snapshot, dict):
-            raise LiveStateError("balance snapshot must be an object")
+            raise LiveStateError(
+                "balance snapshot must be an object"
+            )
 
-        now = int(time.time() * 1000) if now_ms is None else now_ms
+        now = (
+            int(time.time() * 1000)
+            if now_ms is None
+            else now_ms
+        )
 
         if isinstance(now, bool) or not isinstance(now, int):
             raise ValueError("now_ms must be an integer")
 
-        source = _required_text(snapshot.get("source"), "balance.source")
+        source = _required_text(
+            snapshot.get("source"),
+            "balance.source",
+        )
 
         if source != BALANCE_SOURCE:
             raise LiveStateError("untrusted balance source")
@@ -631,18 +741,29 @@ class LiveExecutionStateStore:
             "balance.exchange_timestamp_ms",
         )
 
-        _check_freshness(exchange_ts, now, "balance timestamp")
+        _check_freshness(
+            exchange_ts,
+            now,
+            "balance timestamp",
+        )
 
-        asset = _required_text(snapshot.get("asset"), "balance.asset", 16)
+        asset = _required_text(
+            snapshot.get("asset"),
+            "balance.asset",
+            16,
+        )
 
         if asset != "USDT":
             raise LiveStateError("unexpected balance asset")
 
         wallet = _decimal(
-            snapshot.get("wallet_balance"), "wallet_balance"
+            snapshot.get("wallet_balance"),
+            "wallet_balance",
         )
+
         available = _decimal(
-            snapshot.get("available_balance"), "available_balance"
+            snapshot.get("available_balance"),
+            "available_balance",
         )
 
         if available > wallet:
@@ -663,7 +784,10 @@ class LiveExecutionStateStore:
             previous = state.get("balance_snapshot")
 
             if previous is not None:
-                old_ts = previous.get("exchange_timestamp_ms", 0)
+                old_ts = previous.get(
+                    "exchange_timestamp_ms",
+                    0,
+                )
 
                 if exchange_ts < old_ts:
                     raise LiveStateError(
@@ -673,20 +797,30 @@ class LiveExecutionStateStore:
             state["balance_snapshot"] = clean
 
         return self._update(
-            "BALANCE_SNAPSHOT_RECORDED", mutate, now
+            "BALANCE_SNAPSHOT_RECORDED",
+            mutate,
+            now,
         )
 
     def record_reconciliation(self, result, now_ms=None):
         if not isinstance(result, dict):
-            raise LiveStateError("reconciliation must be an object")
+            raise LiveStateError(
+                "reconciliation must be an object"
+            )
 
-        now = int(time.time() * 1000) if now_ms is None else now_ms
+        now = (
+            int(time.time() * 1000)
+            if now_ms is None
+            else now_ms
+        )
 
         if isinstance(now, bool) or not isinstance(now, int):
             raise ValueError("now_ms must be an integer")
 
         if not isinstance(result.get("ok"), bool):
-            raise LiveStateError("reconciliation ok must be boolean")
+            raise LiveStateError(
+                "reconciliation ok must be boolean"
+            )
 
         if not isinstance(result.get("halt_trading"), bool):
             raise LiveStateError(
@@ -694,11 +828,14 @@ class LiveExecutionStateStore:
             )
 
         source = _required_text(
-            result.get("source"), "reconciliation.source"
+            result.get("source"),
+            "reconciliation.source",
         )
 
         if source != POSITION_SOURCE:
-            raise LiveStateError("untrusted reconciliation source")
+            raise LiveStateError(
+                "untrusted reconciliation source"
+            )
 
         exchange_ts = _timestamp(
             result.get("exchange_timestamp_ms"),
@@ -706,7 +843,9 @@ class LiveExecutionStateStore:
         )
 
         _check_freshness(
-            exchange_ts, now, "reconciliation timestamp"
+            exchange_ts,
+            now,
+            "reconciliation timestamp",
         )
 
         expected = result.get("symbols_expected")
@@ -717,7 +856,9 @@ class LiveExecutionStateStore:
             or not isinstance(checked, list)
             or not expected
         ):
-            raise LiveStateError("symbol coverage is missing")
+            raise LiveStateError(
+                "symbol coverage is missing"
+            )
 
         expected = [
             _required_text(x, "expected symbol", 64)
@@ -730,10 +871,14 @@ class LiveExecutionStateStore:
         ]
 
         if len(set(expected)) != len(expected):
-            raise LiveStateError("duplicate expected symbols")
+            raise LiveStateError(
+                "duplicate expected symbols"
+            )
 
         if len(set(checked)) != len(checked):
-            raise LiveStateError("duplicate checked symbols")
+            raise LiveStateError(
+                "duplicate checked symbols"
+            )
 
         if set(expected) != set(checked):
             raise LiveStateError(
@@ -753,10 +898,14 @@ class LiveExecutionStateStore:
         reasons = result.get("reasons", [])
 
         if not isinstance(reasons, list):
-            raise LiveStateError("reconciliation reasons must be a list")
+            raise LiveStateError(
+                "reconciliation reasons must be a list"
+            )
 
         if not all(isinstance(x, str) for x in reasons):
-            raise LiveStateError("invalid reconciliation reason")
+            raise LiveStateError(
+                "invalid reconciliation reason"
+            )
 
         def mutate(state):
             balance = state.get("balance_snapshot")
@@ -766,7 +915,9 @@ class LiveExecutionStateStore:
                     "fresh balance required before reconciliation"
                 )
 
-            balance_age = now - balance["exchange_timestamp_ms"]
+            balance_age = (
+                now - balance["exchange_timestamp_ms"]
+            )
 
             if (
                 balance_age < -MAX_FUTURE_SKEW_MS
@@ -777,7 +928,8 @@ class LiveExecutionStateStore:
                 )
 
             local_positions = _normalize_position_map(
-                state["positions"], "local_positions"
+                state["positions"],
+                "local_positions",
             )
 
             if not set(local_positions).issubset(set(expected)):
@@ -786,22 +938,34 @@ class LiveExecutionStateStore:
                 )
 
             if not _positions_equal(
-                local_positions, exchange_positions
+                local_positions,
+                exchange_positions,
             ):
                 raise LiveStateError(
                     "exchange and local positions do not match"
                 )
 
-            if result["ok"] is not True or result["halt_trading"] is not False:
+            if (
+                result["ok"] is not True
+                or result["halt_trading"] is not False
+            ):
                 state["halted"] = True
                 state["halt_reason"] = "reconciliation_failed"
+
             elif reasons:
                 state["halted"] = True
-                state["halt_reason"] = "reconciliation_has_reasons"
-            elif state["halt_reason"] == "initial_state_requires_reconciliation":
+                state["halt_reason"] = (
+                    "reconciliation_has_reasons"
+                )
+
+            elif (
+                state["halt_reason"]
+                == "initial_state_requires_reconciliation"
+            ):
                 state["halted"] = False
                 state["halt_reason"] = None
 
+            # A manual halt is never cleared by reconciliation.
             state["reconciliation_snapshot"] = {
                 "source": source,
                 "ok": result["ok"],
@@ -814,14 +978,24 @@ class LiveExecutionStateStore:
             }
 
         return self._update(
-            "RECONCILIATION_RECORDED", mutate, now
+            "RECONCILIATION_RECORDED",
+            mutate,
+            now,
         )
 
     def halt(self, reason, now_ms=None):
-        reason = _required_text(reason, "reason", 512)
+        reason = _required_text(
+            reason,
+            "reason",
+            512,
+        )
 
         def mutate(state):
             state["halted"] = True
             state["halt_reason"] = reason
 
-        return self._update("MANUAL_HALT", mutate, now_ms)
+        return self._update(
+            "MANUAL_HALT",
+            mutate,
+            now_ms,
+        )
