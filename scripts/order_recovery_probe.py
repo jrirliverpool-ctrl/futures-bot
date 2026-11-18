@@ -116,10 +116,25 @@ def _raw_order(response):
 
     normalized = dict(data)
 
-    normalized["side"] = _canonical_side(
-        data.get("side"),
-        data.get("positionSide"),
-    )
+    raw_side = data.get("side")
+    position_side = data.get("positionSide")
+
+    if raw_side in LEGACY_TRADE_SIDES:
+        if position_side not in (None, ""):
+            raise ValueError(
+                "legacy order side must not include positionSide"
+            )
+        canonical_side = raw_side
+    else:
+        canonical_side = _canonical_side(
+            raw_side,
+            position_side,
+        )
+
+    # Preserve the exchange's original V2 side + positionSide pair.
+    # The fill ledger validates that pair itself. Store the canonical
+    # combined side separately for the intent-vs-order comparison.
+    normalized["_canonical_side"] = canonical_side
 
     return normalized
 
@@ -135,12 +150,18 @@ def _normalize_trade(raw):
     position_side = normalized.get("positionSide")
 
     if side in LEGACY_TRADE_SIDES:
+        if position_side not in (None, ""):
+            raise ValueError(
+                "legacy trade side must not include positionSide"
+            )
         return normalized
 
-    normalized["side"] = _canonical_side(
-        side,
-        position_side,
-    )
+    # Validate the V2 side pair, but preserve the exchange fields.
+    # fill_ledger.normalize_user_trade() expects V2 rows to retain
+    # side=BUY/SELL together with positionSide=LONG/SHORT. Rewriting
+    # side to BUY_OPEN/SELL_CLOSE here would create an invalid hybrid
+    # payload and make fill reconciliation fail.
+    _canonical_side(side, position_side)
 
     return normalized
 
@@ -267,7 +288,7 @@ class OrderRecoveryProbe:
         start_time,
         end_time,
     ):
-        """Prefer V2 read-only method; never silently accept bad results."""
+        """Prefer V2 read-only user trades method."""
         method = getattr(
             self.client,
             "get_user_trades_v2",
@@ -434,7 +455,7 @@ class OrderRecoveryProbe:
 
             if (
                 expected_side is None
-                or order["side"] != expected_side
+                or order.get("_canonical_side") != expected_side
             ):
                 return self._failure(
                     client_order_id,
@@ -559,5 +580,4 @@ class OrderRecoveryProbe:
         }
 
         result.update(extra)
-
         return result
