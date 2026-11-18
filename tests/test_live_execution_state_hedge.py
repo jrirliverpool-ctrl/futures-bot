@@ -1,3 +1,4 @@
+
 import os
 import sys
 
@@ -113,8 +114,26 @@ def test_closing_short_preserves_long_position():
         fill("close-short", "BUY_CLOSE", "1", "105", NOW - 100),
     ])
 
-    assert result[SYMBOL]["LONG"]["quantity"] == "2"
-    assert "SHORT" not in result[SYMBOL]
+    # One remaining side must use the legacy-compatible representation.
+    assert result[SYMBOL] == {
+        "side": "LONG",
+        "quantity": "2",
+        "avg_price": "100",
+    }
+
+
+def test_closing_long_preserves_short_in_legacy_format():
+    result = derive_positions_from_fills([
+        fill("long", "BUY_OPEN", "2", "100", NOW - 300),
+        fill("short", "SELL_OPEN", "1", "110", NOW - 200),
+        fill("close-long", "SELL_CLOSE", "2", "105", NOW - 100),
+    ])
+
+    assert result[SYMBOL] == {
+        "side": "SHORT",
+        "quantity": "1",
+        "avg_price": "110",
+    }
 
 
 def test_single_side_result_remains_backward_compatible():
