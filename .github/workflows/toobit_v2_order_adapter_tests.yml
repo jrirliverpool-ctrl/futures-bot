@@ -7,59 +7,90 @@ on:
   push:
     paths:
       - 'scripts/toobit_v2_order_adapter.py'
-      - 'scripts/order_recovery_probe.py'
-      - 'scripts/toobit_trade_pagination.py'
-      - 'scripts/order_intent_store.py'
-      - 'scripts/fill_ledger.py'
-      - 'scripts/execution_manager.py'
-      - 'scripts/order_executor.py'
+      - 'scripts/toobit_client.py'
+      - 'scripts/toobit_open_orders.py'
+      - 'scripts/toobit_protection.py'
       - 'scripts/toobit_readonly_preflight.py'
       - 'scripts/toobit_live_readiness_gate.py'
       - 'scripts/toobit_readonly_reconciliation.py'
       - 'scripts/toobit_capital_feasibility.py'
+      - 'scripts/toobit_trade_pagination.py'
+      - 'scripts/toobit_full_account_trade_audit.py'
+      - 'scripts/toobit_fee_batch_audit.py'
+      - 'scripts/symbol_specs.py'
+      - 'scripts/live_risk_precheck.py'
+      - 'scripts/order_recovery_probe.py'
+      - 'scripts/order_intent_store.py'
+      - 'scripts/fill_ledger.py'
+      - 'scripts/execution_manager.py'
+      - 'scripts/order_executor.py'
       - 'scripts/live_execution_state.py'
+      - 'scripts/paper_engine.py'
+      - 'scripts/paper_engine_v2.py'
+      - 'scripts/state_manager_v2.py'
+      - 'scripts/strategy_config.py'
+      - 'scripts/compute_hash.py'
+      - 'src/funding_quality.py'
       - 'tests/**'
       - '.github/workflows/toobit_v2_order_adapter_tests.yml'
 
   pull_request:
     paths:
       - 'scripts/toobit_v2_order_adapter.py'
-      - 'scripts/order_recovery_probe.py'
-      - 'scripts/toobit_trade_pagination.py'
-      - 'scripts/order_intent_store.py'
-      - 'scripts/fill_ledger.py'
-      - 'scripts/execution_manager.py'
-      - 'scripts/order_executor.py'
+      - 'scripts/toobit_client.py'
+      - 'scripts/toobit_open_orders.py'
+      - 'scripts/toobit_protection.py'
       - 'scripts/toobit_readonly_preflight.py'
       - 'scripts/toobit_live_readiness_gate.py'
       - 'scripts/toobit_readonly_reconciliation.py'
       - 'scripts/toobit_capital_feasibility.py'
+      - 'scripts/toobit_trade_pagination.py'
+      - 'scripts/toobit_full_account_trade_audit.py'
+      - 'scripts/toobit_fee_batch_audit.py'
+      - 'scripts/symbol_specs.py'
+      - 'scripts/live_risk_precheck.py'
+      - 'scripts/order_recovery_probe.py'
+      - 'scripts/order_intent_store.py'
+      - 'scripts/fill_ledger.py'
+      - 'scripts/execution_manager.py'
+      - 'scripts/order_executor.py'
       - 'scripts/live_execution_state.py'
+      - 'scripts/paper_engine.py'
+      - 'scripts/paper_engine_v2.py'
+      - 'scripts/state_manager_v2.py'
+      - 'scripts/strategy_config.py'
+      - 'scripts/compute_hash.py'
+      - 'src/funding_quality.py'
       - 'tests/**'
       - '.github/workflows/toobit_v2_order_adapter_tests.yml'
 
 permissions:
   contents: read
 
+concurrency:
+  group: apexquant-toobit-safety-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   api-and-execution-safety:
     name: API, recovery, accounting and risk regression
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: python -m pip install --disable-pip-version-check requests pytest
+        run: |
+          python -m pip install --disable-pip-version-check requests pytest
 
-      - name: Run V2 adapter and execution safety regression
+      - name: Run Toobit API and order adapter tests
         env:
           PYTHONPATH: scripts
         run: |
@@ -67,19 +98,57 @@ jobs:
             tests/test_toobit_v2_order_adapter.py \
             tests/test_toobit_client.py \
             tests/test_toobit_v2_readonly.py \
-            tests/test_order_recovery_probe.py \
+            tests/test_toobit_open_orders.py \
+            tests/test_toobit_protection.py \
             tests/test_toobit_trade_pagination.py \
+            tests/test_toobit_user_trades.py
+
+      - name: Run order recovery and accounting tests
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python -m pytest -q \
+            tests/test_order_recovery_probe.py \
             tests/test_order_intent_store.py \
             tests/test_fill_ledger.py \
             tests/test_fill_ledger_v2.py \
+            tests/test_fill_ledger_accounting.py \
             tests/test_execution_manager.py \
+            tests/test_callback_decision_propagation.py
+
+      - name: Run order sizing and portfolio risk tests
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python -m pytest -q \
             tests/test_order_executor.py \
+            tests/test_live_risk_precheck.py \
             tests/test_portfolio_risk.py \
-            tests/test_callback_decision_propagation.py \
+            tests/test_state_manager_v2.py \
+            tests/test_paper_engine_v2.py \
+            tests/test_run_multi_symbol.py \
+            tests/test_strategy_to_execution.py \
+            tests/test_signal_to_order.py
+
+      - name: Run exchange metadata and account readiness tests
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python -m pytest -q \
             tests/test_toobit_readonly_preflight.py \
             tests/test_toobit_live_readiness_gate.py \
             tests/test_toobit_readonly_reconciliation.py \
             tests/test_toobit_capital_feasibility.py \
+            tests/test_toobit_full_account_trade_audit.py \
             tests/test_live_execution_state.py \
-            tests/test_live_execution_state_hedge.py \
-            tests/test_toobit_full_account_trade_audit.py
+            tests/test_live_execution_state_hedge.py
+
+      - name: Run strategy, hash and funding quality tests
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python -m pytest -q \
+            tests/test_strategy_config.py \
+            tests/test_strategy_hash_contract.py \
+            tests/test_hash_regression.py \
+            tests/test_funding_quality.py
