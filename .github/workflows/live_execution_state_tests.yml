@@ -1,0 +1,75 @@
+name: ApexQuant Live Execution State Tests
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/live_execution_state.py"
+      - "tests/test_live_execution_state.py"
+      - "tests/test_live_execution_state_hedge.py"
+      - ".github/workflows/live_execution_state_tests.yml"
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "scripts/live_execution_state.py"
+      - "tests/test_live_execution_state.py"
+      - "tests/test_live_execution_state_hedge.py"
+      - ".github/workflows/live_execution_state_tests.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apexquant-live-state-tests-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-live-state:
+    name: State Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify State Module Syntax
+        run: |
+          python -m py_compile scripts/live_execution_state.py
+
+      - name: Run Legacy State Tests
+        run: |
+          python -m pytest -q tests/test_live_execution_state.py
+
+      - name: Run Hedge Mode and Cross-Platform Tests
+        run: |
+          python -m pytest -q tests/test_live_execution_state_hedge.py
+
+      - name: Report Environment
+        if: always()
+        run: |
+          python --version
+          python -c "import os; print('OS=' + os.name)"
