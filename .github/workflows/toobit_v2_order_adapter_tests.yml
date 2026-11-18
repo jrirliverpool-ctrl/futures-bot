@@ -1,3 +1,4 @@
+
 name: ApexQuant Toobit V2 Adapter and Safety Regression
 
 on:
@@ -80,4 +81,5 @@ jobs:
             tests/test_toobit_readonly_reconciliation.py \
             tests/test_toobit_capital_feasibility.py \
             tests/test_live_execution_state.py \
+            tests/test_live_execution_state_hedge.py \
             tests/test_toobit_full_account_trade_audit.py
