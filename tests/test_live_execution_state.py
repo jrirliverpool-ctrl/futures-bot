@@ -248,7 +248,7 @@ def test_same_timestamp_different_symbols_is_allowed():
 
 
 def test_closing_without_open_rejected():
-    with pytest.raises(LiveStateError, match="no matching open"):
+    with pytest.raises(LiveStateError, match="no matching LONG position"):
         derive_positions_from_fills([
             fill("1", "SELL_CLOSE", "1", "100", NOW - 100)
         ])
@@ -264,14 +264,23 @@ def test_close_quantity_exceeding_open_rejected():
         derive_positions_from_fills(fills)
 
 
-def test_opposite_open_without_close_rejected():
+def test_opposite_open_creates_independent_hedge_positions():
     fills = [
         fill("1", "BUY_OPEN", "1", "100", NOW - 200),
         fill("2", "SELL_OPEN", "1", "105", NOW - 100),
     ]
 
-    with pytest.raises(LiveStateError, match="opposite-side"):
-        derive_positions_from_fills(fills)
+    result = derive_positions_from_fills(fills)
+
+    assert set(result[SYMBOL]) == {"LONG", "SHORT"}
+    assert result[SYMBOL]["LONG"] == {
+        "quantity": "1",
+        "avg_price": "100",
+    }
+    assert result[SYMBOL]["SHORT"] == {
+        "quantity": "1",
+        "avg_price": "105",
+    }
 
 
 @pytest.mark.parametrize(
