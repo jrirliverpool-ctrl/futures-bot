@@ -18,6 +18,10 @@ import time
 from decimal import Decimal, InvalidOperation
 
 from fill_ledger import reconcile_order_fills
+from toobit_trade_pagination import (
+    TradePaginationError,
+    fetch_complete_user_trades_v2,
+)
 
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED"}
@@ -278,39 +282,38 @@ class OrderRecoveryProbe:
         start_time,
         end_time,
     ):
-        """Prefer V2 read-only user trades method."""
-        method = getattr(
-            self.client,
-            "get_user_trades_v2",
-            None,
-        )
-
-        if not callable(method):
-            method = getattr(
-                self.client,
-                "get_user_trades",
-                None,
+        """Fetch a complete trade window, preferring strict V2 pagination."""
+        if callable(getattr(self.client, "get_user_trades_v2", None)):
+            try:
+                rows = fetch_complete_user_trades_v2(
+                    self.client,
+                    symbol,
+                    start_time=start_time,
+                    end_time=end_time,
+                    page_size=self.trade_limit,
+                    max_pages=100,
+                )
+            except TradePaginationError as exc:
+                raise ValueError(
+                    f"user_trades_v2_pagination_incomplete: {exc}"
+                ) from None
+        else:
+            method = getattr(self.client, "get_user_trades", None)
+            if not callable(method):
+                raise RuntimeError(
+                    "client has no supported read-only user trades method"
+                )
+            rows = method(
+                symbol,
+                start_time=start_time,
+                end_time=end_time,
+                limit=self.trade_limit,
             )
-
-        if not callable(method):
-            raise RuntimeError(
-                "client has no supported read-only user trades method"
-            )
-
-        rows = method(
-            symbol,
-            start_time=start_time,
-            end_time=end_time,
-            limit=self.trade_limit,
-        )
 
         if not isinstance(rows, list):
-            raise ValueError(
-                "user trades response is not a list"
-            )
+            raise ValueError("user trades response is not a list")
 
         normalized = []
-
         for index, row in enumerate(rows):
             try:
                 normalized.append(_normalize_trade(row))
@@ -387,7 +390,6 @@ class OrderRecoveryProbe:
             )
 
         try:
-            # Record which read-only API implementation is selected.
             order_api_version = (
                 "V2"
                 if callable(
@@ -505,12 +507,17 @@ class OrderRecoveryProbe:
                 now_ms,
             )
 
-            if len(raw_trades) >= self.trade_limit:
+            # A full V1 page may be truncated. V2 is accepted only after
+            # fetch_complete_user_trades_v2 has proven pagination complete.
+            if (
+                trades_api_version == "V1"
+                and len(raw_trades) >= self.trade_limit
+            ):
                 return self._failure(
                     client_order_id,
                     "user_trades_result_may_be_truncated",
                     detail=(
-                        "Returned row count reached the requested limit; "
+                        "V1 result reached the requested limit; "
                         "complete pagination has not been proven."
                     ),
                 )
