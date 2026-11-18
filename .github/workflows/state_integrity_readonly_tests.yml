@@ -1,0 +1,61 @@
+
+name: ApexQuant State Integrity Read-only Tests
+
+on:
+  workflow_dispatch:
+
+  push:
+    paths:
+      - 'scripts/start_new_period.py'
+      - 'scripts/state_manager.py'
+      - 'scripts/compute_hash.py'
+      - 'scripts/strategy_config.py'
+      - 'tests/test_start_period.py'
+      - 'tests/test_state_manager.py'
+      - 'tests/test_state_strategy_version_guard.py'
+      - 'tests/test_hash_regression.py'
+      - '.github/workflows/state_integrity_readonly_tests.yml'
+
+  pull_request:
+    paths:
+      - 'scripts/start_new_period.py'
+      - 'scripts/state_manager.py'
+      - 'scripts/compute_hash.py'
+      - 'scripts/strategy_config.py'
+      - 'tests/test_start_period.py'
+      - 'tests/test_state_manager.py'
+      - 'tests/test_state_strategy_version_guard.py'
+      - 'tests/test_hash_regression.py'
+      - '.github/workflows/state_integrity_readonly_tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  state-integrity:
+    name: State, strategy metadata and archive regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pytest requests
+
+      - name: Run state integrity regression
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python -m pytest -q \
+            tests/test_start_period.py \
+            tests/test_state_manager.py \
+            tests/test_state_strategy_version_guard.py \
+            tests/test_hash_regression.py
