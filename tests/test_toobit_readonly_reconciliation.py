@@ -110,8 +110,10 @@ def test_matching_account_snapshot_passes_read_only():
     assert result["orders_ok"] is True
     assert result["read_only"] is True
 
+    # The coordinator requires two identical consecutive snapshots.
     assert client.calls == [
-        ("GET", "/api/v1/futures/positions", {})
+        ("GET", "/api/v1/futures/positions", {}),
+        ("GET", "/api/v1/futures/positions", {}),
     ]
 
     assert store.calls == ["recovery_required"]
@@ -235,7 +237,10 @@ def test_positions_transport_exception_halts():
 
     assert result["ok"] is False
     assert result["halt_trading"] is True
-    assert result["reason"] == "positions_request_failed"
+    assert result["reason"] == "positions_snapshot_not_stable"
+    assert result["detail"] == (
+        "positions_request_failed:TimeoutError"
+    )
 
 
 def test_corrupt_intent_store_halts():
