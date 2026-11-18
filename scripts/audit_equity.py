@@ -1,113 +1,210 @@
+
 """
-audit_equity.py — v3.0 Strict Equity Audit.
-Fails if:
-  - State/Events missing or corrupt.
-  - Open position exists (unrealized PnL cannot be reconciled).
-  - Empty ledger without a valid period_start_utc marker.
-  - Equity does not match ledger.
+Strict paper equity audit.
+
+Uses period_start_equity for period-local ledger reconciliation.
+Falls back to initial_equity for older states.
+
+Read-only. Never changes state or event history.
 """
+
 import json
+import math
 import os
 import sys
 
-def main():
-    state_dir = os.environ.get("STATE_DIR", "./paper_state_dir")
-    state_path = os.path.join(state_dir, "state.json")
-    events_path = os.path.join(state_dir, "events.jsonl")
 
-    # 1. بررسی وجود State
-    if not os.path.exists(state_path):
-        print("❌ AUDIT FAILED: state.json not found.")
-        sys.exit(1)
-        
+def fail(message):
+    print(f"AUDIT FAILED: {message}")
+    return 1
+
+
+def finite_number(value):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def read_json(path):
     try:
-        with open(state_path, "r") as f:
-            state = json.load(f)
-    except json.JSONDecodeError:
-        print("❌ AUDIT FAILED: state.json is corrupted.")
-        sys.exit(1)
+        with open(path, "r", encoding="utf-8") as source:
+            value = json.load(source)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot read {path}: {exc}"
+        ) from exc
 
-    print("=" * 50)
-    print("EQUITY AUDIT v3.0 (STRICT)")
-    print("=" * 50)
-    print(f"Current Equity: {state['equity']}")
-    print(f"Initial Equity: {state['initial_equity']}")
-    print(f"Period Start UTC: {state.get('period_start_utc', 'N/A')}")
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            f"{path} must contain a JSON object."
+        )
 
-    # 2. بررسی پوزیشن باز (عدم امکان حسابرسی دقیق)
+    return value
+
+
+def main():
+    state_dir = os.environ.get(
+        "STATE_DIR",
+        "./paper_state_dir",
+    )
+
+    state_path = os.path.join(
+        state_dir,
+        "state.json",
+    )
+
+    events_path = os.path.join(
+        state_dir,
+        "events.jsonl",
+    )
+
+    if not os.path.isfile(state_path):
+        return fail("state.json not found.")
+
+    if not os.path.isfile(events_path):
+        return fail("events.jsonl not found.")
+
+    try:
+        state = read_json(state_path)
+    except RuntimeError as exc:
+        return fail(str(exc))
+
+    for key in (
+        "initial_equity",
+        "equity",
+        "peak_equity",
+    ):
+        if not finite_number(state.get(key)):
+            return fail(f"Invalid financial field: {key}")
+
     if state.get("position") is not None:
-        print("\n❌ AUDIT FAILED: Open position exists.")
-        print("   Cannot verify equity against realized ledger while a position is open.")
-        print("   Wait for the position to close before running this audit.")
-        sys.exit(1)
-    print("✅ No open position (all PnL is realized).")
+        return fail(
+            "Open position exists. "
+            "Unrealized PnL cannot be reconciled by this audit."
+        )
 
-    # 3. بررسی فایل Events
-    if not os.path.exists(events_path):
-        print("❌ AUDIT FAILED: events.jsonl not found.")
-        sys.exit(1)
+    period_start_equity = state.get(
+        "period_start_equity",
+        state["initial_equity"],
+    )
 
-    file_size = os.path.getsize(events_path)
-    if file_size == 0:
-        # حالت دفتر خالی: فقط اگر مارکر دوره جدید وجود داشته باشد مجاز است
-        if state.get("period_start_utc"):
-            if abs(state['equity'] - state['initial_equity']) < 1e-9:
-                print(f"\n✅ AUDIT PASSED: Fresh period verified.")
-                print(f"   Period Start: {state['period_start_utc']}")
-                print(f"   Base Equity: {state['initial_equity']}")
-                print("   Ledger is empty, but period marker is valid.")
-                sys.exit(0)
-            else:
-                print("\n❌ AUDIT FAILED: Empty ledger but Equity != Initial Equity.")
-                sys.exit(1)
-        else:
-            print("\n❌ AUDIT FAILED: events.jsonl is empty AND no period_start_utc marker.")
-            print("   This means either the file is missing/corrupted, or a new period was never explicitly started.")
-            sys.exit(1)
+    if not finite_number(period_start_equity):
+        return fail("Invalid period_start_equity.")
 
-    # 4. پردازش رویدادها (حسابرسی عادی)
+    if period_start_equity <= 0:
+        return fail("period_start_equity must be positive.")
+
     total_gross_pnl = 0.0
     total_commissions = 0.0
     total_funding = 0.0
+
     event_count = 0
     exit_count = 0
 
-    with open(events_path, "r") as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line: continue
-            try:
-                ev = json.loads(line)
+    try:
+        with open(events_path, "r", encoding="utf-8") as source:
+            for line_number, line in enumerate(source, start=1):
+                if not line.strip():
+                    continue
+
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    return fail(
+                        f"Invalid JSON in events.jsonl "
+                        f"at line {line_number}."
+                    )
+
+                if not isinstance(event, dict):
+                    return fail(
+                        f"Invalid event object at line {line_number}."
+                    )
+
                 event_count += 1
-            except json.JSONDecodeError:
-                print(f"❌ AUDIT FAILED: Corrupted JSON at line {line_num}")
-                sys.exit(1)
-                
-            if ev.get("event_type") == "EXIT":
-                exit_count += 1
-                total_gross_pnl += ev.get("pnl_usd", 0.0)
-                # total_commission_usd شامل entry + TP1 + final است
-                total_commissions += ev.get("total_commission_usd", 0.0)
-            elif ev.get("event_type") == "FUNDING":
-                total_funding += ev.get("cashflow_usd", 0.0)
 
-    calculated_equity = state['initial_equity'] + total_gross_pnl - total_commissions + total_funding
+                event_type = event.get("event_type")
 
-    print("-" * 50)
-    print(f"Events: {event_count} (EXIT events: {exit_count})")
-    print(f"Total Gross PnL: {total_gross_pnl:.4f}")
-    print(f"Total Commissions: {total_commissions:.4f}")
-    print(f"Total Funding: {total_funding:.4f}")
-    print(f"Calculated Equity: {calculated_equity:.4f}")
-    print(f"Current Equity: {state['equity']:.4f}")
-    
-    diff = abs(calculated_equity - state['equity'])
-    if diff < 1e-5:
-        print("\n✅ AUDIT PASSED: State equity matches event ledger.")
-        sys.exit(0)
-    else:
-        print(f"\n❌ AUDIT FAILED: Difference of {diff:.4f} detected.")
-        sys.exit(1)
+                if event_type == "EXIT":
+                    exit_count += 1
+
+                    pnl = event.get(
+                        "pnl_usd",
+                        event.get("pnl_gross", 0.0),
+                    )
+
+                    commission = event.get(
+                        "total_commission_usd",
+                        event.get("commission_usd", 0.0),
+                    )
+
+                    if not finite_number(pnl):
+                        return fail(
+                            f"Invalid EXIT PnL at line {line_number}."
+                        )
+
+                    if not finite_number(commission):
+                        return fail(
+                            f"Invalid EXIT commission at line {line_number}."
+                        )
+
+                    total_gross_pnl += pnl
+                    total_commissions += commission
+
+                elif event_type == "FUNDING":
+                    cashflow = event.get(
+                        "cashflow_usd",
+                        0.0,
+                    )
+
+                    if not finite_number(cashflow):
+                        return fail(
+                            f"Invalid funding cashflow at line {line_number}."
+                        )
+
+                    total_funding += cashflow
+
+    except OSError as exc:
+        return fail(
+            f"Cannot read events.jsonl: {exc}"
+        )
+
+    calculated_equity = (
+        period_start_equity
+        + total_gross_pnl
+        - total_commissions
+        + total_funding
+    )
+
+    difference = abs(
+        calculated_equity - state["equity"]
+    )
+
+    print("=" * 55)
+    print("APEXQUANT PAPER EQUITY AUDIT")
+    print("=" * 55)
+    print(f"Period start equity : {period_start_equity:.8f}")
+    print(f"Account initial     : {state['initial_equity']:.8f}")
+    print(f"Current equity      : {state['equity']:.8f}")
+    print(f"Peak equity         : {state['peak_equity']:.8f}")
+    print(f"Events              : {event_count}")
+    print(f"EXIT events         : {exit_count}")
+    print(f"Gross PnL           : {total_gross_pnl:.8f}")
+    print(f"Commissions         : {total_commissions:.8f}")
+    print(f"Funding             : {total_funding:.8f}")
+    print(f"Calculated equity   : {calculated_equity:.8f}")
+    print(f"Difference          : {difference:.10f}")
+    print("=" * 55)
+
+    if difference > 1e-5:
+        return fail(
+            "State equity does not match the current-period ledger."
+        )
+
+    print("AUDIT PASSED")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
