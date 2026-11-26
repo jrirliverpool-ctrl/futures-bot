@@ -1,5 +1,17 @@
 
-"""Repeatability check for read-only Toobit futures position snapshots."""
+"""Repeatability check for read-only Toobit futures position snapshots.
+
+The snapshot is trusted only when two consecutive GET responses agree on:
+- symbol and position side;
+- total position quantity;
+- available quantity to close;
+- average entry price;
+- leverage;
+- margin mode.
+
+Both position and available quantities are expressed in contracts.
+No order is submitted and no state is mutated.
+"""
 
 from decimal import Decimal, InvalidOperation
 
@@ -11,7 +23,30 @@ class PositionSnapshotError(RuntimeError):
     """Raised when a complete, repeatable position list cannot be proven."""
 
 
+def _to_decimal(value, field, index):
+    if isinstance(value, bool) or value is None:
+        raise PositionSnapshotError(
+            f"{field}_missing_or_invalid:{index}"
+        )
+
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise PositionSnapshotError(
+            f"{field}_not_numeric:{index}"
+        ) from None
+
+    if not result.is_finite():
+        raise PositionSnapshotError(
+            f"{field}_not_finite:{index}"
+        )
+
+    return result
+
+
 def _signature(rows):
+    """Build a normalized signature for all active position sides."""
+
     if (
         not isinstance(rows, list)
         or not all(isinstance(row, dict) for row in rows)
@@ -36,53 +71,86 @@ def _signature(rows):
                 f"position_side_invalid:{index}"
             )
 
-        key = (symbol.strip(), side)
+        symbol = symbol.strip()
+        key = (symbol, side)
 
         if key in positions:
             raise PositionSnapshotError(
                 f"duplicate_position_side:{symbol}:{side}"
             )
 
-        try:
-            quantity = Decimal(str(row.get("position")))
-        except (InvalidOperation, TypeError, ValueError):
-            raise PositionSnapshotError(
-                f"position_quantity_invalid:{index}"
-            ) from None
+        quantity = _to_decimal(
+            row.get("position"),
+            "position_quantity",
+            index,
+        )
 
-        if not quantity.is_finite() or quantity < 0:
+        if quantity < 0:
             raise PositionSnapshotError(
-                f"position_quantity_invalid:{index}"
+                f"position_quantity_negative:{index}"
             )
 
+        # available is optional for a flat row, but if supplied it
+        # must still be a valid non-negative quantity not exceeding
+        # the total position.
+        raw_available = row.get("available")
+
+        if raw_available is None:
+            available = None
+        else:
+            available = _to_decimal(
+                raw_available,
+                "position_available",
+                index,
+            )
+
+            if available < 0:
+                raise PositionSnapshotError(
+                    f"position_available_negative:{index}"
+                )
+
+            if available > quantity:
+                raise PositionSnapshotError(
+                    f"position_available_exceeds_position:{index}"
+                )
+
         if quantity == 0:
+            if available is not None and available != 0:
+                raise PositionSnapshotError(
+                    f"flat_position_has_nonzero_available:{index}"
+                )
             continue
 
-        try:
-            average_price = Decimal(str(row.get("avgPrice")))
-        except (InvalidOperation, TypeError, ValueError):
+        # For an active position, available is mandatory. Without it,
+        # the protection layer cannot prove how much can be closed.
+        if available is None:
             raise PositionSnapshotError(
-                f"position_average_price_invalid:{index}"
-            ) from None
+                f"position_available_missing:{index}"
+            )
 
-        if not average_price.is_finite() or average_price <= 0:
+        average_price = _to_decimal(
+            row.get("avgPrice"),
+            "position_average_price",
+            index,
+        )
+
+        if average_price <= 0:
             raise PositionSnapshotError(
-                f"position_average_price_invalid:{index}"
+                f"position_average_price_not_positive:{index}"
             )
 
         leverage = row.get("leverage")
 
         if leverage is not None:
-            try:
-                leverage = Decimal(str(leverage))
-            except (InvalidOperation, TypeError, ValueError):
-                raise PositionSnapshotError(
-                    f"position_leverage_invalid:{index}"
-                ) from None
+            leverage = _to_decimal(
+                leverage,
+                "position_leverage",
+                index,
+            )
 
-            if not leverage.is_finite() or leverage <= 0:
+            if leverage <= 0:
                 raise PositionSnapshotError(
-                    f"position_leverage_invalid:{index}"
+                    f"position_leverage_not_positive:{index}"
                 )
 
         margin_type = row.get("marginType")
@@ -101,6 +169,7 @@ def _signature(rows):
 
         positions[key] = (
             quantity,
+            available,
             average_price,
             leverage,
             margin_type,
@@ -112,12 +181,17 @@ def _signature(rows):
 def fetch_stable_position_snapshot(client):
     """Return the second GET only when two consecutive core snapshots agree.
 
-    Mark price, unrealized PnL, and margin values are excluded because
-    they can change between requests without a position change.
-
-    Active side, quantity, entry price, leverage, and margin mode
-    must remain stable.
+    Volatile market fields such as mark price, unrealized PnL and margin
+    values are excluded. The available-to-close quantity is included:
+    a change in available quantity makes the snapshot unstable.
     """
+
+    if client is None or not callable(
+        getattr(client, "_request", None)
+    ):
+        raise PositionSnapshotError(
+            "positions_client_missing_request_method"
+        )
 
     snapshots = []
     signatures = []
