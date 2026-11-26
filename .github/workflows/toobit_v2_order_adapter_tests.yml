@@ -120,6 +120,7 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_order_recovery_probe.py \
+            tests/test_toobit_lifecycle_integration.py \
             tests/test_order_intent_store.py \
             tests/test_toobit_execution_bridge.py \
             tests/test_mock_order_lifecycle.py \
