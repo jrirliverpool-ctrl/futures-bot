@@ -14,6 +14,7 @@ def specs(**overrides):
     result = {
         "symbol": "BTC-SWAP-USDT",
         "status": "TRADING",
+        "quantity_unit": "contracts",
         "contract_multiplier": "1",
         "min_qty": "0.001",
         "max_qty": "100",
@@ -48,6 +49,7 @@ def test_valid_order_respects_risk_and_margin():
 
     assert result["eligible"] is True
     assert result["orders_submitted"] == 0
+    assert result["quantity_unit"] == "contracts"
     assert float(result["estimated_stop_loss_and_cost_usdt"]) <= 1.0
     assert float(result["margin_utilization"]) <= 0.50
 
@@ -107,6 +109,7 @@ def test_margin_cap_hard_limit():
     result = run(margin_utilization_cap="0.75")
 
     assert result["eligible"] is False
+    assert "margin_cap_exceeds_hard_cap" in result["blockers"]
 
 
 def test_symbol_mismatch_is_rejected():
@@ -138,4 +141,84 @@ def test_zero_quantity_step_is_rejected():
     result = run(contract_specs=specs(qty_step="0"))
 
     assert result["eligible"] is False
-    assert "qty_step_must_be_positive" in result["blockers"]
+    assert "qty_step_invalid" in result["blockers"]
+
+
+def test_wrong_quantity_unit_is_rejected():
+    result = run(
+        contract_specs=specs(quantity_unit="tokens")
+    )
+
+    assert result["eligible"] is False
+    assert "quantity_unit_must_be_contracts" in result["blockers"]
+
+
+def test_missing_quantity_unit_is_rejected():
+    contract_specs = specs()
+    contract_specs.pop("quantity_unit")
+
+    result = run(contract_specs=contract_specs)
+
+    assert result["eligible"] is False
+    assert "quantity_unit_must_be_contracts" in result["blockers"]
+
+
+def test_leverage_above_absolute_cap_is_rejected():
+    result = run(leverage="4")
+
+    assert result["eligible"] is False
+    assert "leverage_exceeds_hard_cap" in result["blockers"]
+
+
+def test_configured_leverage_cap_cannot_exceed_hard_cap():
+    result = run(leverage_cap="5")
+
+    assert result["eligible"] is False
+    assert "leverage_cap_exceeds_hard_cap" in result["blockers"]
+
+
+def test_cost_uses_stop_price_for_exit():
+    result = run()
+
+    quantity = float(result["quantity"])
+    multiplier = 1.0
+    stop = 59500.0
+    fee_plus_slippage = 0.0011
+
+    expected_exit_cost = (
+        quantity
+        * stop
+        * multiplier
+        * fee_plus_slippage
+    )
+
+    assert abs(
+        float(result["estimated_exit_cost_usdt"])
+        - expected_exit_cost
+    ) < 1e-8
+
+
+def test_short_valid_order():
+    result = run(
+        side="SHORT",
+        entry_price="60000",
+        stop_price="60500",
+    )
+
+    assert result["eligible"] is True
+
+
+def test_boolean_numeric_input_is_rejected():
+    result = run(entry_price=True)
+
+    assert result["eligible"] is False
+    assert "entry_price_invalid" in result["blockers"]
+
+
+def test_zero_minimum_notional_is_rejected():
+    result = run(
+        contract_specs=specs(min_notional="0")
+    )
+
+    assert result["eligible"] is False
+    assert "min_notional_invalid" in result["blockers"]
