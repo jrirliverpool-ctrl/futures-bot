@@ -90,9 +90,6 @@ def _signature(rows):
                 f"position_quantity_negative:{index}"
             )
 
-        # available is optional for a flat row, but if supplied it
-        # must still be a valid non-negative quantity not exceeding
-        # the total position.
         raw_available = row.get("available")
 
         if raw_available is None:
@@ -109,11 +106,8 @@ def _signature(rows):
                     f"position_available_negative:{index}"
                 )
 
-            if available > quantity:
-                raise PositionSnapshotError(
-                    f"position_available_exceeds_position:{index}"
-                )
-
+        # A flat row is not an active position. Check its own
+        # consistency before applying the active-position bound.
         if quantity == 0:
             if available is not None and available != 0:
                 raise PositionSnapshotError(
@@ -121,11 +115,15 @@ def _signature(rows):
                 )
             continue
 
-        # For an active position, available is mandatory. Without it,
-        # the protection layer cannot prove how much can be closed.
+        # For an active position, available is mandatory.
         if available is None:
             raise PositionSnapshotError(
                 f"position_available_missing:{index}"
+            )
+
+        if available > quantity:
+            raise PositionSnapshotError(
+                f"position_available_exceeds_position:{index}"
             )
 
         average_price = _to_decimal(
