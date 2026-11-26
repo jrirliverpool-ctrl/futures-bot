@@ -152,6 +152,7 @@ jobs:
             tests/test_toobit_readonly_preflight.py \
             tests/test_toobit_live_readiness_gate.py \
             tests/test_toobit_readonly_reconciliation.py \
+            tests/test_toobit_position_snapshot.py \
             tests/test_toobit_protection_reconciliation.py \
             tests/test_toobit_capital_feasibility.py \
             tests/test_toobit_full_account_trade_audit.py \
