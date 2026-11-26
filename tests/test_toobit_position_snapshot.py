@@ -87,8 +87,18 @@ def test_available_quantity_change_makes_snapshot_unstable():
 
 def test_total_position_change_makes_snapshot_unstable():
     client = FakeClient([
-        [position(position="2.5")],
-        [position(position="2.0")],
+        [
+            position(
+                position="2.5",
+                available="2.5",
+            )
+        ],
+        [
+            position(
+                position="2.0",
+                available="2.0",
+            )
+        ],
     ])
 
     with pytest.raises(
