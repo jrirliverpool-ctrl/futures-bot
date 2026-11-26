@@ -257,6 +257,7 @@ def test_unexpected_active_symbol_halts_before_algo_scan():
             "symbol": "ETH-SWAP-USDT",
             "side": "LONG",
             "position": "1",
+            "available": "1",
             "avgPrice": "3000",
         },
     ])
