@@ -1,14 +1,9 @@
 
 """Read-only, fail-closed snapshot of Toobit V2 conditional/TP-SL orders.
 
-This module only calls the documented GET /api/v2/futures/open-algo-orders
-endpoint. It reads STOP and STOP_PROFIT_LOSS separately because Toobit
-excludes TP/SL rows when stopCategory is omitted.
-
-A snapshot is accepted only when both categories return fewer than the
-requested limit and two complete scans are equivalent.
-
-No order is created, amended, or canceled by this module.
+Reads STOP and STOP_PROFIT_LOSS separately.
+Requires two equivalent, bounded scans.
+Never creates, amends, or cancels orders.
 """
 from __future__ import annotations
 
@@ -33,23 +28,20 @@ class AlgoOrderSnapshotError(RuntimeError):
     """Raised when a stable, bounded algo-order snapshot cannot be proven."""
 
 
-def _positive_or_zero(value, field):
+def _number(value, field, *, allow_zero=True):
     if isinstance(value, bool) or value is None:
-        raise AlgoOrderSnapshotError(
-            f"{field}_missing_or_invalid"
-        )
+        raise AlgoOrderSnapshotError(f"{field}_missing_or_invalid")
 
     try:
         number = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
-        raise AlgoOrderSnapshotError(
-            f"{field}_not_numeric"
-        ) from None
+        raise AlgoOrderSnapshotError(f"{field}_not_numeric") from None
 
     if not number.is_finite() or number < 0:
-        raise AlgoOrderSnapshotError(
-            f"{field}_out_of_range"
-        )
+        raise AlgoOrderSnapshotError(f"{field}_out_of_range")
+
+    if not allow_zero and number == 0:
+        raise AlgoOrderSnapshotError(f"{field}_not_positive")
 
     return number
 
@@ -58,148 +50,127 @@ def _order_id(row):
     value = row.get("orderId")
 
     if value is None or isinstance(value, bool):
-        raise AlgoOrderSnapshotError(
-            "algo_order_id_missing"
-        )
+        raise AlgoOrderSnapshotError("algo_order_id_missing")
 
     text = str(value)
 
     if not re.fullmatch(r"[0-9]+", text) or int(text) <= 0:
-        raise AlgoOrderSnapshotError(
-            "algo_order_id_invalid"
-        )
+        raise AlgoOrderSnapshotError("algo_order_id_invalid")
 
     return text
 
 
 def _validate_row(row, category, symbol=None):
     if not isinstance(row, dict):
-        raise AlgoOrderSnapshotError(
-            "algo_order_row_not_object"
-        )
+        raise AlgoOrderSnapshotError("algo_order_row_not_object")
 
     order_id = _order_id(row)
 
     row_symbol = row.get("symbol")
-
     if (
         not isinstance(row_symbol, str)
         or not SYMBOL_PATTERN.fullmatch(row_symbol)
     ):
-        raise AlgoOrderSnapshotError(
-            "algo_order_symbol_invalid"
-        )
+        raise AlgoOrderSnapshotError("algo_order_symbol_invalid")
 
     if symbol is not None and row_symbol != symbol:
-        raise AlgoOrderSnapshotError(
-            "algo_order_symbol_mismatch"
-        )
+        raise AlgoOrderSnapshotError("algo_order_symbol_mismatch")
 
-    side = row.get("side")
-    position_side = row.get("positionSide")
+    if row.get("side") not in ("BUY", "SELL"):
+        raise AlgoOrderSnapshotError("algo_order_side_invalid")
 
-    if (
-        side not in ("BUY", "SELL")
-        or position_side not in ("LONG", "SHORT")
-    ):
-        raise AlgoOrderSnapshotError(
-            "algo_order_side_invalid"
-        )
+    if row.get("positionSide") not in ("LONG", "SHORT"):
+        raise AlgoOrderSnapshotError("algo_order_position_side_invalid")
 
     order_type = row.get("type")
-
     if order_type not in VALID_TYPES:
-        raise AlgoOrderSnapshotError(
-            "algo_order_type_invalid"
-        )
+        raise AlgoOrderSnapshotError("algo_order_type_invalid")
 
-    if category == "STOP" and order_type not in (
-        "STOP",
-        "STOP_MARKET",
-    ):
-        raise AlgoOrderSnapshotError(
-            "algo_order_stop_category_mismatch"
-        )
+    if category == "STOP" and order_type not in ("STOP", "STOP_MARKET"):
+        raise AlgoOrderSnapshotError("algo_order_stop_category_mismatch")
 
     if category == "STOP_PROFIT_LOSS" and order_type not in (
         "STOP_PROFIT_LOSS",
         "STOP_PROFIT_LOSS_MARKET",
     ):
-        raise AlgoOrderSnapshotError(
-            "algo_order_tpsl_category_mismatch"
-        )
+        raise AlgoOrderSnapshotError("algo_order_tpsl_category_mismatch")
 
     if row.get("status") != ACTIVE_STATUS:
         raise AlgoOrderSnapshotError(
             "algo_order_not_active_or_status_unknown"
         )
 
-    _positive_or_zero(
-        row.get("origQty"),
-        "algo_order_orig_qty",
-    )
+    # origQty is expressed in contracts. Zero is valid for full-position
+    # TP/SL, but not accepted as a sized ordinary STOP order.
+    original = _number(row.get("origQty"), "algo_order_orig_qty")
 
-    _positive_or_zero(
-        row.get("executedQty"),
-        "algo_order_executed_qty",
-    )
+    if category == "STOP" and original <= 0:
+        raise AlgoOrderSnapshotError("ordinary_stop_quantity_not_positive")
 
-    stop_price = _positive_or_zero(
-        row.get("stopPrice"),
-        "algo_order_stop_price",
-    )
+    # executedQty is not guaranteed by the documented open-algo response.
+    # Validate it only when the exchange actually supplies it.
+    if "executedQty" in row:
+        _number(row["executedQty"], "algo_order_executed_qty")
 
-    if category == "STOP" and stop_price <= 0:
-        raise AlgoOrderSnapshotError(
-            "algo_order_stop_price_not_positive"
-        )
+    stop_price = _number(row.get("stopPrice"), "algo_order_stop_price")
 
-    if category == "STOP_PROFIT_LOSS":
-        stop_order_type = row.get("stopOrderType")
-
-        if stop_order_type not in (
-            "TAKE_PROFIT",
-            "STOP_LOSS",
-        ):
+    if category == "STOP":
+        if stop_price <= 0:
             raise AlgoOrderSnapshotError(
-                "algo_order_stop_order_type_invalid"
+                "algo_order_stop_price_not_positive"
             )
+        return order_id
 
-        stop_type = row.get("stopType")
+    stop_order_type = row.get("stopOrderType")
+    if stop_order_type not in ("TAKE_PROFIT", "STOP_LOSS"):
+        raise AlgoOrderSnapshotError("algo_order_stop_order_type_invalid")
 
-        if stop_type not in (
-            "FIXED_STOP",
-            "TRAILING_STOP",
-        ):
-            raise AlgoOrderSnapshotError(
-                "algo_order_stop_type_invalid"
-            )
+    stop_type = row.get("stopType")
+    if stop_type not in ("FIXED_STOP", "TRAILING_STOP"):
+        raise AlgoOrderSnapshotError("algo_order_stop_type_invalid")
 
-        if stop_type == "FIXED_STOP" and stop_price <= 0:
+    if stop_type == "FIXED_STOP":
+        if stop_price <= 0:
             raise AlgoOrderSnapshotError(
                 "fixed_tpsl_stop_price_not_positive"
             )
 
+    else:
+        # A trailing stop is only structurally accepted when its callback
+        # configuration is present and valid. Its stopPrice may be zero.
+        fallback_type = row.get("fallbackType")
+        if fallback_type not in ("RATE", "PRICE"):
+            raise AlgoOrderSnapshotError(
+                "trailing_stop_fallback_type_invalid"
+            )
+
+        _number(
+            row.get("fallbackQuantity"),
+            "trailing_stop_fallback_quantity",
+            allow_zero=False,
+        )
+
+        if "activePrice" in row:
+            _number(row["activePrice"], "trailing_stop_active_price")
+
+        if "activeStatus" in row:
+            active_status = row["activeStatus"]
+            if (
+                isinstance(active_status, bool)
+                or active_status not in (0, 1, "0", "1")
+            ):
+                raise AlgoOrderSnapshotError(
+                    "trailing_stop_active_status_invalid"
+                )
+
     return order_id
 
 
-def _scan_category(
-    client,
-    category,
-    *,
-    symbol,
-    limit,
-):
-    method = getattr(
-        client,
-        "_request_v2_get",
-        None,
-    )
+def _scan_category(client, category, *, symbol, limit):
+    method = getattr(client, "_request_v2_get", None)
 
     if not callable(method):
-        raise AlgoOrderSnapshotError(
-            "client_v2_get_method_unavailable"
-        )
+        raise AlgoOrderSnapshotError("client_v2_get_method_unavailable")
 
     params = {
         "category": "USDT",
@@ -211,14 +182,10 @@ def _scan_category(
         params["symbol"] = symbol
 
     try:
-        rows = method(
-            ENDPOINT,
-            params,
-        )
+        rows = method(ENDPOINT, params)
     except Exception as exc:
         raise AlgoOrderSnapshotError(
-            "algo_order_request_failed:"
-            f"{type(exc).__name__}"
+            f"algo_order_request_failed:{type(exc).__name__}"
         ) from None
 
     if (
@@ -229,45 +196,26 @@ def _scan_category(
             "algo_order_response_not_list_of_objects"
         )
 
-    # The published V2 reference identifies orderId as a cursor but
-    # does not define enough cursor ordering/termination semantics
-    # to safely infer a complete multi-page traversal.
-    # Never silently accept a potentially truncated full page.
+    # The cursor's complete traversal semantics are not assumed here.
     if len(rows) >= limit:
-        raise AlgoOrderSnapshotError(
-            "algo_order_page_may_be_truncated"
-        )
+        raise AlgoOrderSnapshotError("algo_order_page_may_be_truncated")
 
     seen = set()
     normalized = []
 
     for row in rows:
-        order_id = _validate_row(
-            row,
-            category,
-            symbol,
-        )
+        order_id = _validate_row(row, category, symbol)
 
         if order_id in seen:
-            raise AlgoOrderSnapshotError(
-                "duplicate_algo_order_id"
-            )
+            raise AlgoOrderSnapshotError("duplicate_algo_order_id")
 
         seen.add(order_id)
         normalized.append(dict(row))
 
-    return sorted(
-        normalized,
-        key=lambda item: int(item["orderId"]),
-    )
+    return sorted(normalized, key=lambda item: int(item["orderId"]))
 
 
-def _scan_all(
-    client,
-    *,
-    symbol,
-    limit,
-):
+def _scan_all(client, *, symbol, limit):
     combined = []
     seen = set()
 
@@ -290,10 +238,7 @@ def _scan_all(
             seen.add(order_id)
             combined.append(row)
 
-    return sorted(
-        combined,
-        key=lambda item: int(item["orderId"]),
-    )
+    return sorted(combined, key=lambda item: int(item["orderId"]))
 
 
 def fetch_stable_v2_algo_order_snapshot(
@@ -307,35 +252,21 @@ def fetch_stable_v2_algo_order_snapshot(
     if client is None:
         raise ValueError("client is required")
 
-    if symbol is not None:
-        if (
-            not isinstance(symbol, str)
-            or not SYMBOL_PATTERN.fullmatch(symbol)
-        ):
-            raise ValueError(
-                "symbol must be a valid USDT-M swap symbol"
-            )
+    if symbol is not None and (
+        not isinstance(symbol, str)
+        or not SYMBOL_PATTERN.fullmatch(symbol)
+    ):
+        raise ValueError("symbol must be a valid USDT-M swap symbol")
 
     if (
         isinstance(limit, bool)
         or not isinstance(limit, int)
         or not 1 <= limit <= 1000
     ):
-        raise ValueError(
-            "limit must be an integer from 1 to 1000"
-        )
+        raise ValueError("limit must be an integer from 1 to 1000")
 
-    first = _scan_all(
-        client,
-        symbol=symbol,
-        limit=limit,
-    )
-
-    second = _scan_all(
-        client,
-        symbol=symbol,
-        limit=limit,
-    )
+    first = _scan_all(client, symbol=symbol, limit=limit)
+    second = _scan_all(client, symbol=symbol, limit=limit)
 
     if first != second:
         raise AlgoOrderSnapshotError(
